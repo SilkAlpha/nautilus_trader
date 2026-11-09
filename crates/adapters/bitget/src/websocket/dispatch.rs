@@ -13,9 +13,9 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! WebSocket message dispatch for the Bybit execution client.
+//! WebSocket message dispatch for the Bitget execution client.
 //!
-//! Routes incoming [`BybitWsMessage`] variants to the appropriate parsing and
+//! Routes incoming [`BitgetWsMessage`] variants to the appropriate parsing and
 //! event emission paths. Tracked orders (submitted through this client) produce
 //! proper order events; untracked orders fall back to execution reports for
 //! downstream reconciliation.
@@ -29,6 +29,7 @@ use ahash::AHashMap;
 use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use dashmap::{DashMap, DashSet};
+use nautilus_common::cache::fifo::FifoCache;
 use nautilus_core::{UUID4, UnixNanos, time::AtomicTime};
 use nautilus_live::ExecutionEventEmitter;
 use nautilus_model::{
@@ -43,38 +44,40 @@ use nautilus_model::{
     orders::TRIGGERABLE_ORDER_TYPES,
     types::{Money, Price, Quantity},
 };
+use parking_lot::Mutex;
 use rust_decimal::Decimal;
 use ustr::Ustr;
 
 use super::{
     messages::{
-        BybitWsAccountExecution, BybitWsAccountExecutionFast, BybitWsAccountOrder, BybitWsMessage,
+        BitgetWsAccountExecution, BitgetWsAccountExecutionFast, BitgetWsAccountOrder,
+        BitgetWsAccountStrategyOrder, BitgetWsMessage,
     },
     parse::{
         parse_millis_i64, parse_ws_account_state, parse_ws_fill_report_fast,
-        parse_ws_position_status_report,
+        parse_ws_position_status_report, parse_ws_strategy_order_status_report,
     },
 };
 use crate::{
     common::{
-        enums::{BybitExecType, BybitOrderSide, BybitOrderStatus, BybitProductType},
+        enums::{BitgetExecType, BitgetOrderSide, BitgetOrderStatus, BitgetProductType},
         parse::{
-            bybit_rejection_due_post_only, get_currency, make_bybit_symbol, parse_millis_timestamp,
-            parse_price_with_precision, parse_quantity_with_precision,
+            bitget_rejection_due_post_only, get_currency, make_bitget_symbol,
+            parse_millis_timestamp, parse_price_with_precision, parse_quantity_with_precision,
         },
     },
-    http::error::is_bybit_ambiguous_order_error_code,
+    http::error::is_bitget_ambiguous_order_error_code,
     repay::RepayRequest,
 };
 
 const DEDUP_CAPACITY: usize = 10_000;
 
-const BYBIT_OP_ORDER_CREATE: &str = "order.create";
-const BYBIT_OP_ORDER_AMEND: &str = "order.amend";
-const BYBIT_OP_ORDER_CANCEL: &str = "order.cancel";
-const BYBIT_OP_ORDER_CREATE_BATCH: &str = "order.create-batch";
-const BYBIT_OP_ORDER_AMEND_BATCH: &str = "order.amend-batch";
-const BYBIT_OP_ORDER_CANCEL_BATCH: &str = "order.cancel-batch";
+const BITGET_OP_ORDER_CREATE: &str = "place-order";
+const BITGET_OP_ORDER_AMEND: &str = "modify-order";
+const BITGET_OP_ORDER_CANCEL: &str = "cancel-order";
+const BITGET_OP_ORDER_CREATE_BATCH: &str = "batch-place";
+const BITGET_OP_ORDER_AMEND_BATCH: &str = "batch-modify";
+const BITGET_OP_ORDER_CANCEL_BATCH: &str = "batch-cancel";
 
 /// Order identity context stored at submission time, used by the WS dispatch
 /// task to produce proper order events without Cache access.
@@ -104,7 +107,7 @@ pub type PendingRequestData = (
 );
 
 /// Snapshot of an order's price, quantity, and trigger price at last dispatch.
-/// Used to detect modifications when Bybit sends back an order with the same
+/// Used to detect modifications when Bitget sends back an order with the same
 /// status but changed fields.
 #[derive(Debug, Clone)]
 pub struct OrderStateSnapshot {
@@ -127,6 +130,10 @@ pub struct WsDispatchState {
     pub emitted_accepted: DashSet<ClientOrderId>,
     pub triggered_orders: DashSet<ClientOrderId>,
     pub filled_orders: DashSet<ClientOrderId>,
+    // Bitget fills carry no leaves quantity: track the filled total per order instead
+    filled_qty: DashMap<ClientOrderId, Quantity>,
+    // `execId`s already emitted; the venue can push a fill again after a reconnect
+    emitted_trades: Mutex<FifoCache<TradeId, DEDUP_CAPACITY>>,
     spot_repay_fills: DashMap<ClientOrderId, SpotRepayFill>,
     repay_tx: ArcSwapOption<tokio::sync::mpsc::UnboundedSender<RepayRequest>>,
     clearing: AtomicBool,
@@ -141,6 +148,8 @@ impl Default for WsDispatchState {
             emitted_accepted: DashSet::default(),
             triggered_orders: DashSet::default(),
             filled_orders: DashSet::default(),
+            filled_qty: DashMap::new(),
+            emitted_trades: Mutex::new(FifoCache::new()),
             spot_repay_fills: DashMap::new(),
             repay_tx: ArcSwapOption::empty(),
             clearing: AtomicBool::new(false),
@@ -176,6 +185,23 @@ impl WsDispatchState {
         self.triggered_orders.insert(cid);
     }
 
+    /// Returns `true` the first time a fill `execId` is seen.
+    fn insert_trade(&self, trade_id: TradeId) -> bool {
+        self.emitted_trades.lock().insert(trade_id)
+    }
+
+    // Adds a fill to the order's filled total and returns whether it completes the known quantity
+    fn record_fill(&self, cid: ClientOrderId, last_qty: Quantity) -> bool {
+        let total = self
+            .filled_qty
+            .get(&cid)
+            .map_or(last_qty, |prev| *prev + last_qty);
+        self.filled_qty.insert(cid, total);
+        self.order_snapshots
+            .get(&cid)
+            .is_some_and(|snapshot| total >= snapshot.quantity)
+    }
+
     pub(crate) fn set_repay_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<RepayRequest>) {
         self.repay_tx.store(Some(Arc::new(tx)));
     }
@@ -200,7 +226,7 @@ impl WsDispatchState {
 /// For untracked orders (external or pre-existing), falls back to execution
 /// reports for downstream reconciliation.
 pub fn dispatch_ws_message(
-    message: &BybitWsMessage,
+    message: &BitgetWsMessage,
     emitter: &ExecutionEventEmitter,
     state: &WsDispatchState,
     account_id: AccountId,
@@ -208,11 +234,11 @@ pub fn dispatch_ws_message(
     clock: &AtomicTime,
 ) {
     match message {
-        BybitWsMessage::AccountOrder(msg) => {
+        BitgetWsMessage::AccountOrder(msg) => {
             let ts_init = clock.get_time_ns();
 
             for order in &msg.data {
-                let symbol = make_bybit_symbol(order.symbol, order.category);
+                let symbol = make_bitget_symbol(order.symbol, order.category);
                 let Some(instrument) = instruments.get(&symbol) else {
                     log::warn!("No instrument for order update: {symbol}");
                     continue;
@@ -220,11 +246,11 @@ pub fn dispatch_ws_message(
                 dispatch_order_update(order, instrument, emitter, state, account_id, ts_init);
             }
         }
-        BybitWsMessage::AccountExecution(msg) => {
+        BitgetWsMessage::AccountExecution(msg) => {
             let ts_init = clock.get_time_ns();
 
             for exec in &msg.data {
-                let symbol = make_bybit_symbol(exec.symbol, exec.category);
+                let symbol = make_bitget_symbol(exec.symbol, exec.category);
                 let Some(instrument) = instruments.get(&symbol) else {
                     log::warn!("No instrument for execution update: {symbol}");
                     continue;
@@ -232,11 +258,25 @@ pub fn dispatch_ws_message(
                 dispatch_execution_fill(exec, instrument, emitter, state, account_id, ts_init);
             }
         }
-        BybitWsMessage::AccountExecutionFast(msg) => {
+        BitgetWsMessage::AccountStrategyOrder(msg) => {
+            let ts_init = clock.get_time_ns();
+
+            for order in &msg.data {
+                let symbol = make_bitget_symbol(order.symbol, order.category);
+                let Some(instrument) = instruments.get(&symbol) else {
+                    log::warn!("No instrument for strategy order update: {symbol}");
+                    continue;
+                };
+                dispatch_strategy_order_update(
+                    order, instrument, emitter, state, account_id, ts_init,
+                );
+            }
+        }
+        BitgetWsMessage::AccountExecutionFast(msg) => {
             let ts_init = clock.get_time_ns();
 
             for exec in &msg.data {
-                let symbol = make_bybit_symbol(exec.symbol, exec.category);
+                let symbol = make_bitget_symbol(exec.symbol, exec.category);
                 let Some(instrument) = instruments.get(&symbol) else {
                     log::warn!("No instrument for fast-execution update: {symbol}");
                     continue;
@@ -244,7 +284,7 @@ pub fn dispatch_ws_message(
                 dispatch_execution_fill_fast(exec, instrument, emitter, state, account_id, ts_init);
             }
         }
-        BybitWsMessage::AccountWallet(msg) => {
+        BitgetWsMessage::AccountWallet(msg) => {
             let ts_init = clock.get_time_ns();
             let ts_event = parse_millis_i64(msg.creation_time, "wallet.creation_time")
                 .unwrap_or_else(|e| {
@@ -259,11 +299,11 @@ pub fn dispatch_ws_message(
                 }
             }
         }
-        BybitWsMessage::AccountPosition(msg) => {
+        BitgetWsMessage::AccountPosition(msg) => {
             let ts_init = clock.get_time_ns();
 
             for position in &msg.data {
-                let symbol = make_bybit_symbol(position.symbol, position.category);
+                let symbol = make_bitget_symbol(position.symbol, position.category());
                 let Some(instrument) = instruments.get(&symbol) else {
                     log::warn!("No instrument for position update: {symbol}");
                     continue;
@@ -275,23 +315,129 @@ pub fn dispatch_ws_message(
                 }
             }
         }
-        BybitWsMessage::OrderResponse(resp) => {
+        BitgetWsMessage::OrderResponse(resp) => {
             let ts_init = clock.get_time_ns();
             dispatch_order_response(resp, emitter, state, ts_init);
         }
-        BybitWsMessage::Error(e) => {
+        BitgetWsMessage::Error(e) => {
             log::warn!("WebSocket error: code={} message={}", e.code, e.message);
         }
-        BybitWsMessage::Reconnected => {
+        BitgetWsMessage::Reconnected => {
             log::info!("WebSocket reconnected");
         }
-        BybitWsMessage::Auth(_)
-        | BybitWsMessage::Orderbook(_)
-        | BybitWsMessage::Trade(_)
-        | BybitWsMessage::Liquidation(_)
-        | BybitWsMessage::Kline(_)
-        | BybitWsMessage::TickerLinear(_)
-        | BybitWsMessage::TickerOption(_) => {}
+        BitgetWsMessage::Auth(_)
+        | BitgetWsMessage::Orderbook(_)
+        | BitgetWsMessage::Trade(_)
+        | BitgetWsMessage::Liquidation(_)
+        | BitgetWsMessage::Kline(_)
+        | BitgetWsMessage::TickerLinear(_)
+        | BitgetWsMessage::TickerOption(_) => {}
+    }
+}
+
+/// Dispatches a single conditional (`strategy-order`) update.
+///
+/// Tracked orders produce lifecycle events; untracked orders fall back to
+/// `OrderStatusReport` for reconciliation. A triggered Bitget strategy order
+/// places a separate child order whose fills arrive on the `fill` channel.
+fn dispatch_strategy_order_update(
+    order: &BitgetWsAccountStrategyOrder,
+    instrument: &InstrumentAny,
+    emitter: &ExecutionEventEmitter,
+    state: &WsDispatchState,
+    account_id: AccountId,
+    ts_init: UnixNanos,
+) {
+    let client_order_id = if order.order_link_id.is_empty() {
+        None
+    } else {
+        Some(ClientOrderId::new(order.order_link_id))
+    };
+
+    let identity = client_order_id
+        .as_ref()
+        .and_then(|cid| state.order_identities.get(cid).map(|r| r.clone()));
+
+    let (Some(client_order_id), Some(identity)) = (client_order_id, identity) else {
+        match parse_ws_strategy_order_status_report(order, instrument, account_id, ts_init) {
+            Ok(report) => emitter.send_order_status_report(report),
+            Err(e) => log::error!("Failed to parse strategy order status report: {e}"),
+        }
+        return;
+    };
+    let venue_order_id = VenueOrderId::new(order.order_id);
+
+    match order.status {
+        BitgetOrderStatus::Untriggered | BitgetOrderStatus::Created | BitgetOrderStatus::New => {
+            ensure_accepted_emitted(
+                client_order_id,
+                account_id,
+                venue_order_id,
+                &identity,
+                emitter,
+                state,
+                ts_init,
+            );
+        }
+        BitgetOrderStatus::Triggered => {
+            ensure_accepted_emitted(
+                client_order_id,
+                account_id,
+                venue_order_id,
+                &identity,
+                emitter,
+                state,
+                ts_init,
+            );
+
+            if TRIGGERABLE_ORDER_TYPES.contains(&identity.order_type)
+                && !state.triggered_orders.contains(&client_order_id)
+            {
+                state.insert_triggered(client_order_id);
+                let triggered = OrderTriggered::new(
+                    emitter.trader_id(),
+                    identity.strategy_id,
+                    identity.instrument_id,
+                    client_order_id,
+                    UUID4::new(),
+                    ts_init,
+                    ts_init,
+                    false,
+                    Some(venue_order_id),
+                    Some(account_id),
+                );
+                emitter.send_order_event(OrderEventAny::Triggered(triggered));
+            }
+        }
+        BitgetOrderStatus::Rejected if !state.emitted_accepted.contains(&client_order_id) => {
+            state.order_identities.remove(&client_order_id);
+            state.order_snapshots.remove(&client_order_id);
+            emitter.emit_order_rejected_event(
+                identity.strategy_id,
+                identity.instrument_id,
+                client_order_id,
+                "Strategy order failed",
+                ts_init,
+                false,
+            );
+        }
+        _ => {
+            let canceled = OrderCanceled::new(
+                emitter.trader_id(),
+                identity.strategy_id,
+                identity.instrument_id,
+                client_order_id,
+                UUID4::new(),
+                ts_init,
+                ts_init,
+                false,
+                Some(venue_order_id),
+                Some(account_id),
+                None,
+            );
+            cleanup_terminal(client_order_id, state);
+            emitter.send_order_event(OrderEventAny::Canceled(canceled));
+        }
     }
 }
 
@@ -301,7 +447,7 @@ pub fn dispatch_ws_message(
 /// OrderCanceled, OrderRejected). Untracked orders fall back to
 /// `OrderStatusReport` for reconciliation.
 fn dispatch_order_update(
-    order: &BybitWsAccountOrder,
+    order: &BitgetWsAccountOrder,
     instrument: &InstrumentAny,
     emitter: &ExecutionEventEmitter,
     state: &WsDispatchState,
@@ -322,7 +468,9 @@ fn dispatch_order_update(
         let venue_order_id = VenueOrderId::new(order.order_id);
 
         match order.order_status {
-            BybitOrderStatus::Created | BybitOrderStatus::New | BybitOrderStatus::Untriggered => {
+            BitgetOrderStatus::Created
+            | BitgetOrderStatus::New
+            | BitgetOrderStatus::Untriggered => {
                 let snapshot = parse_order_snapshot(order, instrument);
 
                 if state.emitted_accepted.contains(&client_order_id)
@@ -406,7 +554,7 @@ fn dispatch_order_update(
                     emitter.send_order_event(OrderEventAny::Updated(updated));
                 }
             }
-            BybitOrderStatus::Triggered => {
+            BitgetOrderStatus::Triggered => {
                 if state.filled_orders.contains(&client_order_id) {
                     log::debug!("Skipping stale Triggered for {client_order_id} (already filled)");
                     return;
@@ -444,7 +592,7 @@ fn dispatch_order_update(
                 );
                 emitter.send_order_event(OrderEventAny::Triggered(triggered));
             }
-            BybitOrderStatus::Rejected => {
+            BitgetOrderStatus::Rejected => {
                 let filled_qty = parse_quantity_with_precision(
                     &order.cum_exec_qty,
                     instrument.size_precision(),
@@ -492,11 +640,11 @@ fn dispatch_order_update(
                         client_order_id,
                         reason.as_str(),
                         ts_init,
-                        bybit_rejection_due_post_only(reason.as_str()),
+                        bitget_rejection_due_post_only(reason.as_str()),
                     );
                 }
             }
-            BybitOrderStatus::PartiallyFilled => {
+            BitgetOrderStatus::PartiallyFilled => {
                 // Fills arrive on the execution channel; no event needed here.
                 // Ensure accepted was emitted so the fill has a valid prior state.
                 ensure_accepted_emitted(
@@ -536,7 +684,7 @@ fn dispatch_order_update(
                     emitter.send_order_event(OrderEventAny::Updated(updated));
                 }
             }
-            BybitOrderStatus::Filled => {
+            BitgetOrderStatus::Filled => {
                 // Fills arrive on the execution channel; no event needed here.
                 // Ensure accepted was emitted so the fill has a valid prior state.
                 ensure_accepted_emitted(
@@ -574,13 +722,26 @@ fn dispatch_order_update(
                     state.order_snapshots.insert(client_order_id, snapshot);
                     emitter.send_order_event(OrderEventAny::Updated(updated));
                 }
-                // Identity cleaned up in dispatch_execution_fill when leaves_qty
-                // reaches zero, since there is no guaranteed ordering between
-                // the order and execution topics.
+
+                // Bitget fills carry no leaves quantity: keep the order quantity so the fill
+                // path can clean up, or clean up now if the fills already arrived (the order
+                // and fill topics have no guaranteed ordering)
+                if let Some(snapshot) = parse_order_snapshot(order, instrument) {
+                    let quantity = snapshot.quantity;
+                    state
+                        .order_snapshots
+                        .entry(client_order_id)
+                        .or_insert(snapshot);
+                    let filled = state.filled_qty.get(&client_order_id).map(|q| *q);
+
+                    if filled.is_some_and(|filled| filled >= quantity) {
+                        cleanup_terminal(client_order_id, state);
+                    }
+                }
             }
-            BybitOrderStatus::Canceled
-            | BybitOrderStatus::PartiallyFilledCanceled
-            | BybitOrderStatus::Deactivated => {
+            BitgetOrderStatus::Canceled
+            | BitgetOrderStatus::PartiallyFilledCanceled
+            | BitgetOrderStatus::Deactivated => {
                 let filled_qty = parse_quantity_with_precision(
                     &order.cum_exec_qty,
                     instrument.size_precision(),
@@ -588,11 +749,11 @@ fn dispatch_order_update(
                 )
                 .unwrap_or_default();
 
-                // Bybit reports a post-only order that would take liquidity as
+                // Bitget reports a post-only order that would take liquidity as
                 // Cancelled with rejectReason=EC_PostOnlyWillTakeLiquidity,
                 // not Rejected. Surface it as OrderRejected carrying due_post_only.
                 if filled_qty.is_zero()
-                    && bybit_rejection_due_post_only(order.reject_reason.as_str())
+                    && bitget_rejection_due_post_only(order.reject_reason.as_str())
                 {
                     cleanup_terminal(client_order_id, state);
                     emitter.emit_order_rejected_event(
@@ -645,14 +806,16 @@ fn dispatch_order_update(
 /// Tracked orders are parsed directly to [`OrderFilled`]. Untracked orders
 /// fall back to [`FillReport`] for reconciliation.
 fn dispatch_execution_fill(
-    exec: &BybitWsAccountExecution,
+    exec: &BitgetWsAccountExecution,
     instrument: &InstrumentAny,
     emitter: &ExecutionEventEmitter,
     state: &WsDispatchState,
     account_id: AccountId,
     ts_init: UnixNanos,
 ) {
-    if exec.exec_type == BybitExecType::Funding {
+    let exec_type = exec.exec_type();
+
+    if exec_type == BitgetExecType::Funding {
         log::debug!(
             "Skipping funding execution: symbol={}, order_id={}, exec_id={}",
             exec.symbol,
@@ -662,10 +825,10 @@ fn dispatch_execution_fill(
         return;
     }
 
-    if exec.exec_type.is_exchange_generated() {
+    if exec_type.is_exchange_generated() {
         log::warn!(
             "Exchange-generated execution: exec_type={:?}, symbol={}, order_id={}, order_link_id={}, side={:?}, qty={}, price={}",
-            exec.exec_type,
+            exec_type,
             exec.symbol,
             exec.order_id,
             exec.order_link_id,
@@ -673,6 +836,13 @@ fn dispatch_execution_fill(
             exec.exec_qty,
             exec.exec_price,
         );
+    }
+
+    if let Ok(trade_id) = TradeId::new_checked(exec.exec_id.as_str())
+        && !state.insert_trade(trade_id)
+    {
+        log::debug!("Skipping duplicate execution: exec_id={}", exec.exec_id);
+        return;
     }
 
     let client_order_id = if exec.order_link_id.is_empty() {
@@ -701,7 +871,7 @@ fn dispatch_execution_fill(
         match parse_order_filled(exec, instrument, &identity, emitter, account_id, ts_init) {
             Ok(filled) => {
                 let is_spot_buy =
-                    exec.category == BybitProductType::Spot && exec.side == BybitOrderSide::Buy;
+                    exec.category == BitgetProductType::Spot && exec.side == BitgetOrderSide::Buy;
 
                 if is_spot_buy {
                     record_spot_repay_fill(client_order_id, &filled, instrument, state);
@@ -709,9 +879,10 @@ fn dispatch_execution_fill(
 
                 state.insert_filled(client_order_id);
                 state.triggered_orders.remove(&client_order_id);
+                let is_complete = state.record_fill(client_order_id, filled.last_qty);
                 emitter.send_order_event(OrderEventAny::Filled(filled));
 
-                if exec.leaves_qty == "0" {
+                if is_complete {
                     if is_spot_buy {
                         enqueue_spot_repay(client_order_id, instrument, state);
                     }
@@ -731,12 +902,12 @@ fn dispatch_execution_fill(
 
 /// Dispatches a single fast-execution (fill) message.
 ///
-/// The fast channel lacks fee and exec-type fields, so all fills route to
+/// The fast channel lacks fee and trade-side fields, so all fills route to
 /// [`FillReport`] with zero commission; liquidity side is derived from the
-/// payload's `isMaker` flag. Subscribe to the standard `execution` channel
+/// payload's `tradeScope`. Subscribe to the standard `fill` channel
 /// for full fill metadata (e.g. fees).
 fn dispatch_execution_fill_fast(
-    exec: &BybitWsAccountExecutionFast,
+    exec: &BitgetWsAccountExecutionFast,
     instrument: &InstrumentAny,
     emitter: &ExecutionEventEmitter,
     state: &WsDispatchState,
@@ -773,9 +944,9 @@ fn dispatch_execution_fill_fast(
     }
 }
 
-/// Parses a Bybit execution message directly into an [`OrderFilled`] event.
+/// Parses a Bitget execution message directly into an [`OrderFilled`] event.
 fn parse_order_filled(
-    exec: &BybitWsAccountExecution,
+    exec: &BitgetWsAccountExecution,
     instrument: &InstrumentAny,
     identity: &OrderIdentity,
     emitter: &ExecutionEventEmitter,
@@ -784,8 +955,8 @@ fn parse_order_filled(
 ) -> anyhow::Result<OrderFilled> {
     let client_order_id = ClientOrderId::new(exec.order_link_id);
     let venue_order_id = VenueOrderId::new(exec.order_id);
-    let trade_id =
-        TradeId::new_checked(exec.exec_id.as_str()).context("invalid execId in Bybit execution")?;
+    let trade_id = TradeId::new_checked(exec.exec_id.as_str())
+        .context("invalid execId in Bitget execution")?;
 
     let last_qty = parse_quantity_with_precision(
         &exec.exec_qty,
@@ -804,17 +975,12 @@ fn parse_order_filled(
         LiquiditySide::Taker
     };
 
-    let fee_decimal: Decimal = exec
-        .exec_fee
-        .parse()
-        .with_context(|| format!("failed to parse execFee='{}'", exec.exec_fee))?;
-    let commission_currency = get_currency(&exec.fee_currency);
-    let commission = Money::from_decimal(fee_decimal, commission_currency).with_context(|| {
-        format!(
-            "failed to create commission from execFee='{}'",
-            exec.exec_fee
-        )
-    })?;
+    // Bitget lists fees per coin in `feeDetail` (positive = cost)
+    let (fee_decimal, fee_coin) = exec.exec_fee()?;
+    let commission_currency =
+        fee_coin.map_or_else(|| instrument.quote_currency(), |coin| get_currency(&coin));
+    let commission = Money::from_decimal(fee_decimal, commission_currency)
+        .with_context(|| format!("failed to create commission from feeDetail={fee_decimal}"))?;
 
     let ts_event = parse_millis_timestamp(&exec.exec_time, "execution.execTime")?;
 
@@ -842,9 +1008,9 @@ fn parse_order_filled(
     ))
 }
 
-/// Handles a Bybit WS order command response.
+/// Handles a Bitget WS order command response.
 fn dispatch_order_response(
-    resp: &super::messages::BybitWsOrderResponse,
+    resp: &super::messages::BitgetWsOrderResponse,
     emitter: &ExecutionEventEmitter,
     state: &WsDispatchState,
     ts_init: UnixNanos,
@@ -866,7 +1032,7 @@ fn dispatch_order_response(
                     continue;
                 }
 
-                if is_bybit_ambiguous_order_error_code(error.code) {
+                if is_bitget_ambiguous_order_error_code(error.code) {
                     log::warn!(
                         "Ambiguous batch order item failure at index {idx}: code={}, msg={}; awaiting reconciliation",
                         error.code,
@@ -926,7 +1092,7 @@ fn dispatch_order_response(
         || pending.as_ref().is_some_and(|(cids, _, _)| cids.len() > 1);
 
     if is_batch_response {
-        if is_bybit_ambiguous_order_error_code(resp.ret_code) {
+        if is_bitget_ambiguous_order_error_code(resp.ret_code) {
             let order_count = pending.as_ref().map_or(0, |(cids, _, _)| cids.len());
             log::warn!(
                 "Ambiguous batch order response failure for {order_count} orders: op={}, ret_code={}, ret_msg={}; awaiting reconciliation",
@@ -975,7 +1141,7 @@ fn dispatch_order_response(
         return;
     }
 
-    if is_bybit_ambiguous_order_error_code(resp.ret_code) {
+    if is_bitget_ambiguous_order_error_code(resp.ret_code) {
         log::warn!(
             "Ambiguous order response failure: op={}, ret_code={}, ret_msg={}; awaiting reconciliation",
             resp.op,
@@ -1093,9 +1259,9 @@ fn emit_rejection_for_op(
 /// Maps an operation string to a `PendingOperation`.
 fn pending_op_from_str(op: &str) -> Option<PendingOperation> {
     match op {
-        BYBIT_OP_ORDER_CREATE => Some(PendingOperation::Place),
-        BYBIT_OP_ORDER_CANCEL => Some(PendingOperation::Cancel),
-        BYBIT_OP_ORDER_AMEND => Some(PendingOperation::Amend),
+        BITGET_OP_ORDER_CREATE => Some(PendingOperation::Place),
+        BITGET_OP_ORDER_CANCEL => Some(PendingOperation::Cancel),
+        BITGET_OP_ORDER_AMEND => Some(PendingOperation::Amend),
         _ => None,
     }
 }
@@ -1103,13 +1269,13 @@ fn pending_op_from_str(op: &str) -> Option<PendingOperation> {
 fn is_batch_order_op(op: &str) -> bool {
     matches!(
         op,
-        BYBIT_OP_ORDER_CREATE_BATCH | BYBIT_OP_ORDER_AMEND_BATCH | BYBIT_OP_ORDER_CANCEL_BATCH
+        BITGET_OP_ORDER_CREATE_BATCH | BITGET_OP_ORDER_AMEND_BATCH | BITGET_OP_ORDER_CANCEL_BATCH
     )
 }
 
 /// Parses an order snapshot from a WS order message for modification detection.
 fn parse_order_snapshot(
-    order: &BybitWsAccountOrder,
+    order: &BitgetWsAccountOrder,
     instrument: &InstrumentAny,
 ) -> Option<OrderStateSnapshot> {
     let quantity =
@@ -1121,21 +1287,11 @@ fn parse_order_snapshot(
         None
     };
 
-    let trigger_price = if !order.trigger_price.is_empty() && order.trigger_price != "0" {
-        parse_price_with_precision(
-            &order.trigger_price,
-            instrument.price_precision(),
-            "order.triggerPrice",
-        )
-        .ok()
-    } else {
-        None
-    };
-
+    // Plain orders carry no trigger price on Bitget
     Some(OrderStateSnapshot {
         quantity,
         price,
-        trigger_price,
+        trigger_price: None,
     })
 }
 
@@ -1166,7 +1322,7 @@ fn is_snapshot_updated(
 }
 
 /// Synthesizes and emits `OrderAccepted` if one has not yet been emitted for
-/// this order. Handles fast-filling orders that skip the `New` state on Bybit.
+/// this order. Handles fast-filling orders that skip the `New` state on Bitget.
 fn ensure_accepted_emitted(
     client_order_id: ClientOrderId,
     account_id: AccountId,
@@ -1202,20 +1358,23 @@ fn cleanup_terminal(client_order_id: ClientOrderId, state: &WsDispatchState) {
     state.emitted_accepted.remove(&client_order_id);
     state.triggered_orders.remove(&client_order_id);
     state.filled_orders.remove(&client_order_id);
+    state.filled_qty.remove(&client_order_id);
     state.spot_repay_fills.remove(&client_order_id);
 }
 
-/// Tries to extract `orderLinkId` from the response data Value.
+/// Tries to extract `clientOid` from a response `args` item (or the first item of the list).
 fn extract_order_link_id_from_data(data: &serde_json::Value) -> Option<ClientOrderId> {
-    data.get("orderLinkId")
+    let item = data.as_array().map_or(Some(data), |arr| arr.first())?;
+    item.get("clientOid")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(ClientOrderId::new)
 }
 
-/// Tries to extract `orderId` from the response data Value.
+/// Tries to extract `orderId` from a response `args` item (or the first item of the list).
 fn extract_venue_order_id_from_data(data: &serde_json::Value) -> Option<VenueOrderId> {
-    data.get("orderId")
+    let item = data.as_array().map_or(Some(data), |arr| arr.first())?;
+    item.get("orderId")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(VenueOrderId::new)
@@ -1293,27 +1452,28 @@ mod tests {
     use super::*;
     use crate::{
         common::{
-            enums::{BybitExecType, BybitOrderSide, BybitProductType},
+            enums::{BitgetOrderSide, BitgetProductType},
             parse::{parse_linear_instrument, parse_spot_instrument},
             testing::load_test_json,
         },
-        http::models::{BybitInstrumentLinearResponse, BybitInstrumentSpotResponse},
+        http::models::{BitgetInstrumentLinearResponse, BitgetInstrumentSpotResponse},
         websocket::messages::{
-            BybitWsAccountExecutionFastMsg, BybitWsMessage, BybitWsOrderResponse,
+            BitgetWsAccountExecutionFastMsg, BitgetWsMessage, BitgetWsOrderResponse,
         },
     };
 
     fn linear_instrument() -> InstrumentAny {
         let json = load_test_json("http_get_instruments_linear.json");
-        let response: BybitInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
-        let instrument = &response.result.list[0];
+        let response: BitgetInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
+        // TSLAUSDT: private frames were captured on the demo account with TSLAUSDT
+        let instrument = &response.result.list[2];
         let ts = UnixNanos::new(1_700_000_000_000_000_000);
         parse_linear_instrument(instrument, ts, ts).unwrap()
     }
 
     fn spot_instrument() -> InstrumentAny {
         let json = load_test_json("http_get_instruments_spot.json");
-        let response: BybitInstrumentSpotResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentSpotResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
         let ts = UnixNanos::new(1_700_000_000_000_000_000);
         parse_spot_instrument(instrument, ts, ts).unwrap()
@@ -1328,7 +1488,7 @@ mod tests {
     }
 
     fn test_account_id() -> AccountId {
-        AccountId::from("BYBIT-001")
+        AccountId::from("BITGET-001")
     }
 
     fn create_emitter() -> (
@@ -1347,7 +1507,7 @@ mod tests {
 
     fn default_identity() -> OrderIdentity {
         OrderIdentity {
-            instrument_id: InstrumentId::from("BTCUSDT-LINEAR.BYBIT"),
+            instrument_id: InstrumentId::from("TSLAUSDT-PERP.BITGET"),
             strategy_id: StrategyId::from("S-001"),
             order_side: OrderSide::Buy,
             order_type: OrderType::Limit,
@@ -1377,28 +1537,35 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value["data"][0]["category"] = serde_json::Value::String("spot".to_string());
         value["data"][0]["symbol"] = serde_json::Value::String("BTCUSDT".to_string());
-        value["data"][0]["side"] = serde_json::Value::String("Buy".to_string());
-        value["data"][0]["orderType"] = serde_json::Value::String("Market".to_string());
-        value["data"][0]["orderQty"] = serde_json::Value::String("100".to_string());
+        value["data"][0]["side"] = serde_json::Value::String("buy".to_string());
+        value["data"][0]["orderType"] = serde_json::Value::String("market".to_string());
         value["data"][0]["execQty"] = serde_json::Value::String("0.0015".to_string());
-        value["data"][0]["leavesQty"] = serde_json::Value::String("0.0025".to_string());
-        value["data"][0]["execFee"] = serde_json::Value::String(first_fee.to_string());
-        value["data"][0]["feeCurrency"] = serde_json::Value::String(fee_currency.to_string());
+        value["data"][0]["feeDetail"] =
+            serde_json::json!([{"feeCoin": fee_currency, "fee": first_fee}]);
 
-        let first: crate::websocket::messages::BybitWsAccountExecutionMsg =
+        let first: crate::websocket::messages::BitgetWsAccountExecutionMsg =
             serde_json::from_value(value.clone()).unwrap();
         let client_order_id = ClientOrderId::new(first.data[0].order_link_id);
         state.order_identities.insert(
             client_order_id,
             OrderIdentity {
-                instrument_id: InstrumentId::from("BTCUSDT-SPOT.BYBIT"),
+                instrument_id: InstrumentId::from("BTCUSDT-SPOT.BITGET"),
                 order_type: OrderType::Market,
                 ..default_identity()
             },
         );
+        // Bitget fills carry no leaves quantity: the order quantity comes from its order push
+        state.order_snapshots.insert(
+            client_order_id,
+            OrderStateSnapshot {
+                quantity: Quantity::from("0.0040"),
+                price: None,
+                trigger_price: None,
+            },
+        );
 
         dispatch_ws_message(
-            &BybitWsMessage::AccountExecution(first),
+            &BitgetWsMessage::AccountExecution(first),
             &emitter,
             &state,
             test_account_id(),
@@ -1407,15 +1574,15 @@ mod tests {
         );
         assert!(repay_rx.try_recv().is_err());
 
-        value["data"][0]["execId"] = serde_json::Value::String("second-execution".to_string());
+        value["data"][0]["execId"] = serde_json::Value::String("1503520323400871999".to_string());
         value["data"][0]["execQty"] = serde_json::Value::String("0.0025".to_string());
-        value["data"][0]["leavesQty"] = serde_json::Value::String("0".to_string());
-        value["data"][0]["execFee"] = serde_json::Value::String(second_fee.to_string());
-        let second: crate::websocket::messages::BybitWsAccountExecutionMsg =
+        value["data"][0]["feeDetail"] =
+            serde_json::json!([{"feeCoin": fee_currency, "fee": second_fee}]);
+        let second: crate::websocket::messages::BitgetWsAccountExecutionMsg =
             serde_json::from_value(value).unwrap();
 
         dispatch_ws_message(
-            &BybitWsMessage::AccountExecution(second),
+            &BitgetWsMessage::AccountExecution(second),
             &emitter,
             &state,
             test_account_id(),
@@ -1442,9 +1609,9 @@ mod tests {
         let clock = get_atomic_clock_realtime();
         let state = WsDispatchState::default();
 
-        // Fixture has orderStatus=Cancelled
-        let json = load_test_json("ws_account_order.json");
-        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+        // Fixture has orderStatus=cancelled, cancelReason=normal_cancel
+        let json = load_test_json("ws_account_order_cancelled.json");
+        let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
             serde_json::from_str(&json).unwrap();
 
         if let Some(order) = msg.data.first()
@@ -1454,7 +1621,7 @@ mod tests {
             state.order_identities.insert(cid, default_identity());
         }
 
-        let ws_msg = BybitWsMessage::AccountOrder(msg);
+        let ws_msg = BitgetWsMessage::AccountOrder(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1481,7 +1648,7 @@ mod tests {
 
     #[rstest]
     fn test_dispatch_tracked_post_only_cancel_emits_rejected() {
-        const BYBIT_POST_ONLY_REJECT_REASON: &str = "EC_PostOnlyWillTakeLiquidity";
+        const BITGET_POST_ONLY_REJECT_REASON: &str = "post_only_fill_cancel";
 
         let instrument = linear_instrument();
         let instruments = build_instruments(std::slice::from_ref(&instrument));
@@ -1489,19 +1656,19 @@ mod tests {
         let clock = get_atomic_clock_realtime();
         let state = WsDispatchState::default();
 
-        // Bybit reports a post-only order that would take liquidity as
-        // orderStatus=Cancelled with rejectReason=EC_PostOnlyWillTakeLiquidity.
-        let json = load_test_json("ws_account_order.json");
-        let mut msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+        // Bitget reports a post-only order that would take liquidity as
+        // orderStatus=cancelled with cancelReason=post_only_fill_cancel.
+        let json = load_test_json("ws_account_order_post_only_rejected.json");
+        let mut msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
             serde_json::from_str(&json).unwrap();
 
         let order = msg.data.first_mut().expect("fixture has an order");
-        order.reject_reason = Ustr::from(BYBIT_POST_ONLY_REJECT_REASON);
+        order.reject_reason = Ustr::from(BITGET_POST_ONLY_REJECT_REASON);
         order.cum_exec_qty = "0".to_string();
         let cid = ClientOrderId::new(order.order_link_id);
         state.order_identities.insert(cid, default_identity());
 
-        let ws_msg = BybitWsMessage::AccountOrder(msg);
+        let ws_msg = BitgetWsMessage::AccountOrder(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1516,7 +1683,7 @@ mod tests {
             panic!("Expected Rejected, found {event:?}");
         };
         assert!(rejected.due_post_only);
-        assert_eq!(rejected.reason, BYBIT_POST_ONLY_REJECT_REASON);
+        assert_eq!(rejected.reason, BITGET_POST_ONLY_REJECT_REASON);
         assert_eq!(rejected.client_order_id, cid);
         assert!(rx.try_recv().is_err(), "expected only a single event");
     }
@@ -1530,11 +1697,11 @@ mod tests {
         let state = WsDispatchState::default();
 
         let json = load_test_json("ws_account_order.json");
-        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
             serde_json::from_str(&json).unwrap();
 
         // No identity registered → untracked
-        let ws_msg = BybitWsMessage::AccountOrder(msg);
+        let ws_msg = BitgetWsMessage::AccountOrder(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1560,7 +1727,7 @@ mod tests {
         let state = WsDispatchState::default();
 
         let json = load_test_json("ws_account_execution.json");
-        let msg: crate::websocket::messages::BybitWsAccountExecutionMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountExecutionMsg =
             serde_json::from_str(&json).unwrap();
 
         // Register identity for the execution's orderLinkId
@@ -1571,7 +1738,7 @@ mod tests {
             state.order_identities.insert(cid, default_identity());
         }
 
-        let ws_msg = BybitWsMessage::AccountExecution(msg);
+        let ws_msg = BitgetWsMessage::AccountExecution(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1606,11 +1773,11 @@ mod tests {
         let (emitter, _rx) = create_emitter();
 
         let json = load_test_json("ws_account_execution.json");
-        let msg: crate::websocket::messages::BybitWsAccountExecutionMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountExecutionMsg =
             serde_json::from_str(&json).unwrap();
 
         let mut exec = msg.data[0].clone();
-        exec.fee_currency = Ustr::from("BTC");
+        exec.fee_detail[0].fee_coin = Some(Ustr::from("BTC"));
 
         let filled = parse_order_filled(
             &exec,
@@ -1635,9 +1802,9 @@ mod tests {
         let state = WsDispatchState::default();
 
         let json = load_test_json("ws_account_execution.json");
-        let msg: crate::websocket::messages::BybitWsAccountExecutionMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountExecutionMsg =
             serde_json::from_str(&json).unwrap();
-        let venue_position_id = PositionId::from("BTCUSDT-LINEAR.BYBIT-LONG");
+        let venue_position_id = PositionId::from("TSLAUSDT-PERP.BITGET-LONG");
 
         if let Some(exec) = msg.data.first()
             && !exec.order_link_id.is_empty()
@@ -1652,7 +1819,7 @@ mod tests {
             );
         }
 
-        let ws_msg = BybitWsMessage::AccountExecution(msg);
+        let ws_msg = BitgetWsMessage::AccountExecution(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1672,23 +1839,21 @@ mod tests {
         }
     }
 
-    fn fast_execution_msg(is_maker: bool, order_link_id: &str) -> BybitWsAccountExecutionFastMsg {
-        BybitWsAccountExecutionFastMsg {
-            topic: Ustr::from("execution.fast"),
-            id: String::new(),
-            creation_time: 1_716_800_399_338,
-            data: vec![BybitWsAccountExecutionFast {
-                category: BybitProductType::Linear,
-                symbol: Ustr::from("BTCUSDT"),
+    fn fast_execution_msg(is_maker: bool, order_link_id: &str) -> BitgetWsAccountExecutionFastMsg {
+        BitgetWsAccountExecutionFastMsg {
+            topic: Ustr::from("fast-fill"),
+            creation_time: 1_794_193_099_834,
+            data: vec![BitgetWsAccountExecutionFast {
+                category: BitgetProductType::Linear,
+                symbol: Ustr::from("TSLAUSDT"),
                 exec_id: "fast-1".to_string(),
-                exec_price: "50000.0".to_string(),
-                exec_qty: "0.5".to_string(),
+                exec_price: "360.72".to_string(),
+                exec_qty: "0.02".to_string(),
                 order_id: Ustr::from("ord-1"),
                 order_link_id: Ustr::from(order_link_id),
-                side: BybitOrderSide::Buy,
-                exec_time: "1716800399334".to_string(),
+                side: BitgetOrderSide::Buy,
+                exec_time: "1794193099832".to_string(),
                 is_maker,
-                seq: 42,
             }],
         }
     }
@@ -1700,7 +1865,7 @@ mod tests {
         let (emitter, mut rx) = create_emitter();
         let clock = get_atomic_clock_realtime();
         let state = WsDispatchState::default();
-        let venue_position_id = PositionId::from("BTCUSDT-LINEAR.BYBIT-LONG");
+        let venue_position_id = PositionId::from("TSLAUSDT-PERP.BITGET-LONG");
 
         // Taker fast fill (orderLinkId populated) so the identity lookup hits.
         let msg = fast_execution_msg(false, "link-1");
@@ -1713,7 +1878,7 @@ mod tests {
             },
         );
 
-        let ws_msg = BybitWsMessage::AccountExecutionFast(msg);
+        let ws_msg = BitgetWsMessage::AccountExecutionFast(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1751,7 +1916,7 @@ mod tests {
 
         // Maker fast fill: orderLinkId is empty per venue docs, so no identity lookup.
         let msg = fast_execution_msg(true, "");
-        let ws_msg = BybitWsMessage::AccountExecutionFast(msg);
+        let ws_msg = BitgetWsMessage::AccountExecutionFast(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1783,11 +1948,11 @@ mod tests {
         let state = WsDispatchState::default();
 
         let json = load_test_json("ws_account_execution.json");
-        let msg: crate::websocket::messages::BybitWsAccountExecutionMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountExecutionMsg =
             serde_json::from_str(&json).unwrap();
 
         // No identity registered → untracked
-        let ws_msg = BybitWsMessage::AccountExecution(msg);
+        let ws_msg = BitgetWsMessage::AccountExecution(msg);
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1805,70 +1970,31 @@ mod tests {
     }
 
     #[rstest]
-    #[case::untracked("")]
-    #[case::tracked("test-order-link-001")]
-    fn test_dispatch_funding_execution_emits_no_event(#[case] order_link_id: &str) {
+    #[case::liquidation("burst_sell_single")]
+    #[case::adl("dte_sys_adl_sell_in_single_side_mode")]
+    #[case::corporate_action("dte_rebase_sell_in_single_side_mode")]
+    #[case::delivery("delivery_sell_single")]
+    #[case::unrecognized("some_future_trade_side")]
+    fn test_dispatch_venue_initiated_execution_emits_only_fill_report(#[case] trade_side: &str) {
         let instrument = linear_instrument();
         let instruments = build_instruments(std::slice::from_ref(&instrument));
         let (emitter, mut rx) = create_emitter();
         let clock = get_atomic_clock_realtime();
         let state = WsDispatchState::default();
 
-        let json = load_test_json("ws_account_execution_funding.json");
+        // Venue-initiated fills (liquidation, ADL, corporate action) carry no clientOid
+        let json = load_test_json("ws_account_execution.json");
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        value["data"][0]["orderLinkId"] = serde_json::Value::String(order_link_id.to_string());
-        let msg: crate::websocket::messages::BybitWsAccountExecutionMsg =
-            serde_json::from_value(value).unwrap();
-        let execution = &msg.data[0];
-
-        assert_eq!(execution.exec_type, BybitExecType::Funding);
-
-        if !execution.order_link_id.is_empty() {
-            state.order_identities.insert(
-                ClientOrderId::new(execution.order_link_id),
-                default_identity(),
-            );
-        }
-
-        dispatch_ws_message(
-            &BybitWsMessage::AccountExecution(msg),
-            &emitter,
-            &state,
-            test_account_id(),
-            &instruments,
-            clock,
-        );
-
-        assert!(matches!(
-            rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-    }
-
-    #[rstest]
-    #[case::corporate_action("CorporateAction")]
-    #[case::forward_split_settle("ForwardSplitSettle")]
-    #[case::reverse_split_settle("ReverseSplitSettle")]
-    #[case::dividend("Dividend")]
-    #[case::unrecognized("StockMerger")]
-    fn test_dispatch_venue_initiated_execution_emits_only_fill_report(#[case] exec_type: &str) {
-        let instrument = linear_instrument();
-        let instruments = build_instruments(std::slice::from_ref(&instrument));
-        let (emitter, mut rx) = create_emitter();
-        let clock = get_atomic_clock_realtime();
-        let state = WsDispatchState::default();
-
-        let json = load_test_json("ws_account_execution_adl.json");
-        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        value["data"][0]["execType"] = serde_json::Value::String(exec_type.to_string());
-        let msg: crate::websocket::messages::BybitWsAccountExecutionMsg =
+        value["data"][0]["tradeSide"] = serde_json::Value::String(trade_side.to_string());
+        value["data"][0]["clientOid"] = serde_json::Value::String(String::new());
+        let msg: crate::websocket::messages::BitgetWsAccountExecutionMsg =
             serde_json::from_value(value).unwrap();
         let execution = &msg.data[0];
 
         assert!(execution.order_link_id.is_empty());
 
         dispatch_ws_message(
-            &BybitWsMessage::AccountExecution(msg),
+            &BitgetWsMessage::AccountExecution(msg),
             &emitter,
             &state,
             test_account_id(),
@@ -1882,7 +2008,7 @@ mod tests {
                 assert_eq!(report.client_order_id, None);
                 assert_eq!(
                     report.venue_order_id,
-                    VenueOrderId::from("9aac161b-8ed6-450d-9cab-c5cc67c21785")
+                    VenueOrderId::from("1503520323393708032")
                 );
             }
             other => panic!("Expected FillReport, found {other:?}"),
@@ -1898,9 +2024,9 @@ mod tests {
         let state = WsDispatchState::default();
 
         let json = load_test_json("ws_account_wallet.json");
-        let msg: crate::websocket::messages::BybitWsAccountWalletMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountWalletMsg =
             serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::AccountWallet(msg);
+        let ws_msg = BitgetWsMessage::AccountWallet(msg);
 
         dispatch_ws_message(
             &ws_msg,
@@ -1923,8 +2049,9 @@ mod tests {
         let state = WsDispatchState::default();
 
         let json = load_test_json("ws_public_trade.json");
-        let msg: crate::websocket::messages::BybitWsTradeMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::Trade(msg);
+        let msg: crate::websocket::messages::BitgetWsTradeMsg =
+            serde_json::from_str(&json).unwrap();
+        let ws_msg = BitgetWsMessage::Trade(msg);
 
         dispatch_ws_message(
             &ws_msg,
@@ -1946,11 +2073,10 @@ mod tests {
         let clock = get_atomic_clock_realtime();
         let state = WsDispatchState::default();
 
-        // Fixture has orderStatus=Cancelled. Patch to New for this dedup test.
+        // Fixture has orderStatus=new
         let json = load_test_json("ws_account_order.json");
-        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        value["data"][0]["orderStatus"] = serde_json::Value::String("New".to_string());
-        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
             serde_json::from_value(value).unwrap();
 
         if let Some(order) = msg.data.first()
@@ -1960,7 +2086,7 @@ mod tests {
             state.order_identities.insert(cid, default_identity());
         }
 
-        let ws_msg = BybitWsMessage::AccountOrder(msg.clone());
+        let ws_msg = BitgetWsMessage::AccountOrder(msg.clone());
         dispatch_ws_message(
             &ws_msg,
             &emitter,
@@ -1977,7 +2103,7 @@ mod tests {
         ));
 
         // Dispatch the same message again: dedup should suppress the duplicate
-        let ws_msg2 = BybitWsMessage::AccountOrder(msg);
+        let ws_msg2 = BitgetWsMessage::AccountOrder(msg);
         dispatch_ws_message(
             &ws_msg2,
             &emitter,
@@ -1991,10 +2117,9 @@ mod tests {
     }
 
     fn new_order_value() -> serde_json::Value {
+        // Resting post-only buy: orderStatus=new, price 342.62, qty 0.02
         let json = load_test_json("ws_account_order.json");
-        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        value["data"][0]["orderStatus"] = serde_json::Value::String("New".to_string());
-        value
+        serde_json::from_str(&json).unwrap()
     }
 
     struct DispatchTestContext {
@@ -2022,7 +2147,7 @@ mod tests {
         }
 
         fn accept_order(&mut self, value: &serde_json::Value) {
-            let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+            let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
                 serde_json::from_value(value.clone()).unwrap();
 
             if let Some(order) = msg.data.first()
@@ -2046,9 +2171,9 @@ mod tests {
         }
 
         fn dispatch_value(&self, value: &serde_json::Value) {
-            let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+            let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
                 serde_json::from_value(value.clone()).unwrap();
-            let ws_msg = BybitWsMessage::AccountOrder(msg);
+            let ws_msg = BitgetWsMessage::AccountOrder(msg);
             dispatch_ws_message(
                 &ws_msg,
                 &self.emitter,
@@ -2075,13 +2200,16 @@ mod tests {
         ctx.accept_order(&value);
 
         let mut amended = value;
-        amended["data"][0]["price"] = serde_json::Value::String("31000".to_string());
+        amended["data"][0]["price"] = serde_json::Value::String("343.5".to_string());
         ctx.dispatch_value(&amended);
 
         let updated = ctx.recv_updated();
-        assert_eq!(updated.client_order_id, ClientOrderId::from("client-1"));
-        assert_eq!(updated.price, Some(Price::from("31000.00")));
-        assert_eq!(updated.quantity, Quantity::from("0.010"));
+        assert_eq!(
+            updated.client_order_id,
+            ClientOrderId::from("tdcaprest93086")
+        );
+        assert_eq!(updated.price, Some(Price::from("343.50")));
+        assert_eq!(updated.quantity, Quantity::from("0.02"));
         assert_eq!(updated.trigger_price, None);
         assert!(updated.venue_order_id.is_some());
     }
@@ -2093,28 +2221,12 @@ mod tests {
         ctx.accept_order(&value);
 
         let mut amended = value;
-        amended["data"][0]["qty"] = serde_json::Value::String("0.020".to_string());
+        amended["data"][0]["qty"] = serde_json::Value::String("0.04".to_string());
         ctx.dispatch_value(&amended);
 
         let updated = ctx.recv_updated();
-        assert_eq!(updated.quantity, Quantity::from("0.020"));
-        assert_eq!(updated.price, Some(Price::from("30000.00")));
-    }
-
-    #[rstest]
-    fn test_dispatch_order_updated_on_trigger_price_change() {
-        let mut ctx = DispatchTestContext::new();
-        let mut value = new_order_value();
-        value["data"][0]["triggerPrice"] = serde_json::Value::String("29000".to_string());
-        ctx.accept_order(&value);
-
-        let mut amended = value;
-        amended["data"][0]["triggerPrice"] = serde_json::Value::String("28000".to_string());
-        ctx.dispatch_value(&amended);
-
-        let updated = ctx.recv_updated();
-        assert_eq!(updated.trigger_price, Some(Price::from("28000.00")));
-        assert_eq!(updated.price, Some(Price::from("30000.00")));
+        assert_eq!(updated.quantity, Quantity::from("0.04"));
+        assert_eq!(updated.price, Some(Price::from("342.62")));
     }
 
     #[rstest]
@@ -2138,29 +2250,29 @@ mod tests {
         ctx.accept_order(&value);
 
         let mut amended1 = value.clone();
-        amended1["data"][0]["price"] = serde_json::Value::String("31000".to_string());
+        amended1["data"][0]["price"] = serde_json::Value::String("343.5".to_string());
         ctx.dispatch_value(&amended1);
         let _result = ctx.recv_updated();
 
         let mut amended2 = value;
-        amended2["data"][0]["price"] = serde_json::Value::String("32000".to_string());
+        amended2["data"][0]["price"] = serde_json::Value::String("344".to_string());
         ctx.dispatch_value(&amended2);
 
         let updated = ctx.recv_updated();
-        assert_eq!(updated.price, Some(Price::from("32000.00")));
+        assert_eq!(updated.price, Some(Price::from("344.00")));
     }
 
     #[rstest]
     fn test_dispatch_accepted_with_seeded_snapshot_emits_updated_for_bbo() {
         let mut ctx = DispatchTestContext::new();
         let value = new_order_value();
-        let cid = ClientOrderId::from("client-1");
+        let cid = ClientOrderId::from("tdcaprest93086");
         ctx.state.order_identities.insert(cid, default_identity());
         ctx.state.order_snapshots.insert(
             cid,
             OrderStateSnapshot {
-                quantity: Quantity::from("0.010"),
-                price: Some(Price::from("29000.00")),
+                quantity: Quantity::from("0.02"),
+                price: Some(Price::from("341.00")),
                 trigger_price: None,
             },
         );
@@ -2175,22 +2287,22 @@ mod tests {
 
         let updated = ctx.recv_updated();
         assert_eq!(updated.client_order_id, cid);
-        assert_eq!(updated.price, Some(Price::from("30000.00")));
-        assert_eq!(updated.quantity, Quantity::from("0.010"));
+        assert_eq!(updated.price, Some(Price::from("342.62")));
+        assert_eq!(updated.quantity, Quantity::from("0.02"));
         assert!(updated.venue_order_id.is_some());
     }
 
     #[rstest]
     fn test_emit_rejection_for_place_clears_snapshot() {
         let ctx = DispatchTestContext::new();
-        let cid = ClientOrderId::from("client-1");
+        let cid = ClientOrderId::from("tdcaprest93086");
         let identity = default_identity();
         ctx.state.order_identities.insert(cid, identity.clone());
         ctx.state.order_snapshots.insert(
             cid,
             OrderStateSnapshot {
-                quantity: Quantity::from("0.010"),
-                price: Some(Price::from("30000.00")),
+                quantity: Quantity::from("0.02"),
+                price: Some(Price::from("342.62")),
                 trigger_price: None,
             },
         );
@@ -2210,15 +2322,15 @@ mod tests {
         assert!(!ctx.state.order_snapshots.contains_key(&cid));
     }
 
+    // Bitget reports per-order results (and batch per-item `code`/`msg`) in `args`
     fn order_response(
         op: &str,
         ret_code: i64,
         ret_msg: &str,
         req_id: &str,
         data: serde_json::Value,
-        ret_ext_info: Option<serde_json::Value>,
-    ) -> BybitWsOrderResponse {
-        BybitWsOrderResponse {
+    ) -> BitgetWsOrderResponse {
+        BitgetWsOrderResponse {
             op: Ustr::from(op),
             conn_id: Some("test-conn-id".to_string()),
             ret_code,
@@ -2226,7 +2338,6 @@ mod tests {
             data,
             req_id: Some(req_id.to_string()),
             header: None,
-            ret_ext_info,
         }
     }
 
@@ -2240,12 +2351,11 @@ mod tests {
             (vec![cid], vec![None], PendingOperation::Place),
         );
         let response = order_response(
-            BYBIT_OP_ORDER_CREATE,
+            BITGET_OP_ORDER_CREATE,
             -1,
             "Order command was not written",
             "req-not-sent",
-            serde_json::json!({}),
-            None,
+            serde_json::json!([]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2277,15 +2387,14 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_CANCEL,
-            110001,
-            "Order does not exist.",
+            BITGET_OP_ORDER_CANCEL,
+            25204,
+            "Order does not exist",
             "req-cancel",
-            serde_json::json!({
+            serde_json::json!([{
                 "orderId": venue_order_id.to_string(),
-                "orderLinkId": cid.to_string(),
-            }),
-            None,
+                "clientOid": cid.to_string(),
+            }]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2317,15 +2426,14 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_AMEND,
-            110003,
-            "Order price exceeds allowable range.",
+            BITGET_OP_ORDER_AMEND,
+            25571,
+            "The modification price and qty is the same as the original value.",
             "req-modify",
-            serde_json::json!({
+            serde_json::json!([{
                 "orderId": venue_order_id.to_string(),
-                "orderLinkId": cid.to_string(),
-            }),
-            None,
+                "clientOid": cid.to_string(),
+            }]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2357,15 +2465,14 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_CANCEL,
-            10429,
-            "System level frequency protection.",
+            BITGET_OP_ORDER_CANCEL,
+            25004,
+            "Operation too frequent",
             "req-cancel-rate-limit",
-            serde_json::json!({
+            serde_json::json!([{
                 "orderId": venue_order_id.to_string(),
-                "orderLinkId": cid.to_string(),
-            }),
-            None,
+                "clientOid": cid.to_string(),
+            }]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2395,15 +2502,14 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_AMEND,
-            10016,
-            "Internal server error.",
+            BITGET_OP_ORDER_AMEND,
+            45001,
+            "Unknown error",
             "req-modify-server-error",
-            serde_json::json!({
+            serde_json::json!([{
                 "orderId": venue_order_id.to_string(),
-                "orderLinkId": cid.to_string(),
-            }),
-            None,
+                "clientOid": cid.to_string(),
+            }]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2435,12 +2541,11 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_CANCEL_BATCH,
-            10016,
-            "Internal server error.",
+            BITGET_OP_ORDER_CANCEL_BATCH,
+            45001,
+            "Unknown error",
             "req-batch-cancel",
-            serde_json::json!({}),
-            None,
+            serde_json::json!([]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2468,12 +2573,11 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_CANCEL_BATCH,
-            10016,
-            "Internal server error.",
+            BITGET_OP_ORDER_CANCEL_BATCH,
+            45001,
+            "Unknown error",
             "req-batch-cancel-single",
-            serde_json::json!({}),
-            None,
+            serde_json::json!([]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2504,12 +2608,11 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_CANCEL_BATCH,
-            10006,
-            "Too many visits.",
+            BITGET_OP_ORDER_CANCEL_BATCH,
+            429,
+            "Too Many Requests",
             "req-batch-rate",
-            serde_json::json!({}),
-            None,
+            serde_json::json!([]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2546,22 +2649,14 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_CANCEL_BATCH,
+            BITGET_OP_ORDER_CANCEL_BATCH,
             0,
-            "OK",
+            "Success",
             "req-batch-mixed",
-            serde_json::json!({
-                "list": [
-                    {"orderId": "venue-batch-ok", "orderLinkId": cid_1.to_string()},
-                    {"orderId": "venue-batch-reject", "orderLinkId": cid_2.to_string()}
-                ]
-            }),
-            Some(serde_json::json!({
-                "list": [
-                    {"code": 0, "msg": "OK"},
-                    {"code": 170213, "msg": "Order does not exist."}
-                ]
-            })),
+            serde_json::json!([
+                {"code": "0", "msg": "Success", "orderId": "venue-batch-ok", "clientOid": cid_1.to_string()},
+                {"code": "25204", "msg": "Order does not exist", "orderId": "venue-batch-reject", "clientOid": cid_2.to_string()}
+            ]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2593,20 +2688,13 @@ mod tests {
         );
 
         let response = order_response(
-            BYBIT_OP_ORDER_CANCEL_BATCH,
+            BITGET_OP_ORDER_CANCEL_BATCH,
             0,
-            "OK",
+            "Success",
             "req-batch-rate-limit",
-            serde_json::json!({
-                "list": [
-                    {"orderId": venue_order_id.to_string(), "orderLinkId": cid.to_string()}
-                ]
-            }),
-            Some(serde_json::json!({
-                "list": [
-                    {"code": 10006, "msg": "Too many visits."}
-                ]
-            })),
+            serde_json::json!([
+                {"code": "429", "msg": "Too Many Requests", "orderId": venue_order_id.to_string(), "clientOid": cid.to_string()}
+            ]),
         );
 
         dispatch_order_response(&response, &ctx.emitter, &ctx.state, UnixNanos::from(1u64));
@@ -2624,15 +2712,15 @@ mod tests {
     fn test_dispatch_filled_with_seeded_snapshot_emits_updated_for_bbo() {
         let mut ctx = DispatchTestContext::new();
         let mut value = new_order_value();
-        value["data"][0]["orderStatus"] = serde_json::Value::String("Filled".to_string());
-        value["data"][0]["cumExecQty"] = serde_json::Value::String("0.010".to_string());
-        let cid = ClientOrderId::from("client-1");
+        value["data"][0]["orderStatus"] = serde_json::Value::String("filled".to_string());
+        value["data"][0]["cumExecQty"] = serde_json::Value::String("0.02".to_string());
+        let cid = ClientOrderId::from("tdcaprest93086");
         ctx.state.order_identities.insert(cid, default_identity());
         ctx.state.order_snapshots.insert(
             cid,
             OrderStateSnapshot {
-                quantity: Quantity::from("0.010"),
-                price: Some(Price::from("29000.00")),
+                quantity: Quantity::from("0.02"),
+                price: Some(Price::from("341.00")),
                 trigger_price: None,
             },
         );
@@ -2649,26 +2737,26 @@ mod tests {
 
         let updated = ctx.recv_updated();
         assert_eq!(updated.client_order_id, cid);
-        assert_eq!(updated.price, Some(Price::from("30000.00")));
-        assert_eq!(updated.quantity, Quantity::from("0.010"));
+        assert_eq!(updated.price, Some(Price::from("342.62")));
+        assert_eq!(updated.quantity, Quantity::from("0.02"));
         assert_eq!(updated.trigger_price, None);
         assert_eq!(updated.venue_order_id, Some(accepted.venue_order_id));
 
         let stored = ctx.state.order_snapshots.get(&cid).unwrap();
-        assert_eq!(stored.price, Some(Price::from("30000.00")));
+        assert_eq!(stored.price, Some(Price::from("342.62")));
     }
 
     #[rstest]
     fn test_dispatch_accepted_with_matching_seeded_snapshot_no_updated() {
         let mut ctx = DispatchTestContext::new();
         let value = new_order_value();
-        let cid = ClientOrderId::from("client-1");
+        let cid = ClientOrderId::from("tdcaprest93086");
         ctx.state.order_identities.insert(cid, default_identity());
         ctx.state.order_snapshots.insert(
             cid,
             OrderStateSnapshot {
-                quantity: Quantity::from("0.010"),
-                price: Some(Price::from("30000.00")),
+                quantity: Quantity::from("0.02"),
+                price: Some(Price::from("342.62")),
                 trigger_price: None,
             },
         );
@@ -2765,33 +2853,23 @@ mod tests {
         assert!(!is_snapshot_updated(&new_snapshot, &cid, &state));
     }
 
+    // Plain Bitget orders carry no trigger price; market orders report price "0" or ""
     #[rstest]
-    #[case::limit_order("30000", "0", Some(Price::from("30000.00")), None)]
-    #[case::conditional("0", "29000", None, Some(Price::from("29000.00")))]
-    #[case::both(
-        "30000",
-        "29000",
-        Some(Price::from("30000.00")),
-        Some(Price::from("29000.00"))
-    )]
-    fn test_parse_order_snapshot(
-        #[case] price: &str,
-        #[case] trigger: &str,
-        #[case] expected_price: Option<Price>,
-        #[case] expected_trigger: Option<Price>,
-    ) {
+    #[case::limit_order("342.62", Some(Price::from("342.62")))]
+    #[case::market_zero("0", None)]
+    #[case::market_empty("", None)]
+    fn test_parse_order_snapshot(#[case] price: &str, #[case] expected_price: Option<Price>) {
         let instrument = linear_instrument();
         let json = load_test_json("ws_account_order.json");
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value["data"][0]["price"] = serde_json::Value::String(price.to_string());
-        value["data"][0]["triggerPrice"] = serde_json::Value::String(trigger.to_string());
-        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
             serde_json::from_value(value).unwrap();
 
         let snapshot = parse_order_snapshot(&msg.data[0], &instrument).unwrap();
         assert_eq!(snapshot.price, expected_price);
-        assert_eq!(snapshot.trigger_price, expected_trigger);
-        assert_eq!(snapshot.quantity, Quantity::from("0.010"));
+        assert_eq!(snapshot.trigger_price, None);
+        assert_eq!(snapshot.quantity, Quantity::from("0.02"));
     }
 
     #[rstest]
@@ -2800,10 +2878,148 @@ mod tests {
         let json = load_test_json("ws_account_order.json");
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value["data"][0]["qty"] = serde_json::Value::String(String::new());
-        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
             serde_json::from_value(value).unwrap();
 
         assert!(parse_order_snapshot(&msg.data[0], &instrument).is_none());
+    }
+
+    #[rstest]
+    fn test_dispatch_duplicate_execution_is_emitted_once() {
+        let mut ctx = DispatchTestContext::new();
+        let msg: crate::websocket::messages::BitgetWsAccountExecutionMsg =
+            serde_json::from_str(&load_test_json("ws_account_execution.json")).unwrap();
+
+        for _ in 0..2 {
+            dispatch_ws_message(
+                &BitgetWsMessage::AccountExecution(msg.clone()),
+                &ctx.emitter,
+                &ctx.state,
+                test_account_id(),
+                &ctx.instruments,
+                ctx.clock,
+            );
+        }
+
+        let event = ctx.rx.try_recv().unwrap();
+        assert!(matches!(
+            event,
+            ExecutionEvent::Report(ExecutionReport::Fill(_))
+        ));
+        assert!(
+            ctx.rx.try_recv().is_err(),
+            "duplicate execId must be dropped"
+        );
+    }
+
+    // The order topic can report `filled` before the fill arrives on the `fill` topic
+    #[rstest]
+    #[case::order_push_first(true)]
+    #[case::fill_first(false)]
+    fn test_dispatch_filled_order_cleans_up_once_fills_cover_quantity(
+        #[case] order_push_first: bool,
+    ) {
+        let mut ctx = DispatchTestContext::new();
+        let order_value: serde_json::Value =
+            serde_json::from_str(&load_test_json("ws_account_order_filled.json")).unwrap();
+        let fill: crate::websocket::messages::BitgetWsAccountExecutionMsg =
+            serde_json::from_str(&load_test_json("ws_account_execution.json")).unwrap();
+        let cid = ClientOrderId::from("tdcapioc93099");
+        ctx.state.order_identities.insert(cid, default_identity());
+        let dispatch_fill = |ctx: &DispatchTestContext| {
+            dispatch_ws_message(
+                &BitgetWsMessage::AccountExecution(fill.clone()),
+                &ctx.emitter,
+                &ctx.state,
+                test_account_id(),
+                &ctx.instruments,
+                ctx.clock,
+            );
+        };
+
+        if order_push_first {
+            ctx.dispatch_value(&order_value);
+            assert!(ctx.state.order_identities.contains_key(&cid));
+            dispatch_fill(&ctx);
+        } else {
+            dispatch_fill(&ctx);
+            assert!(ctx.state.order_identities.contains_key(&cid));
+            ctx.dispatch_value(&order_value);
+        }
+
+        let accepted = ctx.rx.try_recv().unwrap();
+        assert!(matches!(
+            accepted,
+            ExecutionEvent::Order(OrderEventAny::Accepted(_))
+        ));
+        let filled = ctx.rx.try_recv().unwrap();
+        assert!(matches!(
+            filled,
+            ExecutionEvent::Order(OrderEventAny::Filled(_))
+        ));
+        assert!(!ctx.state.order_identities.contains_key(&cid));
+    }
+
+    #[rstest]
+    fn test_dispatch_tracked_strategy_order_emits_accepted_then_canceled() {
+        let mut ctx = DispatchTestContext::new();
+        let pending: crate::websocket::messages::BitgetWsAccountStrategyOrderMsg =
+            serde_json::from_str(&load_test_json("ws_account_order_buy_stop_market.json")).unwrap();
+        let cancelled: crate::websocket::messages::BitgetWsAccountStrategyOrderMsg =
+            serde_json::from_str(&load_test_json("ws_strategy_order_cancelled.json")).unwrap();
+        let cid = ClientOrderId::new(pending.data[0].order_link_id);
+        ctx.state.order_identities.insert(
+            cid,
+            OrderIdentity {
+                order_type: OrderType::StopMarket,
+                ..default_identity()
+            },
+        );
+
+        for msg in [pending, cancelled] {
+            dispatch_ws_message(
+                &BitgetWsMessage::AccountStrategyOrder(msg),
+                &ctx.emitter,
+                &ctx.state,
+                test_account_id(),
+                &ctx.instruments,
+                ctx.clock,
+            );
+        }
+
+        let accepted = ctx.rx.try_recv().unwrap();
+        assert!(matches!(
+            accepted,
+            ExecutionEvent::Order(OrderEventAny::Accepted(_))
+        ));
+        let canceled = ctx.rx.try_recv().unwrap();
+        assert!(matches!(
+            canceled,
+            ExecutionEvent::Order(OrderEventAny::Canceled(_))
+        ));
+        assert!(!ctx.state.order_identities.contains_key(&cid));
+    }
+
+    #[rstest]
+    fn test_dispatch_untracked_strategy_order_emits_report() {
+        let mut ctx = DispatchTestContext::new();
+        let pending: crate::websocket::messages::BitgetWsAccountStrategyOrderMsg =
+            serde_json::from_str(&load_test_json("ws_account_order_buy_stop_market.json")).unwrap();
+
+        dispatch_ws_message(
+            &BitgetWsMessage::AccountStrategyOrder(pending),
+            &ctx.emitter,
+            &ctx.state,
+            test_account_id(),
+            &ctx.instruments,
+            ctx.clock,
+        );
+
+        let event = ctx.rx.try_recv().unwrap();
+        assert!(matches!(
+            event,
+            ExecutionEvent::Report(ExecutionReport::Order(_))
+        ));
     }
 
     #[rstest]
@@ -2814,13 +3030,16 @@ mod tests {
 
         let mut amended = value;
         amended["data"][0]["orderStatus"] =
-            serde_json::Value::String("PartiallyFilled".to_string());
-        amended["data"][0]["cumExecQty"] = serde_json::Value::String("0.005".to_string());
-        amended["data"][0]["price"] = serde_json::Value::String("31000".to_string());
+            serde_json::Value::String("partially_filled".to_string());
+        amended["data"][0]["cumExecQty"] = serde_json::Value::String("0.01".to_string());
+        amended["data"][0]["price"] = serde_json::Value::String("343.5".to_string());
         ctx.dispatch_value(&amended);
 
         let updated = ctx.recv_updated();
-        assert_eq!(updated.client_order_id, ClientOrderId::from("client-1"));
-        assert_eq!(updated.price, Some(Price::from("31000.00")));
+        assert_eq!(
+            updated.client_order_id,
+            ClientOrderId::from("tdcaprest93086")
+        );
+        assert_eq!(updated.price, Some(Price::from("343.50")));
     }
 }

@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Configuration structures for the Bybit adapter.
+//! Configuration structures for the Bitget adapter.
 
 use std::collections::HashMap;
 
@@ -27,34 +27,39 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     enums::{
-        BybitEnvironment, BybitMarginMode, BybitOrderSmpType, BybitPositionMode, BybitProductType,
+        BitgetEnvironment, BitgetMarginMode, BitgetOrderSmpType, BitgetPositionMode,
+        BitgetProductType,
     },
     parse::deserialize_optional_smp_type,
-    urls::{bybit_http_base_url, bybit_ws_private_url, bybit_ws_public_url, bybit_ws_trade_url},
+    urls::{
+        bitget_http_base_url, bitget_ws_private_url, bitget_ws_public_url, bitget_ws_trade_url,
+    },
 };
 
-/// Configuration for the Bybit live data client.
+/// Configuration for the Bitget live data client.
 #[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
-pub struct BybitDataClientConfig {
+pub struct BitgetDataClientConfig {
     /// Optional API key for authenticated REST/WebSocket requests.
     pub api_key: Option<SecretString>,
     /// Optional API secret for authenticated REST/WebSocket requests.
     pub api_secret: Option<SecretString>,
+    /// Optional API passphrase for authenticated REST/WebSocket requests (Bitget `ACCESS-PASSPHRASE`).
+    pub api_passphrase: Option<SecretString>,
     /// Product types to subscribe to (e.g., Linear, Spot, Inverse, Option).
-    #[builder(default = vec![BybitProductType::Linear])]
-    pub product_types: Vec<BybitProductType>,
+    #[builder(default = vec![BitgetProductType::Linear])]
+    pub product_types: Vec<BitgetProductType>,
     /// Environment selection (Mainnet, Testnet, Demo).
-    #[builder(default = BybitEnvironment::Mainnet)]
-    pub environment: BybitEnvironment,
+    #[builder(default = BitgetEnvironment::Mainnet)]
+    pub environment: BitgetEnvironment,
     /// Optional override for the REST base URL.
     pub base_url_http: Option<String>,
     /// Optional override for the public WebSocket URL.
@@ -100,9 +105,9 @@ pub struct BybitDataClientConfig {
 }
 
 #[cfg(feature = "python")]
-nautilus_core::impl_pyo3_config_getters!(BybitDataClientConfig {
-    product_types: Vec<BybitProductType>,
-    environment: BybitEnvironment,
+nautilus_core::impl_pyo3_config_getters!(BitgetDataClientConfig {
+    product_types: Vec<BitgetProductType>,
+    environment: BitgetEnvironment,
     base_url_http: Option<String>,
     base_url_ws_public: Option<String>,
     base_url_ws_private: Option<String>,
@@ -118,7 +123,7 @@ nautilus_core::impl_pyo3_config_getters!(BybitDataClientConfig {
     bars_timestamp_on_close: bool,
 });
 
-impl Default for BybitDataClientConfig {
+impl Default for BitgetDataClientConfig {
     fn default() -> Self {
         Self {
             update_instruments_interval_mins: Some(60),
@@ -128,7 +133,7 @@ impl Default for BybitDataClientConfig {
     }
 }
 
-impl BybitDataClientConfig {
+impl BitgetDataClientConfig {
     /// Creates a configuration with default values.
     #[must_use]
     pub fn new() -> Self {
@@ -146,7 +151,7 @@ impl BybitDataClientConfig {
     pub fn http_base_url(&self) -> String {
         self.base_url_http
             .clone()
-            .unwrap_or_else(|| bybit_http_base_url(self.environment).to_string())
+            .unwrap_or_else(|| bitget_http_base_url(self.environment).to_string())
     }
 
     /// Returns the public WebSocket URL for the given product type.
@@ -159,17 +164,17 @@ impl BybitDataClientConfig {
                 .product_types
                 .first()
                 .copied()
-                .unwrap_or(BybitProductType::Linear);
-            bybit_ws_public_url(product_type, self.environment)
+                .unwrap_or(BitgetProductType::Linear);
+            bitget_ws_public_url(product_type, self.environment)
         })
     }
 
     /// Returns the public WebSocket URL for a specific product type.
     #[must_use]
-    pub fn ws_public_url_for(&self, product_type: BybitProductType) -> String {
+    pub fn ws_public_url_for(&self, product_type: BitgetProductType) -> String {
         self.base_url_ws_public
             .clone()
-            .unwrap_or_else(|| bybit_ws_public_url(product_type, self.environment))
+            .unwrap_or_else(|| bitget_ws_public_url(product_type, self.environment))
     }
 
     /// Returns the private WebSocket URL, considering overrides and environment.
@@ -177,7 +182,7 @@ impl BybitDataClientConfig {
     pub fn ws_private_url(&self) -> String {
         self.base_url_ws_private
             .clone()
-            .unwrap_or_else(|| bybit_ws_private_url(self.environment).to_string())
+            .unwrap_or_else(|| bitget_ws_private_url(self.environment).to_string())
     }
 
     /// Returns `true` when private WebSocket connection is required.
@@ -187,28 +192,30 @@ impl BybitDataClientConfig {
     }
 }
 
-/// Configuration for the Bybit live execution client.
+/// Configuration for the Bitget live execution client.
 #[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
-pub struct BybitExecutionClientConfig {
+pub struct BitgetExecutionClientConfig {
     /// API key for authenticated requests.
     pub api_key: Option<SecretString>,
     /// API secret for authenticated requests.
     pub api_secret: Option<SecretString>,
+    /// API passphrase for authenticated requests (Bitget `ACCESS-PASSPHRASE`).
+    pub api_passphrase: Option<SecretString>,
     /// Product types to support (e.g., Linear, Spot, Inverse, Option).
-    #[builder(default = vec![BybitProductType::Linear])]
-    pub product_types: Vec<BybitProductType>,
+    #[builder(default = vec![BitgetProductType::Linear])]
+    pub product_types: Vec<BitgetProductType>,
     /// Environment selection (Mainnet, Testnet, Demo).
-    #[builder(default = BybitEnvironment::Mainnet)]
-    pub environment: BybitEnvironment,
+    #[builder(default = BitgetEnvironment::Mainnet)]
+    pub environment: BitgetEnvironment,
     /// Optional override for the REST base URL.
     pub base_url_http: Option<String>,
     /// Optional override for the private WebSocket URL.
@@ -254,22 +261,22 @@ pub struct BybitExecutionClientConfig {
     /// Leverage configuration for futures (symbol -> leverage).
     pub futures_leverages: Option<HashMap<String, u32>>,
     /// Position mode configuration for symbols (symbol -> mode).
-    pub position_mode: Option<HashMap<String, BybitPositionMode>>,
+    pub position_mode: Option<HashMap<String, BitgetPositionMode>>,
     /// Unified margin mode setting.
-    pub margin_mode: Option<BybitMarginMode>,
+    pub margin_mode: Option<BitgetMarginMode>,
     /// Self-match prevention type sent on every submitted order. The `smp_type` order parameter
     /// overrides it, and leaving both unset omits the field so the venue default applies.
     #[serde(deserialize_with = "deserialize_optional_smp_type")]
-    pub smp_type: Option<BybitOrderSmpType>,
+    pub smp_type: Option<BitgetOrderSmpType>,
     /// WebSocket transport backend (defaults to `Tungstenite`).
     #[builder(default)]
     pub transport_backend: TransportBackend,
 }
 
 #[cfg(feature = "python")]
-nautilus_core::impl_pyo3_config_getters!(BybitExecutionClientConfig {
-    product_types: Vec<BybitProductType>,
-    environment: BybitEnvironment,
+nautilus_core::impl_pyo3_config_getters!(BitgetExecutionClientConfig {
+    product_types: Vec<BitgetProductType>,
+    environment: BitgetEnvironment,
     base_url_http: Option<String>,
     base_url_ws_private: Option<String>,
     base_url_ws_trade: Option<String>,
@@ -283,17 +290,17 @@ nautilus_core::impl_pyo3_config_getters!(BybitExecutionClientConfig {
     account_id: Option<AccountId>,
     use_spot_position_reports: bool,
     auto_repay_spot_borrows: bool,
-    margin_mode: Option<BybitMarginMode>,
+    margin_mode: Option<BitgetMarginMode>,
     transport_backend: TransportBackend,
 });
 
-impl Default for BybitExecutionClientConfig {
+impl Default for BitgetExecutionClientConfig {
     fn default() -> Self {
         Self::builder().build()
     }
 }
 
-impl BybitExecutionClientConfig {
+impl BitgetExecutionClientConfig {
     /// Creates a configuration with default values.
     #[must_use]
     pub fn new() -> Self {
@@ -311,7 +318,7 @@ impl BybitExecutionClientConfig {
     pub fn http_base_url(&self) -> String {
         self.base_url_http
             .clone()
-            .unwrap_or_else(|| bybit_http_base_url(self.environment).to_string())
+            .unwrap_or_else(|| bitget_http_base_url(self.environment).to_string())
     }
 
     /// Returns the private WebSocket URL, considering overrides and environment.
@@ -319,7 +326,7 @@ impl BybitExecutionClientConfig {
     pub fn ws_private_url(&self) -> String {
         self.base_url_ws_private
             .clone()
-            .unwrap_or_else(|| bybit_ws_private_url(self.environment).to_string())
+            .unwrap_or_else(|| bitget_ws_private_url(self.environment).to_string())
     }
 
     /// Returns the trade WebSocket URL, considering overrides and environment.
@@ -327,7 +334,7 @@ impl BybitExecutionClientConfig {
     pub fn ws_trade_url(&self) -> String {
         self.base_url_ws_trade
             .clone()
-            .unwrap_or_else(|| bybit_ws_trade_url(self.environment).to_string())
+            .unwrap_or_else(|| bitget_ws_trade_url(self.environment).to_string())
     }
 }
 #[cfg(test)]
@@ -338,13 +345,13 @@ mod tests {
 
     #[rstest]
     fn test_config_debug_redacts_credentials() {
-        let data = BybitDataClientConfig {
+        let data = BitgetDataClientConfig {
             api_key: Some("data-api-key".into()),
             api_secret: Some("data-api-secret".into()),
             proxy_url: Some("http://user:data-proxy@localhost".into()),
             ..Default::default()
         };
-        let execution = BybitExecutionClientConfig {
+        let execution = BitgetExecutionClientConfig {
             api_key: Some("exec-api-key".into()),
             api_secret: Some("exec-api-secret".into()),
             proxy_url: Some("http://user:exec-proxy@localhost".into()),
@@ -368,16 +375,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case("None", BybitOrderSmpType::None)]
-    #[case("CancelMaker", BybitOrderSmpType::CancelMaker)]
-    #[case("CancelTaker", BybitOrderSmpType::CancelTaker)]
-    #[case("CancelBoth", BybitOrderSmpType::CancelBoth)]
+    #[case("None", BitgetOrderSmpType::None)]
+    #[case("CancelMaker", BitgetOrderSmpType::CancelMaker)]
+    #[case("CancelTaker", BitgetOrderSmpType::CancelTaker)]
+    #[case("CancelBoth", BitgetOrderSmpType::CancelBoth)]
     fn test_exec_config_deserializes_smp_type(
         #[case] value: &str,
-        #[case] expected: BybitOrderSmpType,
+        #[case] expected: BitgetOrderSmpType,
     ) {
         let json = format!(r#"{{"smp_type": "{value}"}}"#);
-        let config: BybitExecutionClientConfig = serde_json::from_str(&json).unwrap();
+        let config: BitgetExecutionClientConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(config.smp_type, Some(expected));
     }
@@ -387,28 +394,28 @@ mod tests {
     #[case(r#"{"smp_type": "cancel-maker"}"#)]
     #[case(r#"{"smp_type": ""}"#)]
     fn test_exec_config_rejects_invalid_smp_type(#[case] json: &str) {
-        let err = serde_json::from_str::<BybitExecutionClientConfig>(json).unwrap_err();
+        let err = serde_json::from_str::<BitgetExecutionClientConfig>(json).unwrap_err();
 
         assert!(
-            err.to_string().contains("invalid Bybit smp_type"),
+            err.to_string().contains("invalid Bitget smp_type"),
             "expected an smp_type rejection, was '{err}'"
         );
     }
 
     #[rstest]
     fn test_exec_config_smp_type_defaults_to_none() {
-        let config: BybitExecutionClientConfig = serde_json::from_str("{}").unwrap();
+        let config: BitgetExecutionClientConfig = serde_json::from_str("{}").unwrap();
 
         assert_eq!(config.smp_type, None);
     }
 
     #[rstest]
     fn test_data_config_default() {
-        let config = BybitDataClientConfig::default();
+        let config = BitgetDataClientConfig::default();
 
         assert!(config.bars_timestamp_on_close);
         assert!(!config.has_api_credentials());
-        assert_eq!(config.product_types, vec![BybitProductType::Linear]);
+        assert_eq!(config.product_types, vec![BitgetProductType::Linear]);
         assert_eq!(config.http_timeout_secs, 60);
         assert_eq!(config.heartbeat_interval_secs, 20);
         assert_eq!(config.book_snapshot_timeout_secs, 10);
@@ -417,27 +424,27 @@ mod tests {
     #[rstest]
     fn test_data_config_bar_timestamp_builder() {
         assert!(
-            BybitDataClientConfig::builder()
+            BitgetDataClientConfig::builder()
                 .build()
                 .bars_timestamp_on_close
         );
         assert!(
-            serde_json::from_str::<BybitDataClientConfig>("{}")
+            serde_json::from_str::<BitgetDataClientConfig>("{}")
                 .unwrap()
                 .bars_timestamp_on_close
         );
-        let config = BybitDataClientConfig::builder()
+        let config = BitgetDataClientConfig::builder()
             .bars_timestamp_on_close(false)
             .build();
         assert!(!config.bars_timestamp_on_close);
-        let config: BybitDataClientConfig =
+        let config: BitgetDataClientConfig =
             serde_json::from_str(r#"{"bars_timestamp_on_close":false}"#).unwrap();
         assert!(!config.bars_timestamp_on_close);
     }
 
     #[rstest]
     fn test_data_config_with_credentials() {
-        let config = BybitDataClientConfig {
+        let config = BitgetDataClientConfig {
             api_key: Some("test_key".into()),
             api_secret: Some("test_secret".into()),
             ..Default::default()
@@ -449,38 +456,40 @@ mod tests {
 
     #[rstest]
     fn test_data_config_http_url_mainnet() {
-        let config = BybitDataClientConfig {
-            environment: BybitEnvironment::Mainnet,
+        let config = BitgetDataClientConfig {
+            environment: BitgetEnvironment::Mainnet,
             ..Default::default()
         };
 
-        assert_eq!(config.http_base_url(), "https://api.bybit.com");
+        assert_eq!(config.http_base_url(), "https://api.bitget.com");
     }
 
     #[rstest]
     fn test_data_config_http_url_testnet() {
-        let config = BybitDataClientConfig {
-            environment: BybitEnvironment::Testnet,
+        let config = BitgetDataClientConfig {
+            environment: BitgetEnvironment::Testnet,
             ..Default::default()
         };
 
-        assert_eq!(config.http_base_url(), "https://api-testnet.bybit.com");
+        // Bitget has no testnet; demo trading shares the mainnet REST host
+        assert_eq!(config.http_base_url(), "https://api.bitget.com");
     }
 
     #[rstest]
     fn test_data_config_http_url_demo() {
-        let config = BybitDataClientConfig {
-            environment: BybitEnvironment::Demo,
+        let config = BitgetDataClientConfig {
+            environment: BitgetEnvironment::Demo,
             ..Default::default()
         };
 
-        assert_eq!(config.http_base_url(), "https://api-demo.bybit.com");
+        // Demo trading is selected by the `paptrading` header on the mainnet host
+        assert_eq!(config.http_base_url(), "https://api.bitget.com");
     }
 
     #[rstest]
     fn test_data_config_http_url_override() {
-        let custom_url = "https://custom.bybit.com";
-        let config = BybitDataClientConfig {
+        let custom_url = "https://custom.bitget.com";
+        let config = BitgetDataClientConfig {
             base_url_http: Some(custom_url.to_string()),
             ..Default::default()
         };
@@ -490,66 +499,63 @@ mod tests {
 
     #[rstest]
     fn test_data_config_ws_public_url() {
-        let config = BybitDataClientConfig {
-            environment: BybitEnvironment::Mainnet,
+        let config = BitgetDataClientConfig {
+            environment: BitgetEnvironment::Mainnet,
             ..Default::default()
         };
 
-        assert_eq!(
-            config.ws_public_url(),
-            "wss://stream.bybit.com/v5/public/linear"
-        );
+        assert_eq!(config.ws_public_url(), "wss://ws.bitget.com/v3/ws/public");
     }
 
     #[rstest]
     fn test_data_config_ws_public_url_for_spot() {
-        let config = BybitDataClientConfig {
-            environment: BybitEnvironment::Mainnet,
+        let config = BitgetDataClientConfig {
+            environment: BitgetEnvironment::Mainnet,
             ..Default::default()
         };
 
         assert_eq!(
-            config.ws_public_url_for(BybitProductType::Spot),
-            "wss://stream.bybit.com/v5/public/spot"
+            config.ws_public_url_for(BitgetProductType::Spot),
+            "wss://ws.bitget.com/v3/ws/public"
         );
     }
 
     #[rstest]
     fn test_data_config_ws_private_url() {
-        let config = BybitDataClientConfig {
-            environment: BybitEnvironment::Mainnet,
+        let config = BitgetDataClientConfig {
+            environment: BitgetEnvironment::Mainnet,
             ..Default::default()
         };
 
-        assert_eq!(config.ws_private_url(), "wss://stream.bybit.com/v5/private");
+        assert_eq!(config.ws_private_url(), "wss://ws.bitget.com/v3/ws/private");
     }
 
     #[rstest]
     fn test_data_config_ws_private_url_testnet() {
-        let config = BybitDataClientConfig {
-            environment: BybitEnvironment::Testnet,
+        let config = BitgetDataClientConfig {
+            environment: BitgetEnvironment::Testnet,
             ..Default::default()
         };
 
         assert_eq!(
             config.ws_private_url(),
-            "wss://stream-testnet.bybit.com/v5/private"
+            "wss://wspap.bitget.com/v3/ws/private"
         );
     }
 
     #[rstest]
     fn test_exec_config_default() {
-        let config = BybitExecutionClientConfig::default();
+        let config = BitgetExecutionClientConfig::default();
 
         assert!(!config.has_api_credentials());
-        assert_eq!(config.product_types, vec![BybitProductType::Linear]);
+        assert_eq!(config.product_types, vec![BitgetProductType::Linear]);
         assert_eq!(config.http_timeout_secs, 60);
         assert_eq!(config.heartbeat_interval_secs, 20);
     }
 
     #[rstest]
     fn test_exec_config_with_credentials() {
-        let config = BybitExecutionClientConfig {
+        let config = BitgetExecutionClientConfig {
             api_key: Some("test_key".into()),
             api_secret: Some("test_secret".into()),
             ..Default::default()
@@ -560,51 +566,53 @@ mod tests {
 
     #[rstest]
     fn test_exec_config_urls() {
-        let config = BybitExecutionClientConfig {
-            environment: BybitEnvironment::Mainnet,
+        let config = BitgetExecutionClientConfig {
+            environment: BitgetEnvironment::Mainnet,
             ..Default::default()
         };
 
-        assert_eq!(config.http_base_url(), "https://api.bybit.com");
-        assert_eq!(config.ws_private_url(), "wss://stream.bybit.com/v5/private");
-        assert_eq!(config.ws_trade_url(), "wss://stream.bybit.com/v5/trade");
+        assert_eq!(config.http_base_url(), "https://api.bitget.com");
+        assert_eq!(config.ws_private_url(), "wss://ws.bitget.com/v3/ws/private");
+        // Bitget order entry (`op:"trade"`) runs on the private socket
+        assert_eq!(config.ws_trade_url(), "wss://ws.bitget.com/v3/ws/private");
     }
 
     #[rstest]
     fn test_exec_config_urls_testnet() {
-        let config = BybitExecutionClientConfig {
-            environment: BybitEnvironment::Testnet,
+        let config = BitgetExecutionClientConfig {
+            environment: BitgetEnvironment::Testnet,
             ..Default::default()
         };
 
-        assert_eq!(config.http_base_url(), "https://api-testnet.bybit.com");
+        // Bitget has no testnet; demo trading shares the mainnet REST host
+        assert_eq!(config.http_base_url(), "https://api.bitget.com");
         assert_eq!(
             config.ws_private_url(),
-            "wss://stream-testnet.bybit.com/v5/private"
+            "wss://wspap.bitget.com/v3/ws/private"
         );
         assert_eq!(
             config.ws_trade_url(),
-            "wss://stream-testnet.bybit.com/v5/trade"
+            "wss://wspap.bitget.com/v3/ws/private"
         );
     }
 
     #[rstest]
     fn test_exec_config_custom_urls() {
-        let config = BybitExecutionClientConfig {
-            base_url_http: Some("https://custom-http.bybit.com".to_string()),
-            base_url_ws_private: Some("wss://custom-private.bybit.com".to_string()),
-            base_url_ws_trade: Some("wss://custom-trade.bybit.com".to_string()),
+        let config = BitgetExecutionClientConfig {
+            base_url_http: Some("https://custom-http.bitget.com".to_string()),
+            base_url_ws_private: Some("wss://custom-private.bitget.com".to_string()),
+            base_url_ws_trade: Some("wss://custom-trade.bitget.com".to_string()),
             ..Default::default()
         };
 
-        assert_eq!(config.http_base_url(), "https://custom-http.bybit.com");
-        assert_eq!(config.ws_private_url(), "wss://custom-private.bybit.com");
-        assert_eq!(config.ws_trade_url(), "wss://custom-trade.bybit.com");
+        assert_eq!(config.http_base_url(), "https://custom-http.bitget.com");
+        assert_eq!(config.ws_private_url(), "wss://custom-private.bitget.com");
+        assert_eq!(config.ws_trade_url(), "wss://custom-trade.bitget.com");
     }
 
     #[rstest]
     fn test_data_config_toml_minimal() {
-        let config: BybitDataClientConfig = toml::from_str(
+        let config: BitgetDataClientConfig = toml::from_str(
             r#"
 environment = "testnet"
 product_types = ["spot", "linear"]
@@ -613,18 +621,18 @@ http_timeout_secs = 45
         )
         .unwrap();
 
-        assert_eq!(config.environment, BybitEnvironment::Testnet);
+        assert_eq!(config.environment, BitgetEnvironment::Testnet);
         assert_eq!(
             config.product_types,
-            vec![BybitProductType::Spot, BybitProductType::Linear]
+            vec![BitgetProductType::Spot, BitgetProductType::Linear]
         );
         assert_eq!(config.http_timeout_secs, 45);
     }
 
     #[rstest]
     fn test_exec_config_toml_empty_uses_defaults() {
-        let config: BybitExecutionClientConfig = toml::from_str("").unwrap();
-        let expected = BybitExecutionClientConfig::default();
+        let config: BitgetExecutionClientConfig = toml::from_str("").unwrap();
+        let expected = BitgetExecutionClientConfig::default();
 
         assert_eq!(config.environment, expected.environment);
         assert_eq!(config.product_types, expected.product_types);

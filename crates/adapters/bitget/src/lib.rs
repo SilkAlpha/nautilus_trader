@@ -14,12 +14,12 @@
 // -------------------------------------------------------------------------------------------------
 
 //! [NautilusTrader](https://nautilustrader.io) adapter for the
-//! [Bybit](https://www.bybit.com) cryptocurrency exchange.
+//! [Bitget](https://www.bitget.com) cryptocurrency exchange.
 //!
-//! The `nautilus-bybit` crate provides client bindings (HTTP & WebSocket) and data
-//! models for the official **Bybit v5 API**.
+//! The `nautilus-bitget` crate provides client bindings (HTTP & WebSocket) and data
+//! models for the official **Bitget UTA v3 API**.
 //!
-//! The official Bybit API reference can be found at <https://bybit-exchange.github.io/docs/v5/intro>.
+//! The official Bitget API reference can be found at <https://www.bitget.com/docs/uta/intro>.
 //! All public links inside this crate reference the English version of the documentation.
 //!
 //! # NautilusTrader

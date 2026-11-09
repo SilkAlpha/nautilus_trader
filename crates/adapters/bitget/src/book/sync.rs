@@ -13,16 +13,19 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Adapter-local order book synchronization state for Bybit.
+//! Adapter-local order book synchronization state for Bitget.
 //!
-//! [`BookSyncTracker`] applies Bybit update ID linkage to the shared per-book [`BookSync`]
+//! [`BookSyncTracker`] applies Bitget `seq`/`pseq` linkage to the shared per-book [`BookSync`]
 //! lifecycle and decides whether to accept a book frame, suppress it, or request recovery. A
-//! book's position is the update ID `u` of its last accepted frame.
+//! book's position is the `seq` of its last accepted frame.
 //!
-//! Every snapshot replaces the book, as the venue requires: Bybit sends one after each subscribe,
-//! resends one after a service restart, and sends only snapshots at depth 1. A snapshot can carry
-//! an update ID below the book's position, since the venue serves it from an earlier state. A
-//! delta must carry the update ID that follows the book's position; any other delta is a gap.
+//! Every snapshot replaces the book, as the venue requires: Bitget sends one after each subscribe
+//! on the full-depth `books` channel, resends one (`pseq` 0) after a service restart, and sends
+//! only snapshots on `books1`/`books5`. A snapshot can carry a `seq` below the book's position,
+//! since the venue serves it from an earlier state. A delta links to the book when its
+//! `[pseq, seq)` range contains the book's position: in steady state `pseq` equals the previous
+//! `seq`, and the first update after a snapshot spans the snapshot's `seq`. Any other delta is a
+//! gap.
 //!
 //! Claiming, accepting, and resetting recovery stay under the tracker's state lock so competing
 //! events cannot independently change ownership. Snapshot gates coordinate acceptance with
@@ -44,9 +47,9 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{BookSequenceOutcome, BookSyncSignal, BookSyncSignalKind, recovery::BookRecovery};
-use crate::{common::enums::BybitProductType, websocket::error::BybitWsError};
+use crate::{common::enums::BitgetProductType, websocket::error::BitgetWsError};
 
-type Book = BookSync<BybitWsError, u64>;
+type Book = BookSync<BitgetWsError, u64>;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BookSyncTracker {
@@ -95,6 +98,7 @@ impl BookSyncTracker {
         instrument_id: InstrumentId,
         is_snapshot: bool,
         update_id: u64,
+        prev_update_id: u64,
         now: Instant,
     ) -> BookSequenceOutcome {
         let mut books = self.books.lock();
@@ -107,7 +111,8 @@ impl BookSyncTracker {
             return BookSequenceOutcome::Suppress;
         }
 
-        if is_snapshot {
+        // A reset sequence (`pseq` 0) restarts the book like a snapshot
+        if is_snapshot || prev_update_id == 0 {
             return if book.accept_snapshot(update_id, now) {
                 BookSequenceOutcome::Accept
             } else {
@@ -117,7 +122,7 @@ impl BookSyncTracker {
 
         let last_update_id = book.position().copied();
 
-        if last_update_id.and_then(|last| last.checked_add(1)) == Some(update_id) {
+        if last_update_id.is_some_and(|last| prev_update_id <= last && last < update_id) {
             book.advance(update_id, now);
             return BookSequenceOutcome::Accept;
         }
@@ -126,15 +131,15 @@ impl BookSyncTracker {
 
         if outcome == BookSequenceOutcome::Recover {
             log::warn!(
-                "Book update gap for {instrument_id}: last_update_id={last_update_id:?}, \
-                 update_id={update_id}; requesting a fresh snapshot"
+                "Book update gap for {instrument_id}: last_seq={last_update_id:?}, \
+                 pseq={prev_update_id}, seq={update_id}; requesting a fresh snapshot"
             );
         }
 
         outcome
     }
 
-    pub(crate) fn reset_on_reconnect(&self, product_type: BybitProductType) {
+    pub(crate) fn reset_on_reconnect(&self, product_type: BitgetProductType) {
         let mut books = self.books.lock();
 
         for (_, book) in scoped(&mut books, product_type) {
@@ -144,7 +149,7 @@ impl BookSyncTracker {
 
     pub(crate) fn seed_pending_snapshots(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         timeout: Duration,
         now: Instant,
     ) -> usize {
@@ -159,7 +164,7 @@ impl BookSyncTracker {
 
     pub(crate) fn take_expired_snapshots(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         now: Instant,
     ) -> Vec<BookSyncSignal> {
         let mut books = self.books.lock();
@@ -204,10 +209,10 @@ impl BookSyncTracker {
 // Each product type has its own socket, and an instrument's symbol suffix names its product type
 fn scoped(
     books: &mut AHashMap<InstrumentId, Book>,
-    product_type: BybitProductType,
+    product_type: BitgetProductType,
 ) -> impl Iterator<Item = (&InstrumentId, &mut Book)> {
     books.iter_mut().filter(move |(instrument_id, _)| {
-        BybitProductType::from_suffix(instrument_id.symbol.as_str()) == Some(product_type)
+        BitgetProductType::from_suffix(instrument_id.symbol.as_str()) == Some(product_type)
     })
 }
 
@@ -219,15 +224,15 @@ mod tests {
     use rstest::rstest;
 
     use super::{BookSequenceOutcome, BookSyncSignalKind, BookSyncTracker};
-    use crate::common::enums::BybitProductType;
+    use crate::common::enums::BitgetProductType;
 
-    const LINEAR: &str = "BTCUSDT-LINEAR.BYBIT";
-    const SPOT: &str = "BTCUSDT-SPOT.BYBIT";
+    const LINEAR: &str = "BTCUSDT-PERP.BITGET";
+    const SPOT: &str = "BTCUSDT-SPOT.BITGET";
 
     fn synced(tracker: &BookSyncTracker, instrument_id: InstrumentId, update_id: u64) {
         let now = Instant::now();
         tracker.record_subscription(instrument_id, now, SnapshotGate::default());
-        let outcome = tracker.validate(instrument_id, true, update_id, now);
+        let outcome = tracker.validate(instrument_id, true, update_id, 0, now);
         assert_eq!(outcome, BookSequenceOutcome::Accept);
     }
 
@@ -241,12 +246,40 @@ mod tests {
         let id = InstrumentId::from(LINEAR);
         synced(&tracker, id, 100);
 
-        let first = tracker.validate(id, false, 101, Instant::now());
-        let second = tracker.validate(id, false, 102, Instant::now());
+        let first = tracker.validate(id, false, 101, 100, Instant::now());
+        let second = tracker.validate(id, false, 102, 101, Instant::now());
 
         assert_eq!(first, BookSequenceOutcome::Accept);
         assert_eq!(second, BookSequenceOutcome::Accept);
         assert_eq!(phase(&tracker, id), BookPhase::Synced(102));
+    }
+
+    // The first update after a snapshot may start before the snapshot's seq
+    #[rstest]
+    fn first_delta_spanning_snapshot_seq_advances_book() {
+        let tracker = BookSyncTracker::default();
+        let id = InstrumentId::from(LINEAR);
+        synced(&tracker, id, 100);
+
+        let first = tracker.validate(id, false, 105, 95, Instant::now());
+        let second = tracker.validate(id, false, 110, 105, Instant::now());
+
+        assert_eq!(first, BookSequenceOutcome::Accept);
+        assert_eq!(second, BookSequenceOutcome::Accept);
+        assert_eq!(phase(&tracker, id), BookPhase::Synced(110));
+    }
+
+    // A service restart resets the sequence and the venue pushes `pseq` 0
+    #[rstest]
+    fn reset_sequence_replaces_book() {
+        let tracker = BookSyncTracker::default();
+        let id = InstrumentId::from(LINEAR);
+        synced(&tracker, id, 100);
+
+        let reset = tracker.validate(id, false, 7, 0, Instant::now());
+
+        assert_eq!(reset, BookSequenceOutcome::Accept);
+        assert_eq!(phase(&tracker, id), BookPhase::Synced(7));
     }
 
     #[rstest]
@@ -258,10 +291,10 @@ mod tests {
         let id = InstrumentId::from(LINEAR);
         synced(&tracker, id, 100);
 
-        let first = tracker.validate(id, false, update_id, Instant::now());
-        let again = tracker.validate(id, false, 101, Instant::now());
+        let first = tracker.validate(id, false, update_id, update_id - 1, Instant::now());
+        let again = tracker.validate(id, false, 101, 100, Instant::now());
         let recovery = tracker.claim_recovery(id).unwrap();
-        let owned = tracker.validate(id, false, 102, Instant::now());
+        let owned = tracker.validate(id, false, 102, 101, Instant::now());
 
         assert_eq!(first, BookSequenceOutcome::Recover);
         assert_eq!(again, BookSequenceOutcome::Recover);
@@ -280,8 +313,8 @@ mod tests {
         let id = InstrumentId::from(LINEAR);
         synced(&tracker, id, 100);
 
-        let snapshot = tracker.validate(id, true, update_id, Instant::now());
-        let delta = tracker.validate(id, false, update_id + 1, Instant::now());
+        let snapshot = tracker.validate(id, true, update_id, 0, Instant::now());
+        let delta = tracker.validate(id, false, update_id + 1, update_id, Instant::now());
 
         assert_eq!(snapshot, BookSequenceOutcome::Accept);
         assert_eq!(delta, BookSequenceOutcome::Accept);
@@ -294,15 +327,15 @@ mod tests {
         let id = InstrumentId::from(LINEAR);
         synced(&tracker, id, 100);
         assert_eq!(
-            tracker.validate(id, false, 102, Instant::now()),
+            tracker.validate(id, false, 102, 101, Instant::now()),
             BookSequenceOutcome::Recover
         );
         let recovery = tracker.claim_recovery(id).unwrap();
         assert!(recovery.begin_replacement());
 
-        let during_write = tracker.validate(id, true, 200, Instant::now());
+        let during_write = tracker.validate(id, true, 200, 0, Instant::now());
         recovery.gate.open();
-        let after_write = tracker.validate(id, true, 200, Instant::now());
+        let after_write = tracker.validate(id, true, 200, 0, Instant::now());
 
         assert_eq!(during_write, BookSequenceOutcome::Suppress);
         assert_eq!(after_write, BookSequenceOutcome::Accept);
@@ -321,10 +354,10 @@ mod tests {
         gate.lock().close();
         let cancel = tracker.record_subscription(id, now, gate.clone());
 
-        let while_sending = tracker.validate(id, is_snapshot, 100, now);
+        let while_sending = tracker.validate(id, is_snapshot, 100, 99, now);
         let claimed_while_sending = tracker.claim_recovery(id).is_some();
         gate.open();
-        let snapshot = tracker.validate(id, true, 100, now);
+        let snapshot = tracker.validate(id, true, 100, 0, now);
 
         assert_eq!(while_sending, BookSequenceOutcome::Suppress);
         assert!(!claimed_while_sending);
@@ -338,8 +371,8 @@ mod tests {
         let tracker = BookSyncTracker::default();
         let id = InstrumentId::from(LINEAR);
 
-        let snapshot = tracker.validate(id, true, 100, Instant::now());
-        let delta = tracker.validate(id, false, 101, Instant::now());
+        let snapshot = tracker.validate(id, true, 100, 0, Instant::now());
+        let delta = tracker.validate(id, false, 101, 100, Instant::now());
 
         assert_eq!(snapshot, BookSequenceOutcome::Suppress);
         assert_eq!(delta, BookSequenceOutcome::Suppress);
@@ -376,15 +409,15 @@ mod tests {
         synced(&tracker, spot, 200);
         let now = Instant::now();
 
-        tracker.reset_on_reconnect(BybitProductType::Linear);
+        tracker.reset_on_reconnect(BitgetProductType::Linear);
         let armed =
-            tracker.seed_pending_snapshots(BybitProductType::Linear, Duration::from_secs(10), now);
-        let linear_delta = tracker.validate(linear, false, 101, now);
-        let spot_delta = tracker.validate(spot, false, 201, now);
+            tracker.seed_pending_snapshots(BitgetProductType::Linear, Duration::from_secs(10), now);
+        let linear_delta = tracker.validate(linear, false, 101, 100, now);
+        let spot_delta = tracker.validate(spot, false, 201, 200, now);
         let spot_expired =
-            tracker.take_expired_snapshots(BybitProductType::Spot, now + Duration::from_secs(10));
-        let linear_expired =
-            tracker.take_expired_snapshots(BybitProductType::Linear, now + Duration::from_secs(10));
+            tracker.take_expired_snapshots(BitgetProductType::Spot, now + Duration::from_secs(10));
+        let linear_expired = tracker
+            .take_expired_snapshots(BitgetProductType::Linear, now + Duration::from_secs(10));
 
         assert_eq!(armed, 1);
         assert_eq!(linear_delta, BookSequenceOutcome::Suppress);
@@ -403,7 +436,7 @@ mod tests {
         synced(&tracker, id, 100);
         let recovery = tracker.claim_recovery(id).unwrap();
 
-        tracker.reset_on_reconnect(BybitProductType::Linear);
+        tracker.reset_on_reconnect(BitgetProductType::Linear);
 
         assert!(recovery.is_running());
         assert!(tracker.claim_recovery(id).is_none());
@@ -414,10 +447,10 @@ mod tests {
         let tracker = BookSyncTracker::default();
         let now = Instant::now();
         let ids = [
-            "SOLUSDT-LINEAR.BYBIT",
-            "BTCUSDT-LINEAR.BYBIT",
-            "XRPUSDT-LINEAR.BYBIT",
-            "ETHUSDT-LINEAR.BYBIT",
+            "SOLUSDT-PERP.BITGET",
+            "BTCUSDT-PERP.BITGET",
+            "XRPUSDT-PERP.BITGET",
+            "ETHUSDT-PERP.BITGET",
         ]
         .map(InstrumentId::from);
 
@@ -425,10 +458,10 @@ mod tests {
             synced(&tracker, id, 100);
         }
 
-        tracker.reset_on_reconnect(BybitProductType::Linear);
-        tracker.seed_pending_snapshots(BybitProductType::Linear, Duration::from_secs(1), now);
+        tracker.reset_on_reconnect(BitgetProductType::Linear);
+        tracker.seed_pending_snapshots(BitgetProductType::Linear, Duration::from_secs(1), now);
         let expired =
-            tracker.take_expired_snapshots(BybitProductType::Linear, now + Duration::from_secs(1));
+            tracker.take_expired_snapshots(BitgetProductType::Linear, now + Duration::from_secs(1));
 
         let mut sorted = ids.to_vec();
         sorted.sort();

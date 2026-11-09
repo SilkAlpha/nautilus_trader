@@ -65,6 +65,7 @@ NETWORK_PACKAGE_FEATURES = {
     "nautilus-betfair": frozenset(),
     "nautilus-binance": frozenset({"transport-sockudo"}),
     "nautilus-blockchain": frozenset({"transport-sockudo"}),
+    "nautilus-bitget": frozenset({"transport-sockudo"}),
     "nautilus-bybit": frozenset({"transport-sockudo"}),
     "nautilus-coinapi": frozenset({"transport-sockudo"}),
     "nautilus-coinbase": frozenset({"transport-sockudo"}),

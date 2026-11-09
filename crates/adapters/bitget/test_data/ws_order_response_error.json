@@ -1,0 +1,15 @@
+{
+  "event": "error",
+  "id": "cap17941930907953",
+  "code": "25206",
+  "msg": "TSLAUSDT trading price cannot exceed 2%",
+  "connId": "068b4afffe0ebff5-00003912-00207636-3f38547f12f362d9-556f6561",
+  "rateLimit": [
+    {
+      "limit": "20",
+      "remaining": "19"
+    }
+  ],
+  "receiveTime": "1794193090813921",
+  "pushTime": "1794193090816119"
+}

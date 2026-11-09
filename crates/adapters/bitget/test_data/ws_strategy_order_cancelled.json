@@ -1,0 +1,37 @@
+{
+  "action": "snapshot",
+  "arg": {
+    "instType": "UTA",
+    "topic": "strategy-order"
+  },
+  "data": [
+    {
+      "type": "trigger",
+      "category": "usdt-futures",
+      "symbol": "TSLAUSDT",
+      "orderId": "1503521064568303616",
+      "clientOid": "1503521064568303616",
+      "qty": "0.02",
+      "side": "buy",
+      "posSide": "",
+      "reduceOnly": "false",
+      "status": "cancelled",
+      "createdTime": "1794193276540",
+      "updatedTime": "1794193277307",
+      "triggerType": "",
+      "tpTriggerBy": "",
+      "slTriggerBy": "",
+      "takeProfit": "",
+      "stopLoss": "",
+      "tpOrderType": "",
+      "slOrderType": "",
+      "tpLimitPrice": "",
+      "slLimitPrice": "",
+      "triggerBy": "mark",
+      "triggerPrice": "396.89",
+      "triggerOrderType": "market",
+      "triggerOrderPrice": ""
+    }
+  ],
+  "ts": 1794193277315
+}

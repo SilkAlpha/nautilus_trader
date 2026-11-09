@@ -368,6 +368,7 @@ backtest nautilus_backtest::python::backtest
 betfair nautilus_betfair::python::betfair
 binance nautilus_binance::python::binance
 blockchain nautilus_blockchain::python::blockchain
+bitget nautilus_bitget::python::bitget
 bybit nautilus_bybit::python::bybit
 coinapi nautilus_coinapi::python::coinapi
 coinbase nautilus_coinbase::python::coinbase

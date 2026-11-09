@@ -1,34 +1,47 @@
 {
-  "id": "test-locked-exceeds-total",
-  "topic": "wallet",
-  "creationTime": 1762960669000,
+  "action": "snapshot",
+  "arg": {
+    "instType": "UTA",
+    "topic": "account"
+  },
   "data": [
     {
-      "accountIMRate": "0.5",
-      "accountMMRate": "0.05",
-      "accountLTV": "0",
-      "totalEquity": "100.0",
-      "totalWalletBalance": "100.0",
-      "totalMarginBalance": "100.0",
-      "totalAvailableBalance": "0",
-      "totalPerpUpl": "-50.0",
-      "totalInitialMargin": "120.0",
-      "totalMaintenanceMargin": "12.0",
+      "totalEquity": "99923.3",
+      "effEquity": "49923.3",
+      "mmr": "9.27",
+      "imr": "91.06",
+      "mgnRatio": "0.0001",
+      "positionMgnRatio": "0",
+      "unrealisedPnL": "0",
       "coin": [
         {
+          "coin": "USD",
+          "balance": "50000",
+          "locked": "0",
+          "equity": "50000",
+          "usdValue": "50000",
+          "available": "50000",
+          "borrow": "0",
+          "debts": "0",
+          "bonus": "0",
+          "baseDebt": "0",
+          "balanceOriginal": "50000"
+        },
+        {
           "coin": "USDT",
-          "equity": "100.0",
-          "walletBalance": "100.0",
-          "availableToWithdraw": "0",
-          "availableToBorrow": "",
-          "borrowAmount": "0",
-          "accruedInterest": "0",
-          "totalOrderIM": "80.0",
-          "totalPositionIM": "40.0",
-          "totalPositionMM": "12.0",
-          "spotBorrow": "0"
+          "balance": "49998.30404312",
+          "locked": "49999.30404312",
+          "equity": "49998.30404312",
+          "usdValue": "49923.30658705",
+          "available": "0",
+          "borrow": "0",
+          "debts": "0",
+          "bonus": "0",
+          "baseDebt": "0",
+          "balanceOriginal": "49998.30404312"
         }
       ]
     }
-  ]
+  ],
+  "ts": 1794193083188
 }

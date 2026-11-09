@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use nautilus_bybit::data_types::{BybitLiquidation, register_bybit_custom_data};
+use nautilus_bitget::data_types::{BitgetLiquidation, register_bitget_custom_data};
 use nautilus_core::{Params, UnixNanos};
 use nautilus_model::{
     data::{CustomData, Data, DataType},
@@ -37,7 +37,7 @@ fn liquidation_data_type(instrument_id: InstrumentId) -> DataType {
     );
 
     DataType::new(
-        "BybitLiquidation",
+        "BitgetLiquidation",
         Some(metadata),
         Some(instrument_id.to_string()),
     )
@@ -45,13 +45,13 @@ fn liquidation_data_type(instrument_id: InstrumentId) -> DataType {
 
 #[rstest]
 fn liquidation_catalog_round_trip_preserves_fields() {
-    register_bybit_custom_data();
+    register_bitget_custom_data();
     let temp_dir = TempDir::new().unwrap();
     let mut catalog = ParquetDataCatalog::new(temp_dir.path(), None, None, None, None);
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let data_type = liquidation_data_type(instrument_id);
 
-    let long = BybitLiquidation::new(
+    let long = BitgetLiquidation::new(
         instrument_id,
         PositionSide::Long,
         Price::from("96250.5"),
@@ -60,7 +60,7 @@ fn liquidation_catalog_round_trip_preserves_fields() {
         UnixNanos::from(1_739_502_303_500_000_000),
     );
 
-    let short = BybitLiquidation::new(
+    let short = BitgetLiquidation::new(
         instrument_id,
         PositionSide::Short,
         Price::from("97410.0"),
@@ -83,10 +83,18 @@ fn liquidation_catalog_round_trip_preserves_fields() {
 
     let ids = vec![instrument_id.to_string()];
     let loaded: Vec<Data> = catalog
-        .query_custom_data_dynamic("BybitLiquidation", Some(&ids), None, None, None, None, true)
+        .query_custom_data_dynamic(
+            "BitgetLiquidation",
+            Some(&ids),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
         .unwrap();
 
-    let rows: Vec<&BybitLiquidation> = loaded
+    let rows: Vec<&BitgetLiquidation> = loaded
         .iter()
         .map(|data| {
             let Data::Custom(custom) = data else {
@@ -96,14 +104,14 @@ fn liquidation_catalog_round_trip_preserves_fields() {
             custom
                 .data
                 .as_any()
-                .downcast_ref::<BybitLiquidation>()
-                .expect("expected BybitLiquidation")
+                .downcast_ref::<BitgetLiquidation>()
+                .expect("expected BitgetLiquidation")
         })
         .collect();
 
     assert!(
         path.to_string_lossy()
-            .contains("data/custom/BybitLiquidation/BTCUSDT-LINEAR.BYBIT")
+            .contains("data/custom/BitgetLiquidation/BTCUSDT-PERP.BITGET")
     );
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0], &long);

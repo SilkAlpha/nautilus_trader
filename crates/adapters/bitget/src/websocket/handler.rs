@@ -13,13 +13,13 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! WebSocket message handler for Bybit.
+//! WebSocket message handler for Bitget.
 
 use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -31,68 +31,50 @@ use nautilus_network::{
     retry::{RetryManager, create_websocket_retry_manager},
     websocket::{AuthTracker, SubscriptionState, WebSocketClient},
 };
-use serde::Serialize;
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use ustr::Ustr;
 
 use super::{
-    enums::BybitWsOperation,
-    error::{BybitWsError, BybitWsResult, create_bybit_timeout_error, should_retry_bybit_error},
-    messages::{
-        BybitSubscription, BybitWebSocketError, BybitWsFrame, BybitWsMessage, BybitWsOrderResponse,
-        BybitWsResponse, BybitWsSubscriptionMsg,
+    enums::BitgetWsOperation,
+    error::{
+        BitgetWsError, BitgetWsResult, create_bitget_timeout_error, should_retry_bitget_error,
     },
-    parse::parse_bybit_ws_frame,
+    messages::{
+        BitgetSubscription, BitgetWebSocketError, BitgetWsArg, BitgetWsFrame, BitgetWsHeader,
+        BitgetWsMessage, BitgetWsOrderResponse, BitgetWsRequest, BitgetWsResponse,
+        BitgetWsSubscriptionMsg,
+    },
+    parse::parse_bitget_ws_frame,
 };
 use crate::common::{
-    enums::{BybitProductType, BybitWsOrderRequestOp},
-    rate_limit::{
-        BYBIT_RATE_LIMIT_HEADER, BYBIT_RATE_LIMIT_RESET_HEADER, BYBIT_RATE_LIMIT_STATUS_HEADER,
-        BybitRateLimiter,
-    },
+    consts::{BITGET_WS_HEARTBEAT_PAYLOAD, BITGET_WS_PONG_PAYLOAD},
+    enums::{BitgetProductType, BitgetWsOrderRequestOp},
+    rate_limit::BitgetRateLimiter,
 };
 
 /// Semantic order command whose time-sensitive header is built at send time.
 #[derive(Debug)]
-pub struct BybitWsOrderCommand {
+pub struct BitgetWsOrderCommand {
     pub(crate) req_id: String,
-    pub(crate) op: BybitWsOrderRequestOp,
-    pub(crate) category: BybitProductType,
+    pub(crate) op: BitgetWsOrderRequestOp,
+    pub(crate) category: BitgetProductType,
     pub(crate) weight: u32,
     pub(crate) referer: Option<String>,
     pub(crate) args: Vec<Value>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BybitWsSignedOrderRequest {
-    req_id: String,
-    op: BybitWsOrderRequestOp,
-    header: BybitWsSignedOrderHeader,
-    args: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
-struct BybitWsSignedOrderHeader {
-    x_bapi_timestamp: String,
-    x_bapi_recv_window: String,
-    #[serde(rename = "Referer", skip_serializing_if = "Option::is_none")]
-    referer: Option<String>,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct PendingRate {
     endpoint: &'static str,
-    category: BybitProductType,
+    category: BitgetProductType,
 }
 
 #[derive(Debug)]
 enum OrderSendFailure {
-    NotSent(BybitWsError),
-    Ambiguous(BybitWsError),
+    NotSent(BitgetWsError),
+    Ambiguous(BitgetWsError),
 }
 
 /// Commands sent from the outer client to the inner message handler.
@@ -112,7 +94,7 @@ pub enum HandlerCommand {
     SubscribeBook {
         payload: String,
         gate: SnapshotGate,
-        completion: tokio::sync::oneshot::Sender<BybitWsResult<()>>,
+        completion: tokio::sync::oneshot::Sender<BitgetWsResult<()>>,
     },
     Unsubscribe {
         topics: Vec<String>,
@@ -123,40 +105,40 @@ pub enum HandlerCommand {
         topic: String,
         cancel: CancellationToken,
         gate: SnapshotGate,
-        completion: tokio::sync::oneshot::Sender<BybitWsResult<()>>,
+        completion: tokio::sync::oneshot::Sender<BitgetWsResult<()>>,
     },
     SendOrder {
-        command: BybitWsOrderCommand,
+        command: BitgetWsOrderCommand,
     },
     SendOrders {
-        commands: Vec<BybitWsOrderCommand>,
+        commands: Vec<BitgetWsOrderCommand>,
     },
 }
 
-pub(super) struct BybitWsFeedHandler {
+pub(super) struct BitgetWsFeedHandler {
     signal: Arc<AtomicBool>,
     inner: Option<WebSocketClient>,
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
     auth_tracker: AuthTracker,
     subscriptions: SubscriptionState,
-    rate_limiter: BybitRateLimiter,
-    recv_window_ms: Arc<AtomicU64>,
+    inst_type: &'static str,
+    rate_limiter: BitgetRateLimiter,
     pending_rates: DashMap<String, PendingRate>,
-    pending_orders: VecDeque<BybitWsOrderCommand>,
-    retry_manager: RetryManager<BybitWsError>,
+    pending_orders: VecDeque<BitgetWsOrderCommand>,
+    retry_manager: RetryManager<BitgetWsError>,
 }
 
-impl BybitWsFeedHandler {
-    /// Creates a new [`BybitWsFeedHandler`] instance.
+impl BitgetWsFeedHandler {
+    /// Creates a new [`BitgetWsFeedHandler`] instance.
     pub(super) fn new(
         signal: Arc<AtomicBool>,
         cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
         raw_rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
         auth_tracker: AuthTracker,
         subscriptions: SubscriptionState,
-        rate_limiter: BybitRateLimiter,
-        recv_window_ms: Arc<AtomicU64>,
+        inst_type: &'static str,
+        rate_limiter: BitgetRateLimiter,
     ) -> Self {
         Self {
             signal,
@@ -165,8 +147,8 @@ impl BybitWsFeedHandler {
             raw_rx,
             auth_tracker,
             subscriptions,
+            inst_type,
             rate_limiter,
-            recv_window_ms,
             pending_rates: DashMap::new(),
             pending_orders: VecDeque::new(),
             retry_manager: create_websocket_retry_manager(),
@@ -178,7 +160,7 @@ impl BybitWsFeedHandler {
     }
 
     /// Sends a WebSocket message with retry logic.
-    async fn send_with_retry(&self, payload: String) -> Result<(), BybitWsError> {
+    async fn send_with_retry(&self, payload: String) -> Result<(), BitgetWsError> {
         self.send_secret_with_retry(payload.into(), None).await
     }
 
@@ -186,7 +168,7 @@ impl BybitWsFeedHandler {
         &self,
         payload: SecretString,
         connection_epoch: Option<u64>,
-    ) -> Result<(), BybitWsError> {
+    ) -> Result<(), BitgetWsError> {
         if let Some(client) = &self.inner {
             self.retry_manager
                 .invocation(
@@ -204,40 +186,40 @@ impl BybitWsFeedHandler {
                             };
 
                             result.map_err(|e| match e {
-                                SendError::ConnectionChanged => BybitWsError::Authentication(
+                                SendError::ConnectionChanged => BitgetWsError::Authentication(
                                     "Connection changed before authentication".to_string(),
                                 ),
-                                e => BybitWsError::Transport(format!("Send failed: {e}")),
+                                e => BitgetWsError::Transport(format!("Send failed: {e}")),
                             })
                         }
                     },
-                    should_retry_bybit_error,
-                    |e| create_bybit_timeout_error(e.to_string()),
+                    should_retry_bitget_error,
+                    |e| create_bitget_timeout_error(e.to_string()),
                 )
                 .execute()
                 .await
         } else {
-            Err(BybitWsError::ClientError(
+            Err(BitgetWsError::ClientError(
                 "No active WebSocket client".to_string(),
             ))
         }
     }
 
     // Confirms the write on the current connection; a failed write is not replayed on the next
-    async fn write_book_subscription(&self, payload: String) -> BybitWsResult<()> {
-        let client = self.inner.as_ref().ok_or(BybitWsError::NotConnected)?;
+    async fn write_book_subscription(&self, payload: String) -> BitgetWsResult<()> {
+        let client = self.inner.as_ref().ok_or(BitgetWsError::NotConnected)?;
         let epoch = client.connection_epoch();
 
         client
             .send_text_on_connection(payload, None, epoch)
             .await
-            .map_err(|e| BybitWsError::Transport(e.to_string()))
+            .map_err(|e| BitgetWsError::Transport(e.to_string()))
     }
 
     // Writes both requests on one connection so the venue replaces the subscription it serves,
     // and never stops between them, since a depth-1 topic can also carry quotes
-    async fn resubscribe_book(&self, topic: &str) -> BybitWsResult<()> {
-        let client = self.inner.as_ref().ok_or(BybitWsError::NotConnected)?;
+    async fn resubscribe_book(&self, topic: &str) -> BitgetWsResult<()> {
+        let client = self.inner.as_ref().ok_or(BitgetWsError::NotConnected)?;
         let epoch = client.connection_epoch();
 
         // Keeps the topic replayed on reconnect until the venue confirms the new subscription
@@ -245,11 +227,10 @@ impl BybitWsFeedHandler {
 
         let topic = topic.to_string();
 
-        for op in [BybitWsOperation::Unsubscribe, BybitWsOperation::Subscribe] {
-            let request = BybitSubscription {
+        for op in [BitgetWsOperation::Unsubscribe, BitgetWsOperation::Subscribe] {
+            let request = BitgetSubscription {
                 op,
-                args: vec![topic.clone()],
-                req_id: Some(topic.clone()),
+                args: vec![BitgetWsArg::from_topic(&topic, self.inst_type)],
             };
 
             let payload = serde_json::to_string(&request)?;
@@ -259,13 +240,13 @@ impl BybitWsFeedHandler {
         Ok(())
     }
 
-    async fn send_order(&self, command: &BybitWsOrderCommand) -> Result<bool, OrderSendFailure> {
+    async fn send_order(&self, command: &BitgetWsOrderCommand) -> Result<bool, OrderSendFailure> {
         if !self.auth_tracker.is_authenticated() {
             return Ok(false);
         }
 
         let client = self.inner.as_ref().ok_or_else(|| {
-            OrderSendFailure::NotSent(BybitWsError::ClientError(
+            OrderSendFailure::NotSent(BitgetWsError::ClientError(
                 "No active WebSocket client".to_string(),
             ))
         })?;
@@ -274,28 +255,25 @@ impl BybitWsFeedHandler {
         self.rate_limiter
             .acquire_ws_order(endpoint, command.category, command.weight)
             .await
-            .map_err(|e| OrderSendFailure::NotSent(BybitWsError::ClientError(e)))?;
+            .map_err(|e| OrderSendFailure::NotSent(BitgetWsError::ClientError(e)))?;
 
         if !self.auth_tracker.is_authenticated() {
             return Ok(false);
         }
 
         let connection_epoch = client.connection_epoch();
-        let recv_window_ms = self.recv_window_ms.load(Ordering::Acquire);
-        let request = BybitWsSignedOrderRequest {
+        // Bitget has no request signature or receive window on `op:"trade"`: a per-order
+        // `receiveWindow` would cancel resting orders once it elapses
+        let request = BitgetWsRequest {
             req_id: command.req_id.clone(),
-            op: command.op,
-            header: BybitWsSignedOrderHeader {
-                x_bapi_timestamp: nautilus_core::time::get_atomic_clock_realtime()
-                    .get_time_ms()
-                    .to_string(),
-                x_bapi_recv_window: recv_window_ms.to_string(),
-                referer: command.referer.clone(),
-            },
+            op: BitgetWsOperation::Trade,
+            category: command.category.as_ws_inst_type(),
+            topic: command.op,
+            header: BitgetWsHeader::with_referer(command.referer.clone()),
             args: command.args.clone(),
         };
         let payload = serde_json::to_string(&request)
-            .map_err(|e| OrderSendFailure::NotSent(BybitWsError::Json(e.to_string())))?;
+            .map_err(|e| OrderSendFailure::NotSent(BitgetWsError::Json(e.to_string())))?;
         self.pending_rates.insert(
             command.req_id.clone(),
             PendingRate {
@@ -327,23 +305,23 @@ impl BybitWsFeedHandler {
             SendError::Timeout => {
                 self.pending_rates.remove(req_id);
                 self.auth_tracker.invalidate();
-                Err(OrderSendFailure::NotSent(BybitWsError::ClientError(
+                Err(OrderSendFailure::NotSent(BitgetWsError::ClientError(
                     "Order command was not written".to_string(),
                 )))
             }
             SendError::InvalidInput(_) | SendError::BufferFull | SendError::Closed => {
                 self.pending_rates.remove(req_id);
-                Err(OrderSendFailure::NotSent(BybitWsError::ClientError(
+                Err(OrderSendFailure::NotSent(BitgetWsError::ClientError(
                     "Order command was not written".to_string(),
                 )))
             }
-            error => Err(OrderSendFailure::Ambiguous(BybitWsError::Send(
+            error => Err(OrderSendFailure::Ambiguous(BitgetWsError::Send(
                 error.to_string(),
             ))),
         }
     }
 
-    pub(super) async fn next(&mut self) -> Option<BybitWsMessage> {
+    pub(super) async fn next(&mut self) -> Option<BitgetWsMessage> {
         loop {
             if self.auth_tracker.is_authenticated()
                 && let Some(command) = self.pending_orders.pop_front()
@@ -468,6 +446,18 @@ impl BybitWsFeedHandler {
                         continue;
                     }
 
+                    // Bitget keepalive is a text frame: answer a venue `ping` with `pong`
+                    if let Message::Text(text) = &msg
+                        && text.trim() == BITGET_WS_HEARTBEAT_PAYLOAD
+                    {
+                        if let Some(client) = &self.inner
+                            && let Err(e) = client.send_text(BITGET_WS_PONG_PAYLOAD.to_string(), None).await
+                        {
+                            log::warn!("Failed to send pong: error={e}");
+                        }
+                        continue;
+                    }
+
                     let frame = match Self::parse_raw_frame(msg) {
                         Some(frame) => frame,
                         None => continue,
@@ -479,10 +469,10 @@ impl BybitWsFeedHandler {
                     }
 
                     match frame {
-                        BybitWsFrame::Subscription(ref sub_msg) => {
+                        BitgetWsFrame::Subscription(ref sub_msg) => {
                             self.handle_subscription_ack(sub_msg);
                         }
-                        BybitWsFrame::Auth(auth_response) => {
+                        BitgetWsFrame::Auth(auth_response) => {
                             let is_success = auth_response.success.unwrap_or(false)
                                 || (auth_response.ret_code == Some(0));
 
@@ -497,69 +487,72 @@ impl BybitWsFeedHandler {
                                 self.auth_tracker.fail(error_msg);
                                 log::error!("WebSocket authentication failed: error={error_msg}");
                             }
-                            return Some(BybitWsMessage::Auth(auth_response));
+                            return Some(BitgetWsMessage::Auth(auth_response));
                         }
-                        BybitWsFrame::ErrorResponse(ref resp) => {
+                        BitgetWsFrame::ErrorResponse(ref resp) => {
                             // Failed subscription/unsubscription ACKs arrive as
                             // ErrorResponse when success=false. Route them through
                             // the subscription state machine when the op field is
                             // present, otherwise forward as a generic error.
                             if let Some(op) = &resp.op {
-                                if *op == BybitWsOperation::Subscribe
-                                    || *op == BybitWsOperation::Unsubscribe
+                                if *op == BitgetWsOperation::Subscribe
+                                    || *op == BitgetWsOperation::Unsubscribe
                                 {
                                     self.handle_subscription_error(resp);
                                 } else {
-                                    let error = BybitWebSocketError::from_response(resp);
-                                    return Some(BybitWsMessage::Error(error));
+                                    let error = BitgetWebSocketError::from_response(resp);
+                                    return Some(BitgetWsMessage::Error(error));
                                 }
                             } else {
-                                let error = BybitWebSocketError::from_response(resp);
-                                return Some(BybitWsMessage::Error(error));
+                                let error = BitgetWebSocketError::from_response(resp);
+                                return Some(BitgetWsMessage::Error(error));
                             }
                         }
-                        BybitWsFrame::OrderResponse(resp) => {
+                        BitgetWsFrame::OrderResponse(resp) => {
                             self.observe_order_rate_limit(&resp);
-                            return Some(BybitWsMessage::OrderResponse(resp));
+                            return Some(BitgetWsMessage::OrderResponse(resp));
                         }
-                        BybitWsFrame::Orderbook(msg) => {
-                            return Some(BybitWsMessage::Orderbook(msg));
+                        BitgetWsFrame::Orderbook(msg) => {
+                            return Some(BitgetWsMessage::Orderbook(msg));
                         }
-                        BybitWsFrame::Trade(msg) => {
-                            return Some(BybitWsMessage::Trade(msg));
+                        BitgetWsFrame::Trade(msg) => {
+                            return Some(BitgetWsMessage::Trade(msg));
                         }
-                        BybitWsFrame::Liquidation(msg) => {
-                            return Some(BybitWsMessage::Liquidation(msg));
+                        BitgetWsFrame::Liquidation(msg) => {
+                            return Some(BitgetWsMessage::Liquidation(msg));
                         }
-                        BybitWsFrame::Kline(msg) => {
-                            return Some(BybitWsMessage::Kline(msg));
+                        BitgetWsFrame::Kline(msg) => {
+                            return Some(BitgetWsMessage::Kline(msg));
                         }
-                        BybitWsFrame::TickerLinear(msg) => {
-                            return Some(BybitWsMessage::TickerLinear(msg));
+                        BitgetWsFrame::TickerLinear(msg) => {
+                            return Some(BitgetWsMessage::TickerLinear(msg));
                         }
-                        BybitWsFrame::TickerOption(msg) => {
-                            return Some(BybitWsMessage::TickerOption(msg));
+                        BitgetWsFrame::TickerOption(msg) => {
+                            return Some(BitgetWsMessage::TickerOption(msg));
                         }
-                        BybitWsFrame::AccountOrder(msg) => {
-                            return Some(BybitWsMessage::AccountOrder(msg));
+                        BitgetWsFrame::AccountOrder(msg) => {
+                            return Some(BitgetWsMessage::AccountOrder(msg));
                         }
-                        BybitWsFrame::AccountExecution(msg) => {
-                            return Some(BybitWsMessage::AccountExecution(msg));
+                        BitgetWsFrame::AccountStrategyOrder(msg) => {
+                            return Some(BitgetWsMessage::AccountStrategyOrder(msg));
                         }
-                        BybitWsFrame::AccountExecutionFast(msg) => {
-                            return Some(BybitWsMessage::AccountExecutionFast(msg));
+                        BitgetWsFrame::AccountExecution(msg) => {
+                            return Some(BitgetWsMessage::AccountExecution(msg));
                         }
-                        BybitWsFrame::AccountWallet(msg) => {
-                            return Some(BybitWsMessage::AccountWallet(msg));
+                        BitgetWsFrame::AccountExecutionFast(msg) => {
+                            return Some(BitgetWsMessage::AccountExecutionFast(msg));
                         }
-                        BybitWsFrame::AccountPosition(msg) => {
-                            return Some(BybitWsMessage::AccountPosition(msg));
+                        BitgetWsFrame::AccountWallet(msg) => {
+                            return Some(BitgetWsMessage::AccountWallet(msg));
                         }
-                        BybitWsFrame::Reconnected => {
+                        BitgetWsFrame::AccountPosition(msg) => {
+                            return Some(BitgetWsMessage::AccountPosition(msg));
+                        }
+                        BitgetWsFrame::Reconnected => {
                             self.auth_tracker.invalidate();
-                            return Some(BybitWsMessage::Reconnected);
+                            return Some(BitgetWsMessage::Reconnected);
                         }
-                        BybitWsFrame::Unknown(value) => {
+                        BitgetWsFrame::Unknown(value) => {
                             log::debug!("Unknown WebSocket frame: {value}");
                         }
                     }
@@ -568,47 +561,33 @@ impl BybitWsFeedHandler {
         }
     }
 
-    fn observe_order_rate_limit(&self, response: &super::messages::BybitWsOrderResponse) {
+    fn observe_order_rate_limit(&self, response: &super::messages::BitgetWsOrderResponse) {
         let Some(req_id) = response.req_id.as_deref() else {
             return;
         };
         let Some((_, pending)) = self.pending_rates.remove(req_id) else {
             return;
         };
-        let Some(header) = response.header.as_ref() else {
+        // Bitget reports the remaining quota as `rateLimit:[{limit, remaining}]` without a reset time
+        let Some(rate) = response.header.as_ref().and_then(|rates| rates.first()) else {
             return;
         };
-        let parse_u32 = |key: &str| {
-            header.get(key).and_then(|value| {
-                value
-                    .as_u64()
-                    .and_then(|value| u32::try_from(value).ok())
-                    .or_else(|| value.as_str()?.parse::<u32>().ok())
-            })
-        };
-        let Some(limit) = parse_u32(BYBIT_RATE_LIMIT_HEADER) else {
+        let (Ok(limit), Ok(remaining)) = (rate.limit.parse::<u32>(), rate.remaining.parse::<u32>())
+        else {
             return;
         };
-        let Some(remaining) = parse_u32(BYBIT_RATE_LIMIT_STATUS_HEADER) else {
-            return;
-        };
-        let reset_timestamp_ms = header.get(BYBIT_RATE_LIMIT_RESET_HEADER).and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.parse::<i64>().ok())
-        });
         self.rate_limiter.observe_account(
             pending.endpoint,
             Some(pending.category),
             limit,
             remaining,
-            reset_timestamp_ms,
+            None,
         );
     }
 
-    fn handle_subscription_ack(&self, sub_msg: &BybitWsSubscriptionMsg) {
+    fn handle_subscription_ack(&self, sub_msg: &BitgetWsSubscriptionMsg) {
         match sub_msg.op {
-            BybitWsOperation::Subscribe => {
+            BitgetWsOperation::Subscribe => {
                 if sub_msg.success {
                     if let Some(topic) = &sub_msg.req_id {
                         self.subscriptions.confirm_subscribe(topic);
@@ -636,7 +615,7 @@ impl BybitWsFeedHandler {
                     }
                 }
             }
-            BybitWsOperation::Unsubscribe => {
+            BitgetWsOperation::Unsubscribe => {
                 if sub_msg.success {
                     if let Some(topic) = &sub_msg.req_id {
                         self.subscriptions.confirm_unsubscribe(topic);
@@ -659,12 +638,12 @@ impl BybitWsFeedHandler {
         }
     }
 
-    fn handle_subscription_error(&self, resp: &BybitWsResponse) {
+    fn handle_subscription_error(&self, resp: &BitgetWsResponse) {
         let topic = resp.req_id.as_deref().unwrap_or("unknown");
         let error_msg = resp.ret_msg.as_deref().unwrap_or("unknown error");
 
         match resp.op {
-            Some(BybitWsOperation::Subscribe) => {
+            Some(BitgetWsOperation::Subscribe) => {
                 // Duplicate subscribe is harmless: the topic is active on the
                 // venue, so confirm it instead of looping retries every reconnect.
                 if is_already_subscribed_error(error_msg)
@@ -684,22 +663,22 @@ impl BybitWsFeedHandler {
                 }
                 log::warn!("Subscription error: topic={topic}, error={error_msg}");
             }
-            Some(BybitWsOperation::Unsubscribe) => {
+            Some(BitgetWsOperation::Unsubscribe) => {
                 log::warn!("Unsubscription error: topic={topic}, error={error_msg}");
             }
             _ => {}
         }
     }
 
-    fn parse_raw_frame(msg: Message) -> Option<BybitWsFrame> {
+    fn parse_raw_frame(msg: Message) -> Option<BitgetWsFrame> {
         match msg {
             Message::Text(text) => {
                 if text == nautilus_network::RECONNECTED {
                     log::debug!("Received WebSocket reconnected signal");
-                    return Some(BybitWsFrame::Reconnected);
+                    return Some(BitgetWsFrame::Reconnected);
                 }
 
-                if text.trim().eq_ignore_ascii_case("pong") {
+                if text.trim().eq_ignore_ascii_case(BITGET_WS_PONG_PAYLOAD) {
                     return None;
                 }
 
@@ -713,15 +692,7 @@ impl BybitWsFeedHandler {
                     }
                 };
 
-                if value
-                    .get("op")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|op| op == BybitWsOperation::Pong.as_ref())
-                {
-                    return None;
-                }
-
-                Some(parse_bybit_ws_frame(value))
+                Some(parse_bitget_ws_frame(value))
             }
             Message::Binary(msg) => {
                 log::debug!("Raw binary frame ({} bytes)", msg.len());
@@ -737,28 +708,31 @@ impl BybitWsFeedHandler {
     }
 }
 
-fn order_operation(op: BybitWsOrderRequestOp) -> (&'static str, &'static str) {
+// REST and WebSocket order entry share one quota per endpoint
+fn order_operation(op: BitgetWsOrderRequestOp) -> (&'static str, &'static str) {
     match op {
-        BybitWsOrderRequestOp::Create => ("/v5/order/create", "order.create"),
-        BybitWsOrderRequestOp::Amend => ("/v5/order/amend", "order.amend"),
-        BybitWsOrderRequestOp::Cancel => ("/v5/order/cancel", "order.cancel"),
-        BybitWsOrderRequestOp::CreateBatch => ("/v5/order/create-batch", "order.create-batch"),
-        BybitWsOrderRequestOp::AmendBatch => ("/v5/order/amend-batch", "order.amend-batch"),
-        BybitWsOrderRequestOp::CancelBatch => ("/v5/order/cancel-batch", "order.cancel-batch"),
+        BitgetWsOrderRequestOp::Create => ("/api/v3/trade/place-order", "place-order"),
+        BitgetWsOrderRequestOp::Amend => ("/api/v3/trade/modify-order", "modify-order"),
+        BitgetWsOrderRequestOp::Cancel => ("/api/v3/trade/cancel-order", "cancel-order"),
+        BitgetWsOrderRequestOp::CreateBatch => ("/api/v3/trade/place-batch", "batch-place"),
+        BitgetWsOrderRequestOp::AmendBatch => ("/api/v3/trade/batch-modify-order", "batch-modify"),
+        BitgetWsOrderRequestOp::CancelBatch => ("/api/v3/trade/cancel-batch", "batch-cancel"),
     }
 }
 
-fn order_not_sent_message(command: &BybitWsOrderCommand, error: &BybitWsError) -> BybitWsMessage {
+fn order_not_sent_message(
+    command: &BitgetWsOrderCommand,
+    error: &BitgetWsError,
+) -> BitgetWsMessage {
     let (_, op) = order_operation(command.op);
-    BybitWsMessage::OrderResponse(BybitWsOrderResponse {
+    BitgetWsMessage::OrderResponse(BitgetWsOrderResponse {
         op: Ustr::from(op),
         conn_id: None,
         ret_code: -1,
         ret_msg: error.to_string(),
-        data: Value::Object(serde_json::Map::new()),
+        data: Value::Array(vec![]),
         req_id: Some(command.req_id.clone()),
         header: None,
-        ret_ext_info: None,
     })
 }
 
@@ -781,28 +755,28 @@ mod tests {
 
     use super::*;
     use crate::common::{
-        consts::BYBIT_WS_TOPIC_DELIMITER, rate_limit::BybitRateLimiter, testing::load_test_json,
+        consts::BITGET_WS_TOPIC_DELIMITER, rate_limit::BitgetRateLimiter, testing::load_test_json,
     };
 
-    fn create_test_handler() -> BybitWsFeedHandler {
+    fn create_test_handler() -> BitgetWsFeedHandler {
         let signal = Arc::new(AtomicBool::new(false));
         let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel();
         let auth_tracker = AuthTracker::new();
-        let subscriptions = SubscriptionState::new(BYBIT_WS_TOPIC_DELIMITER);
+        let subscriptions = SubscriptionState::new(BITGET_WS_TOPIC_DELIMITER);
 
-        BybitWsFeedHandler::new(
+        BitgetWsFeedHandler::new(
             signal,
             cmd_rx,
             raw_rx,
             auth_tracker,
             subscriptions,
-            BybitRateLimiter::for_websocket(
-                "wss://bybit-handler-test.invalid",
+            "usdt-futures",
+            BitgetRateLimiter::for_websocket(
+                "wss://bitget-handler-test.invalid",
                 Some("test-key"),
                 None,
             ),
-            Arc::new(AtomicU64::new(5_000)),
         )
     }
 
@@ -875,7 +849,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            matches!(stale, Err(BybitWsError::Authentication(message)) if message == "Connection changed before authentication")
+            matches!(stale, Err(BitgetWsError::Authentication(message)) if message == "Connection changed before authentication")
         );
         cmd_tx
             .send(HandlerCommand::Authenticate {
@@ -885,8 +859,8 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(BybitWsMessage::Auth(response)) = handler.next().await {
-                    assert_eq!(response.success, Some(true));
+                if let Some(BitgetWsMessage::Auth(response)) = handler.next().await {
+                    assert_eq!(response.ret_code, Some(0));
                     break;
                 }
             }
@@ -904,7 +878,7 @@ mod tests {
     }
 
     async fn connect_book_handler() -> (
-        BybitWsFeedHandler,
+        BitgetWsFeedHandler,
         tokio::sync::mpsc::UnboundedSender<HandlerCommand>,
         tokio::sync::mpsc::UnboundedReceiver<Value>,
     ) {
@@ -947,9 +921,9 @@ mod tests {
     }
 
     async fn complete_book_command(
-        handler: &mut BybitWsFeedHandler,
-        receiver: tokio::sync::oneshot::Receiver<BybitWsResult<()>>,
-    ) -> Result<BybitWsResult<()>, tokio::sync::oneshot::error::RecvError> {
+        handler: &mut BitgetWsFeedHandler,
+        receiver: tokio::sync::oneshot::Receiver<BitgetWsResult<()>>,
+    ) -> Result<BitgetWsResult<()>, tokio::sync::oneshot::error::RecvError> {
         let drive = async {
             loop {
                 handler.next().await;
@@ -974,7 +948,7 @@ mod tests {
     }
 
     fn subscription_request(op: &str, topic: &str) -> Value {
-        serde_json::json!({"op": op, "args": [topic], "req_id": topic})
+        serde_json::json!({"op": op, "args": [BitgetWsArg::from_topic(topic, "usdt-futures")]})
     }
 
     fn subscribe_book_command(
@@ -982,7 +956,7 @@ mod tests {
         gate: SnapshotGate,
     ) -> (
         HandlerCommand,
-        tokio::sync::oneshot::Receiver<BybitWsResult<()>>,
+        tokio::sync::oneshot::Receiver<BitgetWsResult<()>>,
     ) {
         let payload = subscription_request("subscribe", topic).to_string();
         let (completion, receiver) = tokio::sync::oneshot::channel();
@@ -999,7 +973,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_book_opens_gate_after_write() {
         let (mut handler, cmd_tx, mut requests) = connect_book_handler().await;
-        let topic = "orderbook.50.BTCUSDT";
+        let topic = "books.BTCUSDT";
         let gate = SnapshotGate::default();
         gate.lock().close();
         let (command, receiver) = subscribe_book_command(topic, gate.clone());
@@ -1017,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn test_resubscribe_book_replaces_subscription_and_opens_gate() {
         let (mut handler, cmd_tx, mut requests) = connect_book_handler().await;
-        let topic = "orderbook.50.BTCUSDT";
+        let topic = "books.BTCUSDT";
         handler.subscriptions.mark_subscribe(topic);
         handler.subscriptions.confirm_subscribe(topic);
         let gate = SnapshotGate::default();
@@ -1052,12 +1026,12 @@ mod tests {
         handler.inner.as_ref().unwrap().disconnect().await;
         let gate = SnapshotGate::default();
         gate.lock().close();
-        let (command, receiver) = subscribe_book_command("orderbook.50.BTCUSDT", gate.clone());
+        let (command, receiver) = subscribe_book_command("books.BTCUSDT", gate.clone());
 
         cmd_tx.send(command).unwrap();
         let result = complete_book_command(&mut handler, receiver).await;
 
-        assert!(matches!(result, Ok(Err(BybitWsError::Transport(_)))));
+        assert!(matches!(result, Ok(Err(BitgetWsError::Transport(_)))));
         assert!(gate.lock().is_closed());
     }
 
@@ -1065,7 +1039,7 @@ mod tests {
     #[tokio::test]
     async fn test_resubscribe_book_cancelled_before_write_sends_nothing() {
         let (mut handler, cmd_tx, mut requests) = connect_book_handler().await;
-        let topic = "orderbook.50.BTCUSDT";
+        let topic = "books.BTCUSDT";
         handler.subscriptions.mark_subscribe(topic);
         handler.subscriptions.confirm_subscribe(topic);
         let gate = SnapshotGate::default();
@@ -1073,7 +1047,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let (completion, receiver) = tokio::sync::oneshot::channel();
-        let sentinel = "orderbook.50.ETHUSDT";
+        let sentinel = "books.ETHUSDT";
         let (sentinel_command, sentinel_receiver) =
             subscribe_book_command(sentinel, SnapshotGate::default());
 
@@ -1127,25 +1101,25 @@ mod tests {
     async fn order_without_writer_produces_correlated_terminal_response() {
         let handler = create_test_handler();
         handler.auth_tracker.succeed();
-        let command = BybitWsOrderCommand {
+        let command = BitgetWsOrderCommand {
             req_id: "not-sent-request".to_string(),
-            op: BybitWsOrderRequestOp::Create,
-            category: BybitProductType::Linear,
+            op: BitgetWsOrderRequestOp::Create,
+            category: BitgetProductType::Linear,
             weight: 1,
             referer: None,
-            args: vec![serde_json::json!({"category": "linear"})],
+            args: vec![serde_json::json!({"symbol": "BTCUSDT"})],
         };
 
         let failure = handler.send_order(&command).await.unwrap_err();
         let OrderSendFailure::NotSent(error) = failure else {
             panic!("Expected definitive not-sent failure, was {failure:?}");
         };
-        let BybitWsMessage::OrderResponse(response) = order_not_sent_message(&command, &error)
+        let BitgetWsMessage::OrderResponse(response) = order_not_sent_message(&command, &error)
         else {
             panic!("Expected order response");
         };
 
-        assert_eq!(response.op, "order.create");
+        assert_eq!(response.op, "place-order");
         assert_eq!(response.ret_code, -1);
         assert_eq!(response.req_id.as_deref(), Some("not-sent-request"));
         assert_eq!(response.ret_msg, "Client error: No active WebSocket client");
@@ -1158,8 +1132,8 @@ mod tests {
         handler.pending_rates.insert(
             "reconnect-request".to_string(),
             PendingRate {
-                endpoint: "/v5/order/create",
-                category: BybitProductType::Linear,
+                endpoint: "/api/v3/trade/place-order",
+                category: BitgetProductType::Linear,
             },
         );
 
@@ -1179,8 +1153,8 @@ mod tests {
         handler.pending_rates.insert(
             "timeout-request".to_string(),
             PendingRate {
-                endpoint: "/v5/order/create",
-                category: BybitProductType::Linear,
+                endpoint: "/api/v3/trade/place-order",
+                category: BitgetProductType::Linear,
             },
         );
 
@@ -1200,8 +1174,8 @@ mod tests {
         handler.pending_rates.insert(
             "full-request".to_string(),
             PendingRate {
-                endpoint: "/v5/order/create",
-                category: BybitProductType::Linear,
+                endpoint: "/api/v3/trade/place-order",
+                category: BitgetProductType::Linear,
             },
         );
 
@@ -1217,12 +1191,15 @@ mod tests {
     #[rstest]
     fn test_parse_frame_auth_success() {
         let value = load_value("ws_auth_success.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         match frame {
-            BybitWsFrame::Auth(auth) => {
-                assert_eq!(auth.conn_id.as_deref(), Some("cejreaspqfm9se7usbrg-2xh"));
+            BitgetWsFrame::Auth(auth) => {
+                assert_eq!(
+                    auth.conn_id.as_deref(),
+                    Some("068b4afffe0ebff5-00003912-00207636-3f38547f12f362d9-556f6561")
+                );
                 assert_eq!(auth.ret_code, Some(0));
-                assert_eq!(auth.success, Some(true));
+                assert_eq!(auth.op, BitgetWsOperation::Auth);
             }
             other => panic!("Expected Auth, was {other:?}"),
         }
@@ -1231,11 +1208,12 @@ mod tests {
     #[rstest]
     fn test_parse_frame_auth_failure() {
         let value = load_value("ws_auth_failure.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         match frame {
-            BybitWsFrame::ErrorResponse(resp) => {
-                assert_eq!(resp.ret_code, Some(10003));
-                assert_eq!(resp.ret_msg.as_deref(), Some("Invalid apikey"));
+            BitgetWsFrame::ErrorResponse(resp) => {
+                assert_eq!(resp.op, Some(BitgetWsOperation::Auth));
+                assert_eq!(resp.ret_code, Some(30011));
+                assert_eq!(resp.ret_msg.as_deref(), Some("Invalid ACCESS_KEY"));
             }
             other => panic!("Expected ErrorResponse, was {other:?}"),
         }
@@ -1244,12 +1222,12 @@ mod tests {
     #[rstest]
     fn test_parse_frame_subscription_ack() {
         let value = load_value("ws_subscription_ack.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         match frame {
-            BybitWsFrame::Subscription(sub) => {
+            BitgetWsFrame::Subscription(sub) => {
                 assert!(sub.success);
-                assert_eq!(sub.op, BybitWsOperation::Subscribe);
-                assert_eq!(sub.req_id.as_deref(), Some("sub-orderbook-1"));
+                assert_eq!(sub.op, BitgetWsOperation::Subscribe);
+                assert_eq!(sub.req_id.as_deref(), Some("books5.BTCUSDT"));
             }
             other => panic!("Expected Subscription, was {other:?}"),
         }
@@ -1258,13 +1236,13 @@ mod tests {
     #[rstest]
     fn test_parse_frame_subscription_failure() {
         let value = load_value("ws_subscription_failure.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         match frame {
-            BybitWsFrame::ErrorResponse(resp) => {
-                assert_eq!(
-                    resp.ret_msg.as_deref(),
-                    Some("Invalid topic: invalid.topic.BTCUSDT")
-                );
+            BitgetWsFrame::ErrorResponse(resp) => {
+                // Bitget echoes the rejected arg inside `msg`, which recovers the topic key
+                assert_eq!(resp.op, Some(BitgetWsOperation::Subscribe));
+                assert_eq!(resp.ret_code, Some(30001));
+                assert_eq!(resp.req_id.as_deref(), Some("ticker.NOSUCHUSDT"));
             }
             other => panic!("Expected ErrorResponse, was {other:?}"),
         }
@@ -1273,12 +1251,28 @@ mod tests {
     #[rstest]
     fn test_parse_frame_order_response() {
         let value = load_value("ws_order_response.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         match frame {
-            BybitWsFrame::OrderResponse(resp) => {
-                assert_eq!(resp.op, "order.create");
+            BitgetWsFrame::OrderResponse(resp) => {
+                assert_eq!(resp.op, "place-order");
                 assert_eq!(resp.ret_code, 0);
-                assert_eq!(resp.ret_msg, "OK");
+                assert_eq!(resp.ret_msg, "Success");
+                assert_eq!(resp.req_id.as_deref(), Some("cap17941930863671"));
+                assert_eq!(resp.header.as_ref().unwrap()[0].remaining, "19");
+            }
+            other => panic!("Expected OrderResponse, was {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn test_parse_frame_order_response_error() {
+        let value = load_value("ws_order_response_error.json");
+        let frame = parse_bitget_ws_frame(value);
+        match frame {
+            BitgetWsFrame::OrderResponse(resp) => {
+                assert_eq!(resp.op, "");
+                assert_eq!(resp.ret_code, 25206);
+                assert_eq!(resp.req_id.as_deref(), Some("cap17941930907953"));
             }
             other => panic!("Expected OrderResponse, was {other:?}"),
         }
@@ -1287,9 +1281,9 @@ mod tests {
     #[rstest]
     fn test_parse_frame_orderbook() {
         let value = load_value("ws_orderbook_snapshot.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::Orderbook(_)),
+            matches!(frame, BitgetWsFrame::Orderbook(_)),
             "Expected Orderbook, was {frame:?}"
         );
     }
@@ -1297,9 +1291,9 @@ mod tests {
     #[rstest]
     fn test_parse_frame_trade() {
         let value = load_value("ws_public_trade.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::Trade(_)),
+            matches!(frame, BitgetWsFrame::Trade(_)),
             "Expected Trade, was {frame:?}"
         );
     }
@@ -1307,9 +1301,9 @@ mod tests {
     #[rstest]
     fn test_parse_frame_kline() {
         let value = load_value("ws_kline.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::Kline(_)),
+            matches!(frame, BitgetWsFrame::Kline(_)),
             "Expected Kline, was {frame:?}"
         );
     }
@@ -1317,39 +1311,50 @@ mod tests {
     #[rstest]
     fn test_parse_frame_ticker_linear() {
         let value = load_value("ws_ticker_linear.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::TickerLinear(_)),
+            matches!(frame, BitgetWsFrame::TickerLinear(_)),
             "Expected TickerLinear, was {frame:?}"
         );
     }
 
     #[rstest]
-    fn test_parse_frame_ticker_option() {
-        let value = load_value("ws_ticker_option.json");
-        let frame = parse_bybit_ws_frame(value);
+    fn test_parse_frame_funding_rate_is_unknown() {
+        // Funding comes from `ticker`; the `funding-rate` channel is not subscribed
+        let value = load_value("ws_funding_rate.json");
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::TickerOption(_)),
-            "Expected TickerOption, was {frame:?}"
+            matches!(frame, BitgetWsFrame::Unknown(_)),
+            "Expected Unknown, was {frame:?}"
         );
     }
 
     #[rstest]
     fn test_parse_frame_account_order() {
         let value = load_value("ws_account_order.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::AccountOrder(_)),
+            matches!(frame, BitgetWsFrame::AccountOrder(_)),
             "Expected AccountOrder, was {frame:?}"
+        );
+    }
+
+    #[rstest]
+    fn test_parse_frame_account_strategy_order() {
+        let value = load_value("ws_account_order_buy_stop_market.json");
+        let frame = parse_bitget_ws_frame(value);
+        assert!(
+            matches!(frame, BitgetWsFrame::AccountStrategyOrder(_)),
+            "Expected AccountStrategyOrder, was {frame:?}"
         );
     }
 
     #[rstest]
     fn test_parse_frame_account_execution() {
         let value = load_value("ws_account_execution.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::AccountExecution(_)),
+            matches!(frame, BitgetWsFrame::AccountExecution(_)),
             "Expected AccountExecution, was {frame:?}"
         );
     }
@@ -1357,9 +1362,9 @@ mod tests {
     #[rstest]
     fn test_parse_frame_account_wallet() {
         let value = load_value("ws_account_wallet.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::AccountWallet(_)),
+            matches!(frame, BitgetWsFrame::AccountWallet(_)),
             "Expected AccountWallet, was {frame:?}"
         );
     }
@@ -1367,9 +1372,9 @@ mod tests {
     #[rstest]
     fn test_parse_frame_account_position() {
         let value = load_value("ws_account_position.json");
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::AccountPosition(_)),
+            matches!(frame, BitgetWsFrame::AccountPosition(_)),
             "Expected AccountPosition, was {frame:?}"
         );
     }
@@ -1377,9 +1382,9 @@ mod tests {
     #[rstest]
     fn test_parse_frame_unknown_message() {
         let value: serde_json::Value = serde_json::json!({"foo": "bar"});
-        let frame = parse_bybit_ws_frame(value);
+        let frame = parse_bitget_ws_frame(value);
         assert!(
-            matches!(frame, BybitWsFrame::Unknown(_)),
+            matches!(frame, BitgetWsFrame::Unknown(_)),
             "Expected Unknown, was {frame:?}"
         );
     }
@@ -1387,9 +1392,9 @@ mod tests {
     #[rstest]
     fn test_parse_raw_reconnected_signal() {
         let msg = Message::Text(nautilus_network::RECONNECTED.to_string().into());
-        let result = BybitWsFeedHandler::parse_raw_frame(msg);
+        let result = BitgetWsFeedHandler::parse_raw_frame(msg);
         assert!(
-            matches!(result, Some(BybitWsFrame::Reconnected)),
+            matches!(result, Some(BitgetWsFrame::Reconnected)),
             "Expected Some(Reconnected), was {result:?}"
         );
     }
@@ -1397,30 +1402,25 @@ mod tests {
     #[rstest]
     fn test_parse_raw_pong_text() {
         let msg = Message::Text("pong".into());
-        let result = BybitWsFeedHandler::parse_raw_frame(msg);
+        let result = BitgetWsFeedHandler::parse_raw_frame(msg);
         assert!(result.is_none(), "Expected None for pong, was {result:?}");
     }
 
     #[rstest]
-    fn test_parse_raw_json_pong_message() {
-        let msg = Message::Text(
-            r#"{"args":["1777226678908"],"conn_id":"yzr7jz02gws1vh60mk5m-hxqdp","op":"pong"}"#
-                .into(),
-        );
-        let result = BybitWsFeedHandler::parse_raw_frame(msg);
-        assert!(
-            result.is_none(),
-            "Expected None for JSON pong, was {result:?}"
-        );
+    fn test_parse_raw_ping_text_is_not_json() {
+        // The handler answers a venue `ping` before parsing; parsing alone drops it as non-JSON
+        let msg = Message::Text("ping".into());
+        let result = BitgetWsFeedHandler::parse_raw_frame(msg);
+        assert!(result.is_none(), "Expected None for ping, was {result:?}");
     }
 
     #[rstest]
     fn test_parse_raw_valid_json() {
         let json = load_test_json("ws_public_trade.json");
         let msg = Message::Text(json.into());
-        let result = BybitWsFeedHandler::parse_raw_frame(msg);
+        let result = BitgetWsFeedHandler::parse_raw_frame(msg);
         assert!(
-            matches!(result, Some(BybitWsFrame::Trade(_))),
+            matches!(result, Some(BitgetWsFrame::Trade(_))),
             "Expected Some(Trade), was {result:?}"
         );
     }
@@ -1428,7 +1428,7 @@ mod tests {
     #[rstest]
     fn test_parse_raw_invalid_json() {
         let msg = Message::Text("not valid json".into());
-        let result = BybitWsFeedHandler::parse_raw_frame(msg);
+        let result = BitgetWsFeedHandler::parse_raw_frame(msg);
         assert!(
             result.is_none(),
             "Expected None for invalid JSON, was {result:?}"
@@ -1438,21 +1438,21 @@ mod tests {
     #[rstest]
     fn test_parse_raw_binary_message() {
         let msg = Message::Binary(vec![0x01, 0x02].into());
-        let result = BybitWsFeedHandler::parse_raw_frame(msg);
+        let result = BitgetWsFeedHandler::parse_raw_frame(msg);
         assert!(result.is_none(), "Expected None for binary, was {result:?}");
     }
 
     #[rstest]
     fn test_subscription_ack_with_req_id_confirms_only_that_topic() {
         let handler = create_test_handler();
-        handler.subscriptions.mark_subscribe("orderbook.50.BTCUSDT");
+        handler.subscriptions.mark_subscribe("books.BTCUSDT");
         handler.subscriptions.mark_subscribe("publicTrade.BTCUSDT");
 
-        let ack = BybitWsSubscriptionMsg {
+        let ack = BitgetWsSubscriptionMsg {
             success: true,
-            op: BybitWsOperation::Subscribe,
+            op: BitgetWsOperation::Subscribe,
             conn_id: None,
-            req_id: Some("orderbook.50.BTCUSDT".to_string()),
+            req_id: Some("books.BTCUSDT".to_string()),
             ret_msg: None,
         };
 
@@ -1469,21 +1469,21 @@ mod tests {
             !handler
                 .subscriptions
                 .pending_subscribe_topics()
-                .contains(&"orderbook.50.BTCUSDT".to_string())
+                .contains(&"books.BTCUSDT".to_string())
         );
     }
 
     #[rstest]
     fn test_subscription_failure_with_req_id_marks_only_that_topic() {
         let handler = create_test_handler();
-        handler.subscriptions.mark_subscribe("orderbook.50.BTCUSDT");
+        handler.subscriptions.mark_subscribe("books.BTCUSDT");
         handler.subscriptions.mark_subscribe("publicTrade.BTCUSDT");
 
-        let ack = BybitWsSubscriptionMsg {
+        let ack = BitgetWsSubscriptionMsg {
             success: false,
-            op: BybitWsOperation::Subscribe,
+            op: BitgetWsOperation::Subscribe,
             conn_id: None,
-            req_id: Some("orderbook.50.BTCUSDT".to_string()),
+            req_id: Some("books.BTCUSDT".to_string()),
             ret_msg: Some("Invalid topic".to_string()),
         };
 
@@ -1492,7 +1492,7 @@ mod tests {
         // Orderbook should be marked as failed (back to pending for retry)
         // Trade should remain pending (unaffected)
         let pending = handler.subscriptions.pending_subscribe_topics();
-        assert!(pending.contains(&"orderbook.50.BTCUSDT".to_string()));
+        assert!(pending.contains(&"books.BTCUSDT".to_string()));
         assert!(pending.contains(&"publicTrade.BTCUSDT".to_string()));
     }
 
@@ -1503,8 +1503,8 @@ mod tests {
             .subscriptions
             .mark_subscribe("invalid.topic.BTCUSDT");
 
-        let resp = BybitWsResponse {
-            op: Some(BybitWsOperation::Subscribe),
+        let resp = BitgetWsResponse {
+            op: Some(BitgetWsOperation::Subscribe),
             topic: None,
             success: Some(false),
             conn_id: None,
@@ -1523,38 +1523,36 @@ mod tests {
     #[rstest]
     fn test_already_subscribed_error_confirms_topic() {
         let handler = create_test_handler();
-        handler.subscriptions.mark_subscribe("tickers.ETHUSDT");
+        handler.subscriptions.mark_subscribe("ticker.ETHUSDT");
 
-        let resp = BybitWsResponse {
-            op: Some(BybitWsOperation::Subscribe),
+        let resp = BitgetWsResponse {
+            op: Some(BitgetWsOperation::Subscribe),
             topic: None,
             success: Some(false),
             conn_id: None,
-            req_id: Some("tickers.ETHUSDT".to_string()),
-            ret_code: Some(10001),
-            ret_msg: Some("error:already subscribed,topic:tickers.ETHUSDT".to_string()),
+            req_id: Some("ticker.ETHUSDT".to_string()),
+            ret_code: Some(30001),
+            ret_msg: Some("error:already subscribed,topic:ticker.ETHUSDT".to_string()),
         };
 
         handler.handle_subscription_error(&resp);
 
         let pending = handler.subscriptions.pending_subscribe_topics();
-        assert!(!pending.contains(&"tickers.ETHUSDT".to_string()));
+        assert!(!pending.contains(&"ticker.ETHUSDT".to_string()));
         let symbols = handler.subscriptions.confirmed();
-        let entry = symbols
-            .get(&Ustr::from("tickers"))
-            .expect("channel present");
+        let entry = symbols.get(&Ustr::from("ticker")).expect("channel present");
         assert!(entry.contains(&Ustr::from("ETHUSDT")));
     }
 
     #[rstest]
     fn test_subscription_ack_without_req_id_confirms_all_pending() {
         let handler = create_test_handler();
-        handler.subscriptions.mark_subscribe("orderbook.50.BTCUSDT");
+        handler.subscriptions.mark_subscribe("books.BTCUSDT");
         handler.subscriptions.mark_subscribe("publicTrade.BTCUSDT");
 
-        let ack = BybitWsSubscriptionMsg {
+        let ack = BitgetWsSubscriptionMsg {
             success: true,
-            op: BybitWsOperation::Subscribe,
+            op: BitgetWsOperation::Subscribe,
             conn_id: None,
             req_id: None,
             ret_msg: None,

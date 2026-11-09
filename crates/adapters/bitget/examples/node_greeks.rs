@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Example demonstrating live option greeks subscription with the Bybit adapter.
+//! Example demonstrating live option greeks subscription with the Bitget adapter.
 //!
 //! On start, this actor:
 //! 1. Queries the cache for all `UNDERLYING` option instruments
@@ -24,19 +24,19 @@
 //!
 //! Edit the constants below to change the underlying and node name.
 //!
-//! Run with: `cargo run --example bybit-greeks-tester --package nautilus-bybit --features examples`
+//! Run with: `cargo run --example bitget-greeks-tester --package nautilus-bitget --features examples`
 //!
 //! The data client uses public market data endpoints, so no API credentials are needed.
 
 use std::fmt::Debug;
 
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::{
-        consts::{BYBIT_CLIENT_ID, BYBIT_VENUE},
-        enums::BybitProductType,
+        consts::{BITGET_CLIENT_ID, BITGET_VENUE},
+        enums::BitgetProductType,
     },
-    config::BybitDataClientConfig,
-    factories::BybitDataClientFactory,
+    config::BitgetDataClientConfig,
+    factories::BitgetDataClientFactory,
 };
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
@@ -54,7 +54,7 @@ use nautilus_model::{
 use ustr::Ustr;
 
 const TRADER_ID: &str = "TESTER-001";
-const NODE_NAME: &str = "BYBIT-GREEKS-TESTER-001";
+const NODE_NAME: &str = "BITGET-GREEKS-TESTER-001";
 const ACTOR_ID: &str = "GREEKS_TESTER-001";
 const UNDERLYING: &str = "BTC";
 
@@ -82,7 +82,7 @@ impl GreeksTester {
 
 impl DataActor for GreeksTester {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        let venue = *BYBIT_VENUE;
+        let venue = *BITGET_VENUE;
         let underlying_filter = Ustr::from(UNDERLYING);
 
         // Collect option instrument data from cache (owned copies to release borrow)
@@ -187,26 +187,35 @@ impl DataActor for GreeksTester {
     }
 }
 
+/// Bitget lists no option instruments (kept for parity with the other adapters' examples).
+const BITGET_LISTS_OPTIONS: bool = false;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
+    // Bitget lists no option instruments, so this example has nothing to run against
+    if !BITGET_LISTS_OPTIONS {
+        eprintln!("Options are not supported by Bitget; this example exits without connecting");
+        return Ok(());
+    }
+
     let environment = Environment::Live;
     let trader_id = TraderId::from(TRADER_ID);
-    let client_id = *BYBIT_CLIENT_ID;
+    let client_id = *BITGET_CLIENT_ID;
 
-    let bybit_config = BybitDataClientConfig {
+    let bitget_config = BitgetDataClientConfig {
         api_key: None,
         api_secret: None,
-        product_types: vec![BybitProductType::Option],
+        product_types: vec![BitgetProductType::Option],
         ..Default::default()
     };
 
-    let client_factory = BybitDataClientFactory::new();
+    let client_factory = BitgetDataClientFactory::new();
 
     let mut node = LiveNode::builder(trader_id, environment)?
         .with_name(NODE_NAME.to_string())
-        .add_data_client(None, Box::new(client_factory), Box::new(bybit_config))?
+        .add_data_client(None, Box::new(client_factory), Box::new(bitget_config))?
         .with_delay_post_stop_secs(5)
         .build()?;
 

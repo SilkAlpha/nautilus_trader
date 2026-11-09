@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! WebSocket client bindings for the Bybit adapter.
+//! WebSocket client bindings for the Bitget adapter.
 
 pub mod client;
 pub mod dispatch;
@@ -23,4 +23,4 @@ pub mod handler;
 pub mod messages;
 pub mod parse;
 
-pub use parse::parse_bybit_ws_frame;
+pub use parse::parse_bitget_ws_frame;

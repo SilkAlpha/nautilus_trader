@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Cancels all derivatives orders and flattens all derivatives positions on Bybit.
+//! Cancels all derivatives orders and flattens all derivatives positions on Bitget.
 //!
 //! Iterates Linear and Inverse product types. Spot and Option are skipped: Spot
 //! holdings are balances rather than positions, and Option flattening needs
@@ -21,24 +21,24 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo run -p nautilus-bybit --bin bybit-flatten
+//! cargo run -p nautilus-bitget --bin bitget-flatten
 //! ```
 //!
 //! Environment variables (any of):
-//! - `BYBIT_API_KEY` / `BYBIT_API_SECRET` (mainnet, default)
-//! - `BYBIT_TESTNET_API_KEY` / `BYBIT_TESTNET_API_SECRET` (testnet)
-//! - `BYBIT_DEMO_API_KEY` / `BYBIT_DEMO_API_SECRET` (demo)
+//! - `BITGET_API_KEY` / `BITGET_API_SECRET` / `BITGET_API_PASSPHRASE` (mainnet, default)
+//! - `BITGET_DEMO_API_KEY` / `BITGET_DEMO_API_SECRET` / `BITGET_DEMO_API_PASSPHRASE` (demo;
+//!   Bitget has no testnet, so testnet also uses the demo keys and venue)
 //!
 //! Selector flags (mutually exclusive):
-//! - `BYBIT_DEMO=true` selects demo
-//! - `BYBIT_TESTNET=true` selects testnet
+//! - `BITGET_DEMO=true` selects demo
+//! - `BITGET_TESTNET=true` selects testnet
 //! - otherwise mainnet
 
 use std::time::Duration;
 
-use nautilus_bybit::{
-    common::enums::{BybitPositionIdx, BybitProductType},
-    http::client::BybitHttpClient,
+use nautilus_bitget::{
+    common::enums::{BitgetPositionIdx, BitgetProductType},
+    http::client::BitgetHttpClient,
 };
 use nautilus_core::UUID4;
 use nautilus_model::{
@@ -47,9 +47,9 @@ use nautilus_model::{
     reports::position::PositionStatusReport,
 };
 
-const VENUE_SUFFIX: &str = "BYBIT";
-const FLATTEN_PRODUCT_TYPES: &[BybitProductType] =
-    &[BybitProductType::Linear, BybitProductType::Inverse];
+const VENUE_SUFFIX: &str = "BITGET";
+const FLATTEN_PRODUCT_TYPES: &[BitgetProductType] =
+    &[BitgetProductType::Linear, BitgetProductType::Inverse];
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
@@ -63,11 +63,11 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     nautilus_common::logging::ensure_logging_initialized();
 
-    let demo = env_flag("BYBIT_DEMO");
-    let testnet = env_flag("BYBIT_TESTNET");
+    let demo = env_flag("BITGET_DEMO");
+    let testnet = env_flag("BITGET_TESTNET");
 
     if demo && testnet {
-        anyhow::bail!("BYBIT_DEMO and BYBIT_TESTNET cannot both be set");
+        anyhow::bail!("BITGET_DEMO and BITGET_TESTNET cannot both be set");
     }
 
     let env_label = if demo {
@@ -77,10 +77,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         "MAINNET"
     };
-    log::warn!("Bybit flatten starting against {env_label}");
+    log::warn!("Bitget flatten starting against {env_label}");
 
-    let client = BybitHttpClient::new_with_env(
-        None, None, None, demo, testnet, 30, 3, 1_000, 10_000, 5_000, None,
+    let client = BitgetHttpClient::new_with_env(
+        None, None, None, None, demo, testnet, 30, 3, 1_000, 10_000, 5_000, None,
     )?;
 
     let account_id = AccountId::new(format!("{VENUE_SUFFIX}-UNIFIED"));
@@ -129,9 +129,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn close_position(
-    client: &BybitHttpClient,
+    client: &BitgetHttpClient,
     account_id: AccountId,
-    product_type: BybitProductType,
+    product_type: BitgetProductType,
     position: &PositionStatusReport,
 ) -> anyhow::Result<()> {
     let instrument_id = position.instrument_id;
@@ -164,7 +164,9 @@ async fn close_position(
         .as_ref()
         .and_then(|pid| infer_position_idx(pid.as_str(), position.position_side));
 
-    let cid = ClientOrderId::new(format!("flatten-{}", UUID4::new()));
+    // Bitget `clientOid` is at most 32 characters of `[A-Za-z0-9_:-]`
+    let uuid = UUID4::new().to_string().replace('-', "");
+    let cid = ClientOrderId::new(format!("flatten-{}", &uuid[..24]));
     log::info!(
         "{instrument_id}: closing {} {} via reduce-only Market",
         position.quantity,
@@ -202,23 +204,23 @@ async fn close_position(
     Ok(())
 }
 
-fn infer_position_idx(venue_pid: &str, side: PositionSide) -> Option<BybitPositionIdx> {
+fn infer_position_idx(venue_pid: &str, side: PositionSide) -> Option<BitgetPositionIdx> {
     // Hedge-mode venue position IDs are "<SYMBOL>-LONG" / "<SYMBOL>-SHORT"
     // and one-way mode reports None.
     if venue_pid.ends_with("-LONG") {
-        Some(BybitPositionIdx::BuyHedge)
+        Some(BitgetPositionIdx::BuyHedge)
     } else if venue_pid.ends_with("-SHORT") {
-        Some(BybitPositionIdx::SellHedge)
+        Some(BitgetPositionIdx::SellHedge)
     } else {
         match side {
-            PositionSide::Long => Some(BybitPositionIdx::OneWay),
-            PositionSide::Short => Some(BybitPositionIdx::OneWay),
+            PositionSide::Long => Some(BitgetPositionIdx::OneWay),
+            PositionSide::Short => Some(BitgetPositionIdx::OneWay),
             PositionSide::Flat => None,
         }
     }
 }
 
-async fn verify_flat(client: &BybitHttpClient, account_id: AccountId) -> anyhow::Result<()> {
+async fn verify_flat(client: &BitgetHttpClient, account_id: AccountId) -> anyhow::Result<()> {
     let mut residual = Vec::new();
 
     for product_type in FLATTEN_PRODUCT_TYPES {

@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Enumerations for Bybit WebSocket operations and channels.
+//! Enumerations for Bitget WebSocket operations and channels.
 
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumIter, EnumString};
@@ -34,17 +34,21 @@ use strum::{AsRefStr, Display, EnumIter, EnumString};
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
-pub enum BybitWsOperation {
+pub enum BitgetWsOperation {
     /// Subscribe to topics.
     Subscribe,
     /// Unsubscribe from topics.
     Unsubscribe,
     /// Authenticate connection.
+    #[serde(rename = "login")]
+    #[strum(serialize = "login")]
     Auth,
-    /// Ping message.
+    /// Ping message (Bitget sends the plain text `ping`, not a JSON frame).
     Ping,
-    /// Pong message.
+    /// Pong message (Bitget answers with the plain text `pong`).
     Pong,
+    /// Order entry request (`op:"trade"`) on the private connection.
+    Trade,
 }
 
 /// Private authenticated channel types.
@@ -63,21 +67,27 @@ pub enum BybitWsOperation {
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
-pub enum BybitWsPrivateChannel {
+pub enum BitgetWsPrivateChannel {
     /// Order updates.
     Order,
-    /// Execution/fill updates.
+    /// Execution/fill updates (Bitget topic `fill`).
+    #[serde(rename = "fill")]
+    #[strum(serialize = "fill")]
     Execution,
-    /// Fast execution stream (slimmer payload, lower latency).
-    ///
-    /// Effective 2026-03-17 the venue extended this stream to support options.
-    #[serde(rename = "execution.fast")]
-    #[strum(serialize = "execution.fast")]
+    /// Fast execution stream (slimmer payload, lower latency; Bitget topic `fast-fill`).
+    #[serde(rename = "fast-fill")]
+    #[strum(serialize = "fast-fill")]
     ExecutionFast,
     /// Position updates.
     Position,
-    /// Wallet/balance updates.
+    /// Wallet/balance updates (Bitget topic `account`).
+    #[serde(rename = "account")]
+    #[strum(serialize = "account")]
     Wallet,
+    /// Conditional (trigger/TP/SL) order updates; Bitget pushes these apart from `order`.
+    #[serde(rename = "strategy-order")]
+    #[strum(serialize = "strategy-order")]
+    StrategyOrder,
 }
 
 /// Public channel types.
@@ -96,23 +106,29 @@ pub enum BybitWsPrivateChannel {
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
-pub enum BybitWsPublicChannel {
-    /// Order book updates.
-    #[serde(rename = "orderbook")]
-    #[strum(serialize = "orderbook")]
+pub enum BitgetWsPublicChannel {
+    /// Order book updates (Bitget topics `books`, `books1`, `books5`, `books50`).
+    #[serde(rename = "books")]
+    #[strum(serialize = "books")]
     OrderBook,
     /// Public trades.
     #[serde(rename = "publicTrade")]
     #[strum(serialize = "publicTrade")]
     PublicTrade,
-    /// Trade updates.
+    /// Trade updates (no separate Bitget topic; trades arrive on `publicTrade`).
     Trade,
     /// Kline/candlestick updates.
     Kline,
-    /// Ticker updates.
+    /// Ticker updates (Bitget topic `ticker`).
+    #[serde(rename = "ticker")]
+    #[strum(serialize = "ticker")]
     Tickers,
-    /// Public liquidation updates.
-    #[serde(rename = "allLiquidation")]
-    #[strum(serialize = "allLiquidation")]
+    /// Public liquidation updates (Bitget topic `liquidation`).
+    #[serde(rename = "liquidation")]
+    #[strum(serialize = "liquidation")]
     AllLiquidation,
+    /// Funding rate updates (Bitget topic `funding-rate`).
+    #[serde(rename = "funding-rate")]
+    #[strum(serialize = "funding-rate")]
+    FundingRate,
 }

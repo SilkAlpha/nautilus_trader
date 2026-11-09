@@ -66,6 +66,7 @@ ANNOTATED_ADAPTER_CRATES = [
     "betfair",
     "binance",
     "blockchain",
+    "bitget",
     "bybit",
     "databento",
     "deribit",

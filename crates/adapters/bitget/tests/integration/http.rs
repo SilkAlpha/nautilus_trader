@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Integration tests for Bybit HTTP client using a mock server.
+//! Integration tests for Bitget HTTP client using a mock server.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
@@ -25,23 +25,23 @@ use axum::{
     routing::{get, post},
 };
 use jiff::Timestamp;
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::{
-        consts::BYBIT_VENUE,
+        consts::BITGET_VENUE,
         enums::{
-            BybitAccountType, BybitBboSideType, BybitEnvironment, BybitMarginMode,
-            BybitOrderSmpType, BybitOrderType, BybitPositionIdx, BybitProductType,
-            BybitRepayStatus, BybitTpSlMode, BybitTriggerType, BybitUnifiedMarginStatus,
+            BitgetAccountType, BitgetBboSideType, BitgetEnvironment, BitgetMarginMode,
+            BitgetOrderSmpType, BitgetOrderType, BitgetPositionIdx, BitgetProductType,
+            BitgetRepayStatus, BitgetTriggerType, BitgetUnifiedMarginStatus,
         },
         parse::parse_linear_instrument,
-        urls::bybit_http_base_url,
+        urls::bitget_http_base_url,
     },
     http::{
-        client::{BybitHttpClient, BybitRawHttpClient},
-        models::BybitInstrumentLinearResponse,
+        client::{BitgetHttpClient, BitgetRawHttpClient},
+        models::BitgetInstrumentLinearResponse,
         query::{
-            BybitFeeRateParams, BybitInstrumentsInfoParamsBuilder, BybitNativeTpSlParams,
-            BybitPositionListParamsBuilder, BybitWalletBalanceParams,
+            BitgetFeeRateParams, BitgetInstrumentsInfoParamsBuilder, BitgetNativeTpSlParams,
+            BitgetPositionListParamsBuilder, BitgetWalletBalanceParams,
         },
     },
 };
@@ -61,7 +61,19 @@ use nautilus_network::http::HttpClient;
 use rstest::rstest;
 use serde_json::{Value, json};
 
-type SettleCoinQueries = Arc<tokio::sync::Mutex<Vec<(String, Option<String>)>>>;
+// (endpoint, query)
+type EndpointQueries = Arc<tokio::sync::Mutex<Vec<(String, HashMap<String, String>)>>>;
+
+// Bitget signs every private request with these four headers
+const AUTH_HEADERS: [&str; 4] = [
+    "ACCESS-KEY",
+    "ACCESS-SIGN",
+    "ACCESS-TIMESTAMP",
+    "ACCESS-PASSPHRASE",
+];
+
+// Bitget rejects requests whose ACCESS-TIMESTAMP is more than 30 s off the server time
+const BITGET_TIMESTAMP_WINDOW_MS: i64 = 30_000;
 
 #[derive(Debug, Clone, Copy)]
 enum RequiredInstrumentCachePath {
@@ -75,6 +87,7 @@ enum RequiredInstrumentCachePath {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
 struct CapturedOrder {
+    path: String,
     category: String,
     symbol: String,
     side: String,
@@ -82,14 +95,12 @@ struct CapturedOrder {
     qty: String,
     price: Option<String>,
     trigger_price: Option<String>,
-    trigger_direction: Option<String>,
+    trigger_order_type: Option<String>,
+    trigger_order_price: Option<String>,
     time_in_force: Option<String>,
-    market_unit: Option<String>,
-    reduce_only: Option<bool>,
-    is_leverage: Option<i32>,
+    reduce_only: Option<String>,
     order_link_id: Option<String>,
-    position_idx: Option<i64>,
-    bbo_side_type: Option<String>,
+    pos_side: Option<String>,
     bbo_level: Option<String>,
     raw_body: Value,
 }
@@ -99,13 +110,13 @@ struct CapturedOrder {
 struct TestServerState {
     request_count: Arc<tokio::sync::Mutex<usize>>,
     wallet_balance_requests: Arc<tokio::sync::Mutex<usize>>,
-    // (endpoint, settle_coin)
-    settle_coin_queries: SettleCoinQueries,
+    endpoint_queries: EndpointQueries,
     realtime_requests: Arc<tokio::sync::Mutex<usize>>,
     history_requests: Arc<tokio::sync::Mutex<usize>>,
     position_queries: Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>,
     order_submissions: Arc<tokio::sync::Mutex<Vec<CapturedOrder>>>,
     batch_cancel_requests: Arc<tokio::sync::Mutex<Vec<Value>>>,
+    request_headers: Arc<tokio::sync::Mutex<Vec<axum::http::HeaderMap>>>,
 }
 
 impl Default for TestServerState {
@@ -113,12 +124,13 @@ impl Default for TestServerState {
         Self {
             request_count: Arc::new(tokio::sync::Mutex::new(0)),
             wallet_balance_requests: Arc::new(tokio::sync::Mutex::new(0)),
-            settle_coin_queries: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            endpoint_queries: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             realtime_requests: Arc::new(tokio::sync::Mutex::new(0)),
             history_requests: Arc::new(tokio::sync::Mutex::new(0)),
             position_queries: Arc::default(),
             order_submissions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             batch_cancel_requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            request_headers: Arc::default(),
         }
     }
 }
@@ -146,19 +158,84 @@ fn load_test_data(filename: &str) -> Value {
     serde_json::from_str(&content).unwrap()
 }
 
+/// Wraps `data` in the Bitget v3 success envelope.
+fn bitget_ok(data: &Value) -> Value {
+    json!({
+        "code": "00000",
+        "msg": "success",
+        "requestTime": 1794193082020i64,
+        "data": data
+    })
+}
+
+/// Returns a Bitget v3 error envelope with the given HTTP status.
+fn bitget_error(status: StatusCode, code: &str, msg: &str) -> Response {
+    (
+        status,
+        Json(json!({
+            "code": code,
+            "msg": msg,
+            "requestTime": 1794193082020i64,
+            "data": null
+        })),
+    )
+        .into_response()
+}
+
+/// Rejects requests lacking Bitget signed auth headers with 401.
+fn require_bitget_auth(headers: &axum::http::HeaderMap) -> Option<Response> {
+    if AUTH_HEADERS.iter().any(|name| !headers.contains_key(*name)) {
+        return Some(bitget_error(
+            StatusCode::UNAUTHORIZED,
+            "40006",
+            "Invalid ACCESS_KEY",
+        ));
+    }
+    None
+}
+
+/// Bitget returns the oldest id of a page as `cursor`; the request after the last page yields
+/// `{"list": null, "cursor": null}`.
+fn empty_page() -> Value {
+    bitget_ok(&json!({ "list": null, "cursor": null }))
+}
+
+fn has_cursor(query: &HashMap<String, String>) -> bool {
+    query.get("cursor").is_some_and(|cursor| !cursor.is_empty())
+}
+
+/// Two resting TSLAUSDT post-only orders (`open-order-1`, `open-order-2`), taken from the demo
+/// order history and reset to `new`.
+fn open_orders() -> Vec<Value> {
+    let history = load_test_data("http_get_orders_history.json");
+    let rows = history["data"]["list"].as_array().unwrap();
+    rows[2..4]
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut order = row.clone();
+            order["orderId"] = json!(format!("open-order-{}", index + 1));
+            order["clientOid"] = json!(format!("client-open-{}", index + 1));
+            order["orderStatus"] = json!("new");
+            order["cancelReason"] = json!("");
+            order
+        })
+        .collect()
+}
+
+/// The demo order history (filled and cancelled TSLAUSDT orders) followed by a copy of
+/// `open-order-1`, which history and the open list both return while an order is live.
+fn history_with_duplicate() -> Vec<Value> {
+    let history = load_test_data("http_get_orders_history.json");
+    let mut rows = history["data"]["list"].as_array().unwrap()[..2].to_vec();
+    rows.insert(0, open_orders()[0].clone());
+    rows
+}
+
 // Mock endpoint handlers
 #[allow(dead_code)]
 async fn handle_get_server_time() -> impl IntoResponse {
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "timeSecond": "1704470400",
-            "timeNano": "1704470400123456789"
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
+    Json(load_test_data("http_get_server_time.json"))
 }
 
 #[allow(dead_code)]
@@ -166,22 +243,15 @@ async fn handle_get_instruments(query: Query<HashMap<String, String>>) -> impl I
     let category = query.get("category").map(String::as_str);
 
     let filename = match category {
-        Some("linear") => "http_get_instruments_linear.json",
-        Some("spot") => "http_get_instruments_spot.json",
-        Some("inverse") => "http_get_instruments_inverse.json",
-        Some("option") => "http_get_instruments_option.json",
+        Some("USDT-FUTURES") => "http_get_instruments_linear.json",
+        Some("SPOT") => "http_get_instruments_spot.json",
+        Some("COIN-FUTURES") => "http_get_instruments_inverse.json",
         _ => {
-            return (
+            return bitget_error(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "retCode": 10001,
-                    "retMsg": "Invalid category parameter",
-                    "result": {},
-                    "retExtInfo": {},
-                    "time": 1704470400123i64
-                })),
-            )
-                .into_response();
+                "400172",
+                "Parameter verification failed",
+            );
         }
     };
 
@@ -191,18 +261,15 @@ async fn handle_get_instruments(query: Query<HashMap<String, String>>) -> impl I
 
 #[allow(dead_code)]
 async fn handle_get_klines(query: Query<HashMap<String, String>>) -> impl IntoResponse {
-    if !query.contains_key("category") || !query.contains_key("symbol") {
-        return (
+    if !query.contains_key("category")
+        || !query.contains_key("symbol")
+        || !query.contains_key("interval")
+    {
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required parameters",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     }
 
     let klines = load_test_data("http_get_klines_linear.json");
@@ -212,17 +279,11 @@ async fn handle_get_klines(query: Query<HashMap<String, String>>) -> impl IntoRe
 #[allow(dead_code)]
 async fn handle_get_trades(query: Query<HashMap<String, String>>) -> impl IntoResponse {
     if !query.contains_key("category") || !query.contains_key("symbol") {
-        return (
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required parameters",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     }
 
     let trades = load_test_data("http_get_trades_recent.json");
@@ -231,40 +292,33 @@ async fn handle_get_trades(query: Query<HashMap<String, String>>) -> impl IntoRe
 
 #[allow(dead_code)]
 async fn handle_get_executions(Query(query): Query<HashMap<String, String>>) -> impl IntoResponse {
-    let mut executions = load_test_data("http_get_executions_funding.json");
-    let (index, next_cursor) = if query.contains_key("cursor") {
-        (0, "")
+    // `/api/v3/trade/fills` takes no symbol filter: page 1 carries an ETHUSDT row the client
+    // must drop, page 2 the remaining TSLAUSDT fills
+    let mut executions = load_test_data("http_get_executions.json");
+    let rows = executions["data"]["list"].as_array().unwrap().clone();
+    let (list, next_cursor) = if has_cursor(&query) {
+        (rows[1..].to_vec(), Value::Null)
     } else {
-        (1, "trade-page")
+        let mut other_symbol = rows[1].clone();
+        other_symbol["symbol"] = json!("ETHUSDT");
+        other_symbol["execId"] = json!("eth-fill-1");
+        (vec![rows[0].clone(), other_symbol], json!("trade-page"))
     };
-    let execution = executions["result"]["list"][index].clone();
-    executions["result"]["list"] = json!([execution]);
-    executions["result"]["nextPageCursor"] = json!(next_cursor);
+    executions["data"]["list"] = json!(list);
+    executions["data"]["cursor"] = next_cursor;
 
     Json(executions)
 }
 
 #[allow(dead_code)]
 async fn handle_get_orders(
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<TestServerState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     let mut count = state.request_count.lock().await;
@@ -272,213 +326,97 @@ async fn handle_get_orders(
 
     // Simulate rate limiting after 5 requests
     if *count > 5 {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({
-                "retCode": 10006,
-                "retMsg": "Too many requests. Please retry after 1 second.",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return bitget_error(StatusCode::TOO_MANY_REQUESTS, "429", "Too Many Requests");
+    }
+
+    if has_cursor(&query) {
+        return Json(empty_page()).into_response();
     }
 
     let orders = load_test_data("http_get_orders_history.json");
     Json(orders).into_response()
 }
 
+/// Parses a place-order body, or `None` when it is not JSON or lacks a required field.
+fn parse_order_body(body: &axum::body::Bytes) -> Option<Value> {
+    let order_req: Value = serde_json::from_slice(body).ok()?;
+
+    // Validate required fields
+    let complete = order_req.get("category").is_some()
+        && order_req.get("symbol").is_some()
+        && order_req.get("side").is_some()
+        && (order_req.get("orderType").is_some() || order_req.get("type").is_some())
+        && order_req.get("qty").is_some();
+
+    complete.then_some(order_req)
+}
+
 #[allow(dead_code)]
 async fn handle_post_order(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
-    // Parse JSON body
-    let Ok(order_req): Result<Value, _> = serde_json::from_slice(&body) else {
-        return (
+    let Some(order_req) = parse_order_body(&body) else {
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Invalid JSON body",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     };
 
-    // Validate required fields
-    if order_req.get("category").is_none()
-        || order_req.get("symbol").is_none()
-        || order_req.get("side").is_none()
-        || order_req.get("orderType").is_none()
-        || order_req.get("qty").is_none()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required order parameters",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
-    }
-
-    // Return successful order response
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "orderId": "test-order-id-12345",
-            "orderLinkId": order_req.get("orderLinkId").and_then(|v| v.as_str()).unwrap_or("")
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    // Return the demo place-order acknowledgement for this client order id
+    let mut response = load_test_data("http_post_place_order.json");
+    response["data"]["clientOid"] = order_req.get("clientOid").cloned().unwrap_or(json!(""));
+    Json(response).into_response()
 }
 
 /// Stateful order handler that captures order details for test validation.
+///
+/// Serves both `place-order` and `place-strategy-order` (conditional orders).
 #[allow(dead_code)]
 async fn handle_post_order_with_capture(
     State(state): State<TestServerState>,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
-    let Ok(order_req): Result<Value, _> = serde_json::from_slice(&body) else {
-        return (
+    let Some(order_req) = parse_order_body(&body) else {
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Invalid JSON body",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     };
 
-    if order_req.get("category").is_none()
-        || order_req.get("symbol").is_none()
-        || order_req.get("side").is_none()
-        || order_req.get("orderType").is_none()
-        || order_req.get("qty").is_none()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required order parameters",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
-    }
+    let field = |name: &str| {
+        order_req
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
 
     let captured = CapturedOrder {
-        category: order_req
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        symbol: order_req
-            .get("symbol")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        side: order_req
-            .get("side")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        order_type: order_req
-            .get("orderType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        qty: order_req
-            .get("qty")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        price: order_req
-            .get("price")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        trigger_price: order_req
-            .get("triggerPrice")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        trigger_direction: order_req
-            .get("triggerDirection")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.to_string()),
-        time_in_force: order_req
-            .get("timeInForce")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        market_unit: order_req
-            .get("marketUnit")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        reduce_only: order_req.get("reduceOnly").and_then(|v| v.as_bool()),
-        is_leverage: order_req
-            .get("isLeverage")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32),
-        order_link_id: order_req
-            .get("orderLinkId")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        position_idx: order_req.get("positionIdx").and_then(|v| v.as_i64()),
-        bbo_side_type: order_req
-            .get("bboSideType")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        bbo_level: order_req
-            .get("bboLevel")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        path: uri.path().to_string(),
+        category: field("category").unwrap_or_default(),
+        symbol: field("symbol").unwrap_or_default(),
+        side: field("side").unwrap_or_default(),
+        order_type: field("orderType").unwrap_or_default(),
+        qty: field("qty").unwrap_or_default(),
+        price: field("price"),
+        trigger_price: field("triggerPrice"),
+        trigger_order_type: field("triggerOrderType"),
+        trigger_order_price: field("triggerOrderPrice"),
+        time_in_force: field("timeInForce"),
+        reduce_only: field("reduceOnly"),
+        order_link_id: field("clientOid"),
+        pos_side: field("posSide"),
+        bbo_level: field("bboLevel"),
         raw_body: order_req.clone(),
     };
 
@@ -487,17 +425,47 @@ async fn handle_post_order_with_capture(
         orders.push(captured);
     }
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "orderId": "test-order-id-12345",
-            "orderLinkId": order_req.get("orderLinkId").and_then(|v| v.as_str()).unwrap_or("")
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    let fixture = if uri.path().ends_with("place-strategy-order") {
+        "http_post_place_strategy_order.json"
+    } else {
+        "http_post_place_order.json"
+    };
+    Json(load_test_data(fixture)).into_response()
+}
+
+/// Serves `order-info` with the demo filled IOC order (the post-submit lookup).
+#[allow(dead_code)]
+async fn handle_get_order_info(headers: axum::http::HeaderMap) -> Response {
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
+    }
+
+    Json(load_test_data("http_get_order_info.json")).into_response()
+}
+
+/// Serves the conditional (strategy) order list with the demo trigger order.
+#[allow(dead_code)]
+async fn handle_get_strategy_orders(
+    Query(query): Query<HashMap<String, String>>,
+    State(state): State<TestServerState>,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
+    }
+
+    state
+        .endpoint_queries
+        .lock()
+        .await
+        .push((uri.path().to_string(), query.clone()));
+
+    if has_cursor(&query) {
+        return Json(empty_page()).into_response();
+    }
+
+    Json(load_test_data("http_get_strategy_orders_history.json")).into_response()
 }
 
 #[allow(dead_code)]
@@ -506,70 +474,48 @@ async fn handle_get_wallet_balance(
     headers: axum::http::HeaderMap,
 ) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     *state.wallet_balance_requests.lock().await += 1;
-    let wallet = load_test_data("http_get_wallet_balance.json");
+    let mut wallet = load_test_data("http_get_wallet_balance.json");
+
+    // The demo account holds no borrowed coin: add an ETH row whose debt makes a SPOT short
+    let assets = wallet["data"]["assets"].as_array_mut().unwrap();
+    let mut eth = assets[1].clone();
+    eth["coin"] = json!("ETH");
+    eth["equity"] = json!("-0.06142");
+    eth["balance"] = json!("0");
+    eth["available"] = json!("0");
+    eth["usdValue"] = json!("-189.31");
+    eth["balanceOriginal"] = json!("0");
+    eth["debt"] = json!("0.06142");
+    assets.push(eth);
+
     Json(wallet).into_response()
 }
 
 #[allow(dead_code)]
 async fn handle_get_account_info(headers: axum::http::HeaderMap) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-        || !headers.contains_key("X-BAPI-RECV-WINDOW")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
-    let timestamp = headers["X-BAPI-TIMESTAMP"]
+    let timestamp = headers["ACCESS-TIMESTAMP"]
         .to_str()
         .expect("timestamp header is valid UTF-8")
         .parse::<i64>()
         .expect("timestamp header is milliseconds");
-    let recv_window_ms = headers["X-BAPI-RECV-WINDOW"]
-        .to_str()
-        .expect("receive window header is valid UTF-8")
-        .parse::<i64>()
-        .expect("receive window header is milliseconds");
     let server_time_ms = Timestamp::now().as_millisecond();
 
-    if server_time_ms - timestamp > recv_window_ms {
-        return Json(json!({
-            "retCode": 10002,
-            "retMsg": "Request time exceeds the time window range",
-            "result": {},
-            "retExtInfo": {},
-            "time": server_time_ms
-        }))
-        .into_response();
+    if (server_time_ms - timestamp).abs() > BITGET_TIMESTAMP_WINDOW_MS {
+        return bitget_error(
+            StatusCode::BAD_REQUEST,
+            "40008",
+            "Request timestamp expired",
+        );
     }
 
     let account_info = load_test_data("http_get_account_info.json");
@@ -579,65 +525,30 @@ async fn handle_get_account_info(headers: axum::http::HeaderMap) -> Response {
 #[allow(dead_code)]
 async fn handle_cancel_order(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     // Parse JSON body
     let Ok(cancel_req): Result<Value, _> = serde_json::from_slice(&body) else {
-        return (
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Invalid JSON body",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     };
 
-    // Validate required fields
-    if cancel_req.get("category").is_none() || cancel_req.get("symbol").is_none() {
-        return (
+    // Bitget needs `orderId` or `clientOid`
+    if cancel_req.get("orderId").is_none() && cancel_req.get("clientOid").is_none() {
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required parameters",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     }
 
-    // Return successful cancel response
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "orderId": "test-canceled-order-id",
-            "orderLinkId": cancel_req.get("orderLinkId").and_then(|v| v.as_str()).unwrap_or("")
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    // Return the demo cancel acknowledgement
+    Json(load_test_data("http_post_cancel_order.json")).into_response()
 }
 
 #[allow(dead_code)]
@@ -645,39 +556,32 @@ async fn handle_batch_cancel_orders(
     State(state): State<TestServerState>,
     Json(request): Json<Value>,
 ) -> impl IntoResponse {
+    let results: Vec<Value> = request
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "orderId": entry.get("orderId").cloned().unwrap_or(Value::Null),
+                        "clientOid": entry.get("clientOid").cloned().unwrap_or(Value::Null),
+                        "code": "0",
+                        "msg": "success"
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     state.batch_cancel_requests.lock().await.push(request);
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "orderId": null,
-            "orderLinkId": null
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    Json(bitget_ok(&json!(results))).into_response()
 }
 
 #[allow(dead_code)]
 async fn handle_get_positions(headers: axum::http::HeaderMap) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     let positions = load_test_data("http_get_positions.json");
@@ -687,21 +591,8 @@ async fn handle_get_positions(headers: axum::http::HeaderMap) -> Response {
 #[allow(dead_code)]
 async fn handle_get_fee_rate(headers: axum::http::HeaderMap) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     let fee_rate = load_test_data("http_get_fee_rate.json");
@@ -709,127 +600,36 @@ async fn handle_get_fee_rate(headers: axum::http::HeaderMap) -> Response {
 }
 
 #[allow(dead_code)]
-async fn handle_no_convert_repay(
-    headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
+async fn handle_repay(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     // Parse JSON body
     let Ok(repay_req): Result<Value, _> = serde_json::from_slice(&body) else {
-        return (
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Invalid JSON body",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     };
 
     // Validate required fields
     if repay_req.get("coin").is_none() {
-        return (
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required parameter: coin",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     }
 
-    let result_status = if repay_req["coin"] == "FAIL" {
-        "FA"
-    } else {
-        "SU"
-    };
-
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "resultStatus": result_status
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
-}
-
-#[allow(dead_code)]
-async fn handle_repay(headers: axum::http::HeaderMap, body: axum::body::Bytes) -> Response {
-    // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    // Bitget answers a repay with `"data": "success"` or a business error code
+    if repay_req["coin"] == "FAIL" {
+        return bitget_error(StatusCode::BAD_REQUEST, "25202", "Insufficient balance");
     }
 
-    // Parse JSON body
-    let Ok(repay_req): Result<Value, _> = serde_json::from_slice(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Invalid JSON body",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
-    };
-
-    let result_status = if repay_req["coin"] == "FAIL" {
-        "FA"
-    } else {
-        "SU"
-    };
-
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "resultStatus": result_status
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    Json(bitget_ok(&json!("success"))).into_response()
 }
 
 #[allow(dead_code)]
@@ -839,62 +639,23 @@ async fn handle_get_orders_realtime(
     headers: axum::http::HeaderMap,
 ) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     // Check required parameters
     if !query.contains_key("category") {
-        return (
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required parameter: category",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     }
 
-    // Check for settleCoin when no symbol is provided (for LINEAR products)
-    let category = query.get("category").map(String::as_str);
-    let has_symbol = query.contains_key("symbol");
-    let has_settle_coin = query.contains_key("settleCoin");
-
-    if category == Some("linear") && !has_symbol && !has_settle_coin {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing some parameters that must be filled in, symbol or settleCoin or baseCoin",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
-    }
-
-    // Track settle coin queries
-    let settle_coin = query.get("settleCoin").cloned();
+    // Track queries (Bitget takes no settle coin)
     {
-        let mut queries = state.settle_coin_queries.lock().await;
-        queries.push(("realtime".to_string(), settle_coin.clone()));
+        let mut queries = state.endpoint_queries.lock().await;
+        queries.push(("realtime".to_string(), query.0.clone()));
     }
 
     {
@@ -902,37 +663,22 @@ async fn handle_get_orders_realtime(
         *count += 1;
     }
 
-    let mut orders = load_test_data("http_get_orders_realtime.json");
-
-    // Make order IDs unique per settle coin for regression testing
-    if let Some(coin) = &settle_coin
-        && let Some(result) = orders.get_mut("result")
-        && let Some(list) = result.get_mut("list")
-        && let Some(array) = list.as_array_mut()
-    {
-        for order in array.iter_mut() {
-            if let Some(order_obj) = order.as_object_mut()
-                && let Some(order_id) = order_obj.get("orderId")
-            {
-                let base_id = order_id.as_str().unwrap_or("");
-                order_obj.insert(
-                    "orderId".to_string(),
-                    json!(format!("{}-{}", base_id, coin)),
-                );
-            }
-        }
+    if has_cursor(&query) {
+        return Json(empty_page()).into_response();
     }
+
+    let mut orders = open_orders();
 
     if let Some(limit_str) = query.get("limit")
         && let Ok(limit) = limit_str.parse::<usize>()
-        && let Some(result) = orders.get_mut("result")
-        && let Some(list) = result.get_mut("list")
-        && let Some(array) = list.as_array_mut()
     {
-        array.truncate(limit);
+        orders.truncate(limit);
     }
 
-    Json(orders).into_response()
+    Json(bitget_ok(
+        &json!({ "list": orders, "cursor": "open-order-2" }),
+    ))
+    .into_response()
 }
 
 #[allow(dead_code)]
@@ -942,62 +688,23 @@ async fn handle_get_orders_history_reconciliation(
     headers: axum::http::HeaderMap,
 ) -> Response {
     // Check for authentication headers
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     // Check required parameters
     if !query.contains_key("category") {
-        return (
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required parameter: category",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     }
 
-    // Check for settleCoin when no symbol is provided (for LINEAR products)
-    let category = query.get("category").map(String::as_str);
-    let has_symbol = query.contains_key("symbol");
-    let has_settle_coin = query.contains_key("settleCoin");
-
-    if category == Some("linear") && !has_symbol && !has_settle_coin {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing some parameters that must be filled in, symbol or settleCoin or baseCoin",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
-    }
-
-    // Track settle coin queries
-    let settle_coin = query.get("settleCoin").cloned();
+    // Track queries (Bitget takes no settle coin)
     {
-        let mut queries = state.settle_coin_queries.lock().await;
-        queries.push(("history".to_string(), settle_coin.clone()));
+        let mut queries = state.endpoint_queries.lock().await;
+        queries.push(("history".to_string(), query.0.clone()));
     }
 
     {
@@ -1005,61 +712,48 @@ async fn handle_get_orders_history_reconciliation(
         *count += 1;
     }
 
-    let mut orders = load_test_data("http_get_orders_history_with_duplicate.json");
-
-    // Make order IDs unique per settle coin for regression testing
-    if let Some(coin) = &settle_coin
-        && let Some(result) = orders.get_mut("result")
-        && let Some(list) = result.get_mut("list")
-        && let Some(array) = list.as_array_mut()
-    {
-        for order in array.iter_mut() {
-            if let Some(order_obj) = order.as_object_mut()
-                && let Some(order_id) = order_obj.get("orderId")
-            {
-                let base_id = order_id.as_str().unwrap_or("");
-                order_obj.insert(
-                    "orderId".to_string(),
-                    json!(format!("{}-{}", base_id, coin)),
-                );
-            }
-        }
+    if has_cursor(&query) {
+        return Json(empty_page()).into_response();
     }
+
+    let mut orders = history_with_duplicate();
 
     if let Some(limit_str) = query.get("limit")
         && let Ok(limit) = limit_str.parse::<usize>()
-        && let Some(result) = orders.get_mut("result")
-        && let Some(list) = result.get_mut("list")
-        && let Some(array) = list.as_array_mut()
     {
-        array.truncate(limit);
+        orders.truncate(limit);
     }
 
-    Json(orders).into_response()
+    Json(bitget_ok(
+        &json!({ "list": orders, "cursor": "history-page-2" }),
+    ))
+    .into_response()
 }
 
 #[allow(dead_code)]
 fn create_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/market/kline", get(handle_get_klines))
-        .route("/v5/market/recent-trade", get(handle_get_trades))
-        .route("/v5/execution/list", get(handle_get_executions))
-        .route("/v5/order/history", get(handle_get_orders))
-        .route("/v5/order/realtime", get(handle_get_orders))
-        .route("/v5/order/create", post(handle_post_order))
-        .route("/v5/order/cancel", post(handle_cancel_order))
-        .route("/v5/order/cancel-batch", post(handle_batch_cancel_orders))
-        .route("/v5/account/wallet-balance", get(handle_get_wallet_balance))
-        .route("/v5/account/info", get(handle_get_account_info))
-        .route("/v5/position/list", get(handle_get_positions))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route("/api/v3/market/candles", get(handle_get_klines))
+        .route("/api/v3/market/fills", get(handle_get_trades))
+        .route("/api/v3/trade/fills", get(handle_get_executions))
+        .route("/api/v3/trade/history-orders", get(handle_get_orders))
+        .route("/api/v3/trade/unfilled-orders", get(handle_get_orders))
+        .route("/api/v3/trade/place-order", post(handle_post_order))
+        .route("/api/v3/trade/cancel-order", post(handle_cancel_order))
         .route(
-            "/v5/account/no-convert-repay",
-            post(handle_no_convert_repay),
+            "/api/v3/trade/cancel-batch",
+            post(handle_batch_cancel_orders),
         )
-        .route("/v5/account/repay", post(handle_repay))
+        .route("/api/v3/account/assets", get(handle_get_wallet_balance))
+        .route("/api/v3/account/settings", get(handle_get_account_info))
+        .route(
+            "/api/v3/position/current-position",
+            get(handle_get_positions),
+        )
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/account/repay", post(handle_repay))
         .with_state(state)
 }
 
@@ -1077,8 +771,24 @@ async fn start_test_server()
     });
 
     // Give server time to start
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
     Ok((addr, state))
+}
+
+fn credentialed_client(base_url: String) -> BitgetHttpClient {
+    BitgetHttpClient::with_credentials(
+        "test_api_key".to_string(),
+        "test_api_secret".to_string(),
+        "test_api_passphrase".to_string(),
+        Some(base_url),
+        60,
+        3,
+        1000,
+        10_000,
+        5_000,
+        None,
+    )
+    .unwrap()
 }
 
 #[rstest]
@@ -1090,7 +800,7 @@ async fn start_test_server()
 async fn test_public_market_data_request_missing_cached_instrument_returns_lookup_error(
     #[case] path: RequiredInstrumentCachePath,
 ) {
-    let client = BybitHttpClient::new(
+    let client = BitgetHttpClient::new(
         Some("http://127.0.0.1:9".to_string()),
         1,
         0,
@@ -1100,25 +810,25 @@ async fn test_public_market_data_request_missing_cached_instrument_returns_looku
         None,
     )
     .unwrap();
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE);
 
     let result = match path {
         RequiredInstrumentCachePath::Trades => client
-            .request_trades(BybitProductType::Linear, instrument_id, None)
+            .request_trades(BitgetProductType::Linear, instrument_id, None)
             .await
             .map(|_| ()),
         RequiredInstrumentCachePath::FundingRates => client
-            .request_funding_rates(BybitProductType::Linear, instrument_id, None, None, None)
+            .request_funding_rates(BitgetProductType::Linear, instrument_id, None, None, None)
             .await
             .map(|_| ()),
         RequiredInstrumentCachePath::OrderbookSnapshot => client
-            .request_orderbook_snapshot(BybitProductType::Linear, instrument_id, None)
+            .request_orderbook_snapshot(BitgetProductType::Linear, instrument_id, None)
             .await
             .map(|_| ()),
         RequiredInstrumentCachePath::Bars => {
-            let bar_type = BarType::from("BTCUSDT-LINEAR.BYBIT-1-MINUTE-LAST-EXTERNAL");
+            let bar_type = BarType::from("BTCUSDT-PERP.BITGET-1-MINUTE-LAST-EXTERNAL");
             client
-                .request_bars(BybitProductType::Linear, bar_type, None, None, None, true)
+                .request_bars(BitgetProductType::Linear, bar_type, None, None, None, true)
                 .await
                 .map(|_| ())
         }
@@ -1133,43 +843,33 @@ async fn test_public_market_data_request_missing_cached_instrument_returns_looku
 #[rstest]
 #[tokio::test]
 async fn test_client_creation() {
-    let client = BybitHttpClient::new(None, 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(None, 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    assert!(client.base_url().contains("bybit.com"));
+    assert!(client.base_url().contains("bitget.com"));
     assert!(client.credential().is_none());
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_client_with_credentials() {
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some("https://api.bybit.com".to_string()),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client("https://api.bitget.com".to_string());
 
     assert!(client.credential().is_some());
 }
 
 #[rstest]
-#[case(true, false, BybitEnvironment::Demo)]
-#[case(false, true, BybitEnvironment::Testnet)]
-#[case(false, false, BybitEnvironment::Mainnet)]
+#[case(true, false, BitgetEnvironment::Demo)]
+#[case(false, true, BitgetEnvironment::Testnet)]
+#[case(false, false, BitgetEnvironment::Mainnet)]
 fn test_clients_new_with_env_resolve_default_url(
     #[case] demo: bool,
     #[case] testnet: bool,
-    #[case] environment: BybitEnvironment,
+    #[case] environment: BitgetEnvironment,
 ) {
-    let raw_client = BybitRawHttpClient::new_with_env(
+    let raw_client = BitgetRawHttpClient::new_with_env(
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         None,
         demo,
         testnet,
@@ -1181,9 +881,10 @@ fn test_clients_new_with_env_resolve_default_url(
         None,
     )
     .unwrap();
-    let client = BybitHttpClient::new_with_env(
+    let client = BitgetHttpClient::new_with_env(
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         None,
         demo,
         testnet,
@@ -1195,17 +896,25 @@ fn test_clients_new_with_env_resolve_default_url(
         None,
     )
     .unwrap();
-    let expected = bybit_http_base_url(environment);
+    let expected = bitget_http_base_url(environment);
 
     assert_eq!(raw_client.base_url(), expected);
     assert_eq!(client.base_url(), expected);
+    // Demo trading (and Testnet, which Bitget lacks) routes through `paptrading: 1`
+    assert_eq!(raw_client.is_demo_trading(), demo || testnet);
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_testnet_urls() {
-    let client = BybitHttpClient::new(
-        Some("https://api-testnet.bybit.com".to_string()),
+    // Bitget has no testnet host: Testnet resolves to the shared REST host plus demo trading
+    assert_eq!(
+        bitget_http_base_url(BitgetEnvironment::Testnet),
+        bitget_http_base_url(BitgetEnvironment::Mainnet)
+    );
+
+    let client = BitgetHttpClient::new(
+        Some(bitget_http_base_url(BitgetEnvironment::Testnet).to_string()),
         60,
         3,
         1000,
@@ -1215,14 +924,14 @@ async fn test_testnet_urls() {
     )
     .unwrap();
 
-    assert!(client.base_url().contains("testnet"));
+    assert_eq!(client.base_url(), "https://api.bitget.com");
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_custom_base_url() {
-    let custom_url = "https://custom.bybit.com";
-    let client = BybitHttpClient::new(
+    let custom_url = "https://custom.bitget.com";
+    let client = BitgetHttpClient::new(
         Some(custom_url.to_string()),
         60,
         3,
@@ -1236,15 +945,42 @@ async fn test_custom_base_url() {
     assert_eq!(client.base_url(), custom_url);
 }
 
+/// Records the request headers and serves the account settings.
+async fn handle_get_account_info_capture(
+    State(state): State<TestServerState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    state.request_headers.lock().await.push(headers.clone());
+    handle_get_account_info(headers).await
+}
+
 #[rstest]
+#[case::demo(true)]
+#[case::mainnet(false)]
 #[tokio::test]
-async fn test_request_fill_reports_excludes_funding_executions() {
-    let (addr, _state) = start_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
+async fn test_demo_trading_sends_paptrading_header(#[case] demo: bool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = TestServerState::default();
+    let router = Router::new()
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route(
+            "/api/v3/account/settings",
+            get(handle_get_account_info_capture),
+        )
+        .with_state(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    wait_for_server(addr, "/api/v3/market/time").await;
+
+    let client = BitgetHttpClient::new_with_env(
+        Some("test_api_key".to_string()),
+        Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
+        Some(format!("http://{addr}")),
+        demo,
+        false,
         60,
         3,
         1000,
@@ -1253,8 +989,27 @@ async fn test_request_fill_reports_excludes_funding_executions() {
         None,
     )
     .unwrap();
+
+    client.get_account_info().await.unwrap();
+
+    let headers = state.request_headers.lock().await;
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers[0].get("paptrading").map(|v| v.to_str().unwrap()),
+        demo.then_some("1")
+    );
+    assert_eq!(headers[0]["ACCESS-PASSPHRASE"], "test_api_passphrase");
+    assert_eq!(headers[0]["locale"], "en-US");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_fill_reports_walks_cursor_and_filters_symbol() {
+    let (addr, _state) = start_test_server().await.unwrap();
+    let base_url = format!("http://{addr}");
+    let client = credentialed_client(base_url);
     let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
+        .request_instruments(BitgetProductType::Linear, None, None)
         .await
         .unwrap();
 
@@ -1264,12 +1019,12 @@ async fn test_request_fill_reports_excludes_funding_executions() {
 
     let reports = client
         .request_fill_reports(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
-            Some(InstrumentId::from("BTCUSDT-LINEAR.BYBIT")),
+            AccountId::from("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
+            Some(InstrumentId::from("TSLAUSDT-PERP.BITGET")),
             None,
             None,
-            Some(1),
+            None,
         )
         .await
         .unwrap();
@@ -1278,7 +1033,15 @@ async fn test_request_fill_reports_excludes_funding_executions() {
         .map(|report| report.trade_id.to_string())
         .collect();
 
-    assert_eq!(trade_ids, vec!["bf13bd10-fe15-4ad4-a6bf-c388e3104f75"]);
+    assert_eq!(
+        trade_ids,
+        vec![
+            "1503520820379758592",
+            "1503520806874099712",
+            "1503520362420482048",
+            "1503520348428283904",
+        ]
+    );
 }
 
 #[rstest]
@@ -1287,11 +1050,11 @@ async fn test_get_server_time() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
     let response = client.get_server_time().await.unwrap();
-    assert!(!response.result.time_second.is_empty());
-    assert!(!response.result.time_nano.is_empty());
+    assert_eq!(response.result.time_second_str(), "1794192837");
+    assert_eq!(response.result.time_nano_str(), "1794192837141960000");
 }
 
 #[rstest]
@@ -1300,10 +1063,10 @@ async fn test_get_instruments_linear() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    let params = BybitInstrumentsInfoParamsBuilder::default()
-        .category(BybitProductType::Linear)
+    let params = BitgetInstrumentsInfoParamsBuilder::default()
+        .category(BitgetProductType::Linear)
         .build()
         .unwrap();
 
@@ -1317,10 +1080,10 @@ async fn test_get_instruments_spot() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    let params = BybitInstrumentsInfoParamsBuilder::default()
-        .category(BybitProductType::Spot)
+    let params = BitgetInstrumentsInfoParamsBuilder::default()
+        .category(BitgetProductType::Spot)
         .build()
         .unwrap();
 
@@ -1334,10 +1097,10 @@ async fn test_get_instruments_inverse() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    let params = BybitInstrumentsInfoParamsBuilder::default()
-        .category(BybitProductType::Inverse)
+    let params = BitgetInstrumentsInfoParamsBuilder::default()
+        .category(BitgetProductType::Inverse)
         .build()
         .unwrap();
 
@@ -1351,15 +1114,19 @@ async fn test_get_instruments_option() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    let params = BybitInstrumentsInfoParamsBuilder::default()
-        .category(BybitProductType::Option)
+    let params = BitgetInstrumentsInfoParamsBuilder::default()
+        .category(BitgetProductType::Option)
         .build()
         .unwrap();
 
-    let response = client.get_instruments_option(&params).await.unwrap();
-    assert!(!response.result.list.is_empty());
+    // Bitget lists no options: the venue rejects the OPTION category
+    let error = client.get_instruments_option(&params).await.unwrap_err();
+    assert!(
+        error.to_string().contains("400172"),
+        "unexpected error: {error}"
+    );
 }
 
 #[rstest]
@@ -1368,32 +1135,25 @@ async fn test_place_order() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     let order_request = serde_json::json!({
-        "category": "linear",
-        "symbol": "BTCUSDT",
-        "side": "Buy",
-        "orderType": "Limit",
-        "qty": "0.001",
-        "price": "50000",
-        "orderLinkId": "test-order-123"
+        "category": "USDT-FUTURES",
+        "symbol": "TSLAUSDT",
+        "side": "buy",
+        "orderType": "limit",
+        "qty": "0.02",
+        "price": "340",
+        "timeInForce": "post_only",
+        "clientOid": "test-order-123"
     });
 
     let response = client.place_order(&order_request).await.unwrap();
     assert_eq!(response.ret_code, 0);
-    assert!(response.result.order_id.is_some());
+    assert_eq!(
+        response.result.order_id.as_deref(),
+        Some("1503520305156874240")
+    );
 }
 
 #[rstest]
@@ -1403,13 +1163,13 @@ async fn test_authenticated_endpoint_requires_credentials() {
     let base_url = format!("http://{addr}");
 
     // Create client without credentials
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
     // Should fail when trying to call authenticated endpoint without credentials
     let result = client
         .get_open_orders(
-            BybitProductType::Linear,
-            Some("BTCUSDT".to_owned()),
+            BitgetProductType::Linear,
+            Some("TSLAUSDT".to_owned()),
             None,
             None,
             None,
@@ -1429,9 +1189,10 @@ async fn test_rate_limiting_returns_error() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
+    let client = BitgetHttpClient::with_credentials(
         "test_api_key".to_string(),
         "test_api_secret".to_string(),
+        "test_api_passphrase".to_string(),
         Some(base_url),
         60,
         0,
@@ -1448,8 +1209,8 @@ async fn test_rate_limiting_returns_error() {
     for _ in 0..10 {
         match client
             .get_open_orders(
-                BybitProductType::Linear,
-                Some("BTCUSDT".to_owned()),
+                BitgetProductType::Linear,
+                Some("TSLAUSDT".to_owned()),
                 None,
                 None,
                 None,
@@ -1472,38 +1233,40 @@ async fn test_rate_limiting_returns_error() {
     // Verify rate limit was triggered
     assert!(last_error.is_some());
     let error = last_error.unwrap();
-    assert!(error.to_string().contains("10006") || error.to_string().contains("Too many"));
+    assert!(error.to_string().contains("429") || error.to_string().contains("Too Many"));
 }
 
-/// Rejects the first two requests with a retryable status, then serves the order history.
+/// Rejects the first two requests with a retryable error, then serves the order history.
+///
+/// Bitget answers an exceeded quota with HTTP 429 and an IP-wide penalty, which the client
+/// honours as a cooldown rather than retrying; `40015` is the code Bitget asks to retry.
 #[allow(dead_code)]
 async fn handle_get_orders_realtime_retry(State(state): State<TestServerState>) -> Response {
     let mut count = state.request_count.lock().await;
     *count += 1;
 
     if *count <= 2 {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({
-                "retCode": 10006,
-                "retMsg": "Too many requests. Please retry after 1 second.",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return bitget_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "40015",
+            "System is abnormal, please try again later",
+        );
     }
 
-    let orders = load_test_data("http_get_orders_history.json");
+    let mut orders = load_test_data("http_get_orders_history.json");
+    orders["data"]["list"].as_array_mut().unwrap().truncate(1);
+    orders["data"]["cursor"] = Value::Null;
     Json(orders).into_response()
 }
 
 #[allow(dead_code)]
 fn create_retry_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/order/realtime", get(handle_get_orders_realtime_retry))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route(
+            "/api/v3/trade/unfilled-orders",
+            get(handle_get_orders_realtime_retry),
+        )
         .with_state(state)
 }
 
@@ -1519,20 +1282,21 @@ async fn start_retry_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
     Ok((addr, state))
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_rate_limiting_retries_then_succeeds() {
+async fn test_retryable_error_retries_then_succeeds() {
     let (addr, state) = start_retry_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
     // The 1ms delay bounds cap the jittered backoff, so both retries land immediately
-    let client = BybitHttpClient::with_credentials(
+    let client = BitgetHttpClient::with_credentials(
         "test_api_key".to_string(),
         "test_api_secret".to_string(),
+        "test_api_passphrase".to_string(),
         Some(base_url),
         60,
         2,
@@ -1545,8 +1309,8 @@ async fn test_rate_limiting_retries_then_succeeds() {
 
     let response = client
         .get_open_orders(
-            BybitProductType::Linear,
-            Some("BTCUSDT".to_owned()),
+            BitgetProductType::Linear,
+            Some("TSLAUSDT".to_owned()),
             None,
             None,
             None,
@@ -1563,10 +1327,10 @@ async fn test_rate_limiting_retries_then_succeeds() {
 
     assert_eq!(request_count, 3);
     assert_eq!(response.ret_code, 0);
-    assert_eq!(response.ret_msg, "OK");
+    assert_eq!(response.ret_msg, "success");
     assert_eq!(response.result.list.len(), 1);
-    assert_eq!(response.result.list[0].order_id, "abcdef123456");
-    assert_eq!(response.result.list[0].order_link_id, "client-1");
+    assert_eq!(response.result.list[0].order_id, "1503520820376788992");
+    assert_eq!(response.result.list[0].order_link_id, "tdcapflp93218");
 }
 
 #[rstest]
@@ -1576,9 +1340,10 @@ async fn test_rate_limited_requests_use_fresh_auth_timestamps() {
     const REQUEST_COUNT: usize = 51;
 
     let (addr, _state) = start_test_server().await.unwrap();
-    let client = BybitHttpClient::with_credentials(
+    let client = BitgetHttpClient::with_credentials(
         "test_api_key".to_string(),
         "test_api_secret".to_string(),
+        "test_api_passphrase".to_string(),
         Some(format!("http://{addr}")),
         60,
         0,
@@ -1607,23 +1372,12 @@ async fn test_get_open_orders_with_symbol() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     let response = client
         .get_open_orders(
-            BybitProductType::Linear,
-            Some("BTCUSDT".to_owned()),
+            BitgetProductType::Linear,
+            Some("TSLAUSDT".to_owned()),
             None,
             None,
             None,
@@ -1646,22 +1400,11 @@ async fn test_get_open_orders_without_symbol() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     let response = client
         .get_open_orders(
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             None,
             None,
             None,
@@ -1685,10 +1428,10 @@ async fn test_get_wallet_balance_requires_credentials() {
     let base_url = format!("http://{addr}");
 
     // Create client without credentials
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    let params = BybitWalletBalanceParams {
-        account_type: BybitAccountType::Unified,
+    let params = BitgetWalletBalanceParams {
+        account_type: BitgetAccountType::Unified,
         coin: None,
     };
 
@@ -1703,32 +1446,19 @@ async fn test_get_wallet_balance_with_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
-    let params = BybitWalletBalanceParams {
-        account_type: BybitAccountType::Unified,
+    let params = BitgetWalletBalanceParams {
+        account_type: BitgetAccountType::Unified,
         coin: None,
     };
 
     let response = client.get_wallet_balance(&params).await.unwrap();
 
+    // `/api/v3/account/assets` returns one unified account object
     assert_eq!(response.ret_code, 0);
-    assert!(!response.result.list.is_empty());
-    assert_eq!(
-        response.result.list[0].account_type,
-        BybitAccountType::Unified
-    );
+    assert!(!response.result.coin.is_empty());
+    assert_eq!(response.result.account_type, BitgetAccountType::Unified);
 }
 
 #[rstest]
@@ -1737,10 +1467,10 @@ async fn test_get_positions_requires_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    let params = BybitPositionListParamsBuilder::default()
-        .category(BybitProductType::Linear)
+    let params = BitgetPositionListParamsBuilder::default()
+        .category(BitgetProductType::Linear)
         .build()
         .unwrap();
 
@@ -1754,21 +1484,10 @@ async fn test_get_positions_with_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
-    let params = BybitPositionListParamsBuilder::default()
-        .category(BybitProductType::Linear)
+    let params = BitgetPositionListParamsBuilder::default()
+        .category(BitgetProductType::Linear)
         .build()
         .unwrap();
 
@@ -1783,11 +1502,11 @@ async fn test_get_fee_rate_requires_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
-    let params = BybitFeeRateParams {
-        category: BybitProductType::Linear,
-        symbol: Some("BTCUSDT".to_string()),
+    let params = BitgetFeeRateParams {
+        category: BitgetProductType::Linear,
+        symbol: Some("TSLAUSDT".to_string()),
         base_coin: None,
     };
 
@@ -1801,22 +1520,11 @@ async fn test_get_fee_rate_with_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
-    let params = BybitFeeRateParams {
-        category: BybitProductType::Linear,
-        symbol: Some("BTCUSDT".to_string()),
+    let params = BitgetFeeRateParams {
+        category: BitgetProductType::Linear,
+        symbol: Some("TSLAUSDT".to_string()),
         base_coin: None,
     };
 
@@ -1832,7 +1540,7 @@ async fn test_get_account_info_requires_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
     let result = client.get_account_info().await;
     result.unwrap_err();
@@ -1841,31 +1549,21 @@ async fn test_get_account_info_requires_credentials() {
 #[rstest]
 #[tokio::test]
 async fn test_get_account_info_with_credentials() {
-    use nautilus_bybit::http::models::BybitAccountInfoResponse;
+    use nautilus_bitget::http::models::BitgetAccountInfoResponse;
 
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
-    let response: BybitAccountInfoResponse = client.get_account_info().await.unwrap();
+    let response: BitgetAccountInfoResponse = client.get_account_info().await.unwrap();
 
+    // Demo account settings: `accountLevel: basic`, `accountMode: hybrid`, `deltaSwitch: no`
     assert_eq!(response.ret_code, 0);
-    assert_eq!(response.result.margin_mode, BybitMarginMode::RegularMargin);
+    assert_eq!(response.result.margin_mode, BitgetMarginMode::RegularMargin);
     assert_eq!(
         response.result.unified_margin_status,
-        BybitUnifiedMarginStatus::UnifiedTradingAccount10Pro
+        BitgetUnifiedMarginStatus::Hybrid
     );
     assert!(!response.result.is_master_trader);
     assert!(!response.result.spot_hedging_status);
@@ -1873,76 +1571,58 @@ async fn test_get_account_info_with_credentials() {
 
 #[rstest]
 #[tokio::test]
-async fn test_batch_cancel_options_chunks_by_venue_limit() {
+async fn test_batch_cancel_linear_respects_venue_limit() {
     let (addr, state) = start_test_server().await.unwrap();
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(format!("http://{addr}")),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-    let instrument_ids = (0..6)
-        .map(|index| {
-            InstrumentId::new(
-                Symbol::from(format!("BTC-30JUN25-10000{index}-C-OPTION")),
-                *BYBIT_VENUE,
-            )
-        })
+    let client = credentialed_client(format!("http://{addr}"));
+    let instrument_ids = (0..20)
+        .map(|_| InstrumentId::new(Symbol::from("TSLAUSDT-PERP"), *BITGET_VENUE))
         .collect::<Vec<_>>();
-    let client_order_ids = (0..6)
-        .map(|index| Some(ClientOrderId::from(format!("option-cancel-{index}"))))
+    let client_order_ids = (0..20)
+        .map(|index| Some(ClientOrderId::from(format!("linear-cancel-{index}"))))
         .collect::<Vec<_>>();
 
     let reports = client
         .batch_cancel_orders(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Option,
+            AccountId::from("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
             instrument_ids,
             client_order_ids,
-            vec![None; 6],
+            vec![None; 20],
         )
         .await
         .unwrap();
 
+    // `cancel-batch` takes a bare array of up to 20 entries, each carrying `category`
     let requests = state.batch_cancel_requests.lock().await;
     assert!(reports.is_empty());
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0]["category"], "option");
-    assert_eq!(requests[1]["category"], "option");
-    assert_eq!(requests[0]["request"].as_array().unwrap().len(), 5);
-    assert_eq!(requests[1]["request"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        requests
+    assert_eq!(requests.len(), 1);
+    let entries = requests[0].as_array().unwrap();
+    assert_eq!(entries.len(), 20);
+    assert!(
+        entries
             .iter()
-            .flat_map(|request| request["request"].as_array().unwrap())
-            .map(|order| order["orderLinkId"].as_str().unwrap().to_string())
+            .all(|entry| entry["category"] == "USDT-FUTURES" && entry["symbol"] == "TSLAUSDT")
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|order| order["clientOid"].as_str().unwrap().to_string())
             .collect::<Vec<_>>(),
-        (0..6)
-            .map(|index| format!("option-cancel-{index}"))
+        (0..20)
+            .map(|index| format!("linear-cancel-{index}"))
             .collect::<Vec<_>>()
     );
     drop(requests);
 
     let error = client
         .batch_cancel_orders(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Option,
+            AccountId::from("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
             (0..21)
-                .map(|index| {
-                    InstrumentId::new(
-                        Symbol::from(format!("BTC-30JUN25-20000{index}-C-OPTION")),
-                        *BYBIT_VENUE,
-                    )
-                })
+                .map(|_| InstrumentId::new(Symbol::from("TSLAUSDT-PERP"), *BITGET_VENUE))
                 .collect(),
             (0..21)
-                .map(|index| Some(ClientOrderId::from(format!("option-overflow-{index}"))))
+                .map(|index| Some(ClientOrderId::from(format!("linear-overflow-{index}"))))
                 .collect(),
             vec![None; 21],
         )
@@ -1951,21 +1631,33 @@ async fn test_batch_cancel_options_chunks_by_venue_limit() {
 
     assert_eq!(
         error.to_string(),
-        "Batch cancel limit is 20 orders for option"
+        "Batch cancel limit is 20 orders for linear"
     );
-    assert_eq!(state.batch_cancel_requests.lock().await.len(), 2);
+    assert_eq!(state.batch_cancel_requests.lock().await.len(), 1);
 }
+
 // Create router with separate handlers for reconciliation testing
 #[allow(dead_code)]
 fn create_reconciliation_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
-        .route("/v5/order/realtime", get(handle_get_orders_realtime))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
         .route(
-            "/v5/order/history",
+            "/api/v3/trade/unfilled-orders",
+            get(handle_get_orders_realtime),
+        )
+        .route(
+            "/api/v3/trade/history-orders",
             get(handle_get_orders_history_reconciliation),
+        )
+        .route(
+            "/api/v3/trade/unfilled-strategy-orders",
+            get(handle_get_strategy_orders),
+        )
+        .route(
+            "/api/v3/trade/history-strategy-orders",
+            get(handle_get_strategy_orders),
         )
         .with_state(state)
 }
@@ -1982,32 +1674,16 @@ async fn start_reconciliation_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
     Ok((addr, state))
 }
 
-#[rstest]
-#[tokio::test]
-async fn test_request_order_status_reports_calls_both_endpoints() {
-    let (addr, _state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+async fn reconciliation_client(addr: SocketAddr) -> BitgetHttpClient {
+    let client = credentialed_client(format!("http://{addr}"));
 
     // Required for parsing order reports
     let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
+        .request_instruments(BitgetProductType::Linear, None, None)
         .await
         .unwrap();
 
@@ -2015,16 +1691,34 @@ async fn test_request_order_status_reports_calls_both_endpoints() {
         client.cache_instrument(instrument);
     }
 
-    let account_id = AccountId::from("BYBIT-UNIFIED");
+    client
+}
 
-    // Should call BOTH /v5/order/realtime and /v5/order/history
-    // Note: With settle coin iteration, we now query both USDT and USDC
+/// Returns the endpoints queried, in request order.
+async fn queried_endpoints(state: &TestServerState) -> Vec<String> {
+    state
+        .endpoint_queries
+        .lock()
+        .await
+        .iter()
+        .map(|(endpoint, _)| endpoint.clone())
+        .collect()
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_order_status_reports_calls_both_endpoints() {
+    let (addr, _state) = start_reconciliation_test_server().await.unwrap();
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
+
+    // Should call BOTH unfilled-orders and history-orders
     // Use a limit to restrict to 3 orders for this test
     let reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
-            None,    // No specific instrument - will query both USDT and USDC
+            BitgetProductType::Linear,
+            None,    // No specific instrument
             false,   // open_only=false triggers dual endpoint call
             None,    // start
             None,    // end
@@ -2034,9 +1728,9 @@ async fn test_request_order_status_reports_calls_both_endpoints() {
         .unwrap();
 
     // Should get 3 orders:
-    // - 2 from realtime (open-order-1-USDT, open-order-2-USDT) from first settle coin
-    // - 1 more due to limit (from history or second settle coin)
-    // - open-order-1-USDT appears in both realtime and history but should be deduplicated
+    // - 2 from unfilled-orders (open-order-1, open-order-2)
+    // - 1 more from history due to the limit
+    // - open-order-1 appears in both unfilled and history but should be deduplicated
     let order_ids: Vec<String> = reports
         .iter()
         .map(|r| r.venue_order_id.to_string())
@@ -2047,47 +1741,23 @@ async fn test_request_order_status_reports_calls_both_endpoints() {
         3,
         "Should have 3 orders total (respecting limit)"
     );
-    // At minimum we should see the first 2 realtime orders from USDT
-    assert!(order_ids.contains(&"open-order-1-USDT".to_string()));
-    assert!(order_ids.contains(&"open-order-2-USDT".to_string()));
+    assert!(order_ids.contains(&"open-order-1".to_string()));
+    assert!(order_ids.contains(&"open-order-2".to_string()));
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_request_order_status_reports_requires_settle_coin_for_linear() {
-    let (addr, _state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+async fn test_request_order_status_reports_linear_needs_no_settle_coin() {
+    let (addr, state) = start_reconciliation_test_server().await.unwrap();
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-
-    // Should succeed because implementation adds settleCoin=USDT automatically
+    // Bitget lists open orders per category, so no settle coin is needed without a symbol
     let result = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
-            None, // No symbol - requires settleCoin
+            BitgetProductType::Linear,
+            None, // No symbol
             true, // open_only=true
             None, // start
             None, // end
@@ -2095,58 +1765,45 @@ async fn test_request_order_status_reports_requires_settle_coin_for_linear() {
         )
         .await;
 
-    assert!(result.is_ok(), "Should succeed with automatic settleCoin");
+    assert!(result.is_ok(), "Should succeed without a settle coin");
+
+    let queries = state.endpoint_queries.lock().await;
+    assert!(!queries.is_empty());
+    for (endpoint, query) in queries.iter() {
+        assert_eq!(
+            query.get("category").map(String::as_str),
+            Some("USDT-FUTURES"),
+            "{endpoint}: {query:?}"
+        );
+        assert!(!query.contains_key("settleCoin"), "{endpoint}: {query:?}");
+    }
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_order_deduplication_by_order_id() {
     let (addr, _state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
 
     // Test deduplication by querying both realtime and history for a specific instrument
-    // This avoids the settle coin iteration complexity
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("TSLAUSDT-PERP"), *BITGET_VENUE);
 
     let reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
-            Some(instrument_id), // Specify instrument to avoid settle coin iteration
-            false,               // This will query both realtime and history endpoints
-            None,                // start
-            None,                // end
-            None,                // limit
+            BitgetProductType::Linear,
+            Some(instrument_id),
+            false, // This will query both unfilled and history endpoints
+            None,  // start
+            None,  // end
+            None,  // limit
         )
         .await
         .unwrap();
 
     // Count occurrences of open-order-1
-    // It should appear once despite being in both realtime and history responses
+    // It should appear once despite being in both unfilled and history responses
     let open_order_1_count = reports
         .iter()
         .filter(|r| r.venue_order_id.to_string() == "open-order-1")
@@ -2154,44 +1811,21 @@ async fn test_order_deduplication_by_order_id() {
 
     assert_eq!(
         open_order_1_count, 1,
-        "open-order-1 should appear exactly once (deduplicated across realtime/history)"
+        "open-order-1 should appear exactly once (deduplicated across unfilled/history)"
     );
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_request_order_status_reports_linear_queries_all_settle_coins() {
+async fn test_request_order_status_reports_linear_queries_each_order_endpoint() {
     let (addr, state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
 
     let _reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             None,
             true,
             None,
@@ -2201,64 +1835,34 @@ async fn test_request_order_status_reports_linear_queries_all_settle_coins() {
         .await
         .unwrap();
 
-    let queries = state.settle_coin_queries.lock().await;
-    let realtime_queries: Vec<&Option<String>> = queries
-        .iter()
-        .filter(|(endpoint, _)| endpoint == "realtime")
-        .map(|(_, coin)| coin)
-        .collect();
-
+    // Open pass: regular then conditional orders; closed pass: the same from history.
+    // Conditional (strategy) orders live on their own Bitget endpoints.
     assert_eq!(
-        realtime_queries.len(),
-        8,
-        "Should query realtime endpoint for each settle coin, order filter, and openOnly pass"
-    );
-    assert!(
-        realtime_queries.contains(&&Some("USDT".to_string())),
-        "Should query USDT settle coin"
-    );
-    assert!(
-        realtime_queries.contains(&&Some("USDC".to_string())),
-        "Should query USDC settle coin"
+        queried_endpoints(&state).await,
+        vec![
+            "realtime",
+            "realtime",
+            "/api/v3/trade/unfilled-strategy-orders",
+            "/api/v3/trade/unfilled-strategy-orders",
+            "history",
+            "/api/v3/trade/history-strategy-orders",
+        ],
+        "Should query each order endpoint, following each open-list cursor once"
     );
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_request_order_status_reports_respects_limit_across_settle_coins() {
+async fn test_request_order_status_reports_respects_limit_across_endpoints() {
     let (addr, state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-
-    // Test data has 2 orders per settle coin
-    // With limit=3: expect 2 from USDT, 1 from USDC
+    // unfilled-orders returns 2 orders, the strategy endpoint 1, history 3
     let reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             None,
             true,
             None,
@@ -2274,54 +1878,26 @@ async fn test_request_order_status_reports_respects_limit_across_settle_coins() 
         reports.len()
     );
 
-    // Both settle coins should be queried
-    let queries = state.settle_coin_queries.lock().await;
-    let realtime_query_count = queries
-        .iter()
-        .filter(|(endpoint, _)| endpoint == "realtime")
-        .count();
-
+    // Both the regular and the conditional order lists should be queried
+    let endpoints = queried_endpoints(&state).await;
     assert!(
-        realtime_query_count >= 2,
-        "Should query both settle coins, was {realtime_query_count}",
+        endpoints.len() >= 2,
+        "Should query more than one endpoint, was {endpoints:?}",
     );
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_request_order_status_reports_stops_before_next_coin() {
+async fn test_request_order_status_reports_stops_before_next_endpoint() {
     let (addr, state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-
-    // Test data has 2 orders, limit=1 should stop after USDT
+    // unfilled-orders returns 2 orders, limit=1 should stop after the first request
     let reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             None,
             true,
             None,
@@ -2333,60 +1909,25 @@ async fn test_request_order_status_reports_stops_before_next_coin() {
 
     assert_eq!(reports.len(), 1, "Should return exactly 1 report");
 
-    // Early termination: USDC should be skipped
-    let queries = state.settle_coin_queries.lock().await;
-    let realtime_queries: Vec<&Option<String>> = queries
-        .iter()
-        .filter(|(endpoint, _)| endpoint == "realtime")
-        .map(|(_, coin)| coin)
-        .collect();
-
+    // Early termination: the other order endpoints should be skipped
     assert_eq!(
-        realtime_queries.len(),
-        1,
-        "Should only query first settle coin when limit reached"
-    );
-    assert_eq!(
-        realtime_queries[0],
-        &Some("USDT".to_string()),
-        "Should query USDT first"
+        queried_endpoints(&state).await,
+        vec!["realtime"],
+        "Should only query unfilled-orders when limit reached"
     );
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_request_order_status_reports_combines_orders_from_each_settle_coin() {
+async fn test_request_order_status_reports_combines_orders_from_each_endpoint() {
     let (addr, state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
 
     let reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             None,
             true,
             None,
@@ -2396,57 +1937,26 @@ async fn test_request_order_status_reports_combines_orders_from_each_settle_coin
         .await
         .unwrap();
 
-    let queries = state.settle_coin_queries.lock().await;
-    let realtime_queries: Vec<&Option<String>> = queries
-        .iter()
-        .filter(|(endpoint, _)| endpoint == "realtime")
-        .map(|(_, coin)| coin)
-        .collect();
-
-    assert_eq!(
-        realtime_queries.len(),
-        8,
-        "Should query both USDT and USDC with both order filters and openOnly passes"
-    );
-    assert!(
-        realtime_queries.contains(&&Some("USDT".to_string())),
-        "Should query USDT"
-    );
-    assert!(
-        realtime_queries.contains(&&Some("USDC".to_string())),
-        "Should query USDC"
-    );
+    assert_eq!(queried_endpoints(&state).await.len(), 6);
 
     let order_ids: Vec<String> = reports
         .iter()
         .map(|r| r.venue_order_id.to_string())
         .collect();
 
-    // Test data has 2 orders per settle coin
-    // With distinct suffixes: expect exactly 4 orders
+    // unfilled-orders: open-order-1, open-order-2; unfilled-strategy-orders: the trigger
+    // order; history-orders: the filled and the partially filled IOC (open-order-1 again is
+    // deduplicated); history-strategy-orders: the trigger order again (deduplicated)
     assert_eq!(
-        reports.len(),
-        4,
-        "Should get exactly 4 orders (2 from USDT + 2 from USDC), was {}",
-        reports.len()
-    );
-
-    assert!(
-        order_ids.contains(&"open-order-1-USDT".to_string()),
-        "Should contain open-order-1-USDT from USDT settle coin"
-    );
-    assert!(
-        order_ids.contains(&"open-order-2-USDT".to_string()),
-        "Should contain open-order-2-USDT from USDT settle coin"
-    );
-
-    assert!(
-        order_ids.contains(&"open-order-1-USDC".to_string()),
-        "Should contain open-order-1-USDC from USDC settle coin"
-    );
-    assert!(
-        order_ids.contains(&"open-order-2-USDC".to_string()),
-        "Should contain open-order-2-USDC from USDC settle coin"
+        order_ids,
+        vec![
+            "open-order-1",
+            "open-order-2",
+            "1503521064568303616",
+            "1503520820376788992",
+            "1503520806866935808",
+        ],
+        "Should combine the orders of each endpoint, was {order_ids:?}"
     );
 }
 
@@ -2454,80 +1964,71 @@ async fn test_request_order_status_reports_combines_orders_from_each_settle_coin
 async fn handle_get_orders_realtime_open_only(
     query: Query<HashMap<String, String>>,
     State(state): State<TestServerState>,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if !headers.contains_key("X-BAPI-API-KEY") {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
     {
         let mut count = state.realtime_requests.lock().await;
         *count += 1;
     }
+    state
+        .endpoint_queries
+        .lock()
+        .await
+        .push((uri.path().to_string(), query.0.clone()));
 
-    if query.get("orderFilter").map(String::as_str) == Some("StopOrder") {
-        return Json(json!({
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": { "list": [], "nextPageCursor": "" },
-            "retExtInfo": {},
-            "time": 1704470400123i64
-        }))
-        .into_response();
+    if uri.path().contains("strategy") || has_cursor(&query) {
+        return Json(empty_page()).into_response();
     }
 
-    let mut orders = load_test_data("http_get_orders_realtime.json");
-    let list = orders["result"]["list"]
-        .as_array_mut()
-        .expect("Fixture should contain an order list");
+    let mut list = open_orders();
     list.truncate(1);
 
-    if query.get("openOnly").map(String::as_str) == Some("1") {
-        if query.get("cursor").is_some_and(|cursor| !cursor.is_empty()) {
-            return Json(json!({
-                "retCode": 0,
-                "retMsg": "OK",
-                "result": { "list": [], "nextPageCursor": "" },
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            }))
-            .into_response();
-        }
-
+    // Bitget serves closed orders from history-orders, not from unfilled-orders
+    if uri.path() == "/api/v3/trade/history-orders" {
         // Keep the open order so the two passes overlap and exercise dedup
         let mut cancelled = list[0].clone();
         let fields = cancelled
             .as_object_mut()
             .expect("Fixture order should be an object");
         fields.insert("orderId".to_string(), json!("cancelled-order-1"));
-        fields.insert("orderLinkId".to_string(), json!("client-cancelled-1"));
-        fields.insert("orderStatus".to_string(), json!("Cancelled"));
-        fields.insert("cancelType".to_string(), json!("CancelByUser"));
+        fields.insert("clientOid".to_string(), json!("client-cancelled-1"));
+        fields.insert("orderStatus".to_string(), json!("cancelled"));
+        fields.insert("cancelReason".to_string(), json!("normal_cancel"));
         list.push(cancelled);
-        orders["result"]["nextPageCursor"] = json!("closed-page-2");
+        return Json(bitget_ok(
+            &json!({ "list": list, "cursor": "closed-page-2" }),
+        ))
+        .into_response();
     }
 
-    Json(orders).into_response()
+    Json(bitget_ok(&json!({ "list": list, "cursor": null }))).into_response()
 }
 
 #[allow(dead_code)]
 fn create_open_only_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
         .route(
-            "/v5/order/realtime",
+            "/api/v3/trade/unfilled-orders",
+            get(handle_get_orders_realtime_open_only),
+        )
+        .route(
+            "/api/v3/trade/history-orders",
+            get(handle_get_orders_realtime_open_only),
+        )
+        .route(
+            "/api/v3/trade/unfilled-strategy-orders",
+            get(handle_get_orders_realtime_open_only),
+        )
+        .route(
+            "/api/v3/trade/history-strategy-orders",
             get(handle_get_orders_realtime_open_only),
         )
         .with_state(state)
@@ -2545,7 +2046,7 @@ async fn start_open_only_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
     Ok((addr, state))
 }
 
@@ -2553,37 +2054,14 @@ async fn start_open_only_test_server()
 #[tokio::test]
 async fn test_request_order_status_reports_open_only_includes_recently_closed() {
     let (addr, state) = start_open_only_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("TSLAUSDT-PERP"), *BITGET_VENUE);
 
     let reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             Some(instrument_id),
             true,
             None,
@@ -2596,7 +2074,7 @@ async fn test_request_order_status_reports_open_only_includes_recently_closed() 
     let realtime_requests = *state.realtime_requests.lock().await;
     assert_eq!(
         realtime_requests, 4,
-        "Should query realtime for both openOnly passes and both order filters"
+        "Should query the open and closed lists for both regular and conditional orders"
     );
 
     let cancelled = reports
@@ -2626,25 +2104,14 @@ async fn test_repay_spot_borrow_with_amount() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     let amount = Quantity::new_checked(0.5, 8).unwrap();
     let response = client.repay_spot_borrow("ETH", Some(amount)).await.unwrap();
 
     assert_eq!(response.ret_code, 0);
-    assert_eq!(response.ret_msg, "OK");
-    assert_eq!(response.result.result_status, BybitRepayStatus::Success);
+    assert_eq!(response.ret_msg, "success");
+    assert_eq!(response.result.result_status, BitgetRepayStatus::Success);
 }
 
 #[rstest]
@@ -2653,25 +2120,14 @@ async fn test_repay_spot_borrow_without_amount() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     // Test repaying all outstanding borrows by passing None for amount
     let response = client.repay_spot_borrow("ETH", None).await.unwrap();
 
     assert_eq!(response.ret_code, 0);
-    assert_eq!(response.ret_msg, "OK");
-    assert_eq!(response.result.result_status, BybitRepayStatus::Success);
+    assert_eq!(response.ret_msg, "success");
+    assert_eq!(response.result.result_status, BitgetRepayStatus::Success);
 }
 
 #[rstest]
@@ -2680,7 +2136,7 @@ async fn test_repay_spot_borrow_requires_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
     let amount = Quantity::new_checked(0.5, 8).unwrap();
     let result = client.repay_spot_borrow("ETH", Some(amount)).await;
@@ -2693,18 +2149,7 @@ async fn test_repay_spot_borrow_with_conversion_with_amount() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     let amount = Quantity::new_checked(0.5, 8).unwrap();
     let response = client
@@ -2713,8 +2158,8 @@ async fn test_repay_spot_borrow_with_conversion_with_amount() {
         .unwrap();
 
     assert_eq!(response.ret_code, 0);
-    assert_eq!(response.ret_msg, "OK");
-    assert_eq!(response.result.result_status, BybitRepayStatus::Success);
+    assert_eq!(response.ret_msg, "success");
+    assert_eq!(response.result.result_status, BitgetRepayStatus::Success);
 }
 
 #[rstest]
@@ -2723,18 +2168,7 @@ async fn test_repay_spot_borrow_with_conversion_without_amount() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     // Test repaying all outstanding borrows by passing None for amount
     let response = client
@@ -2743,8 +2177,8 @@ async fn test_repay_spot_borrow_with_conversion_without_amount() {
         .unwrap();
 
     assert_eq!(response.ret_code, 0);
-    assert_eq!(response.ret_msg, "OK");
-    assert_eq!(response.result.result_status, BybitRepayStatus::Success);
+    assert_eq!(response.ret_msg, "success");
+    assert_eq!(response.result.result_status, BitgetRepayStatus::Success);
 }
 
 #[rstest]
@@ -2753,7 +2187,7 @@ async fn test_repay_spot_borrow_with_conversion_requires_credentials() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
     let amount = Quantity::new_checked(0.5, 8).unwrap();
     let result = client
@@ -2769,18 +2203,7 @@ async fn test_repay_spot_borrow_with_conversion_requires_credentials() {
 async fn test_repay_spot_borrow_rejects_failed_result_status(#[case] with_conversion: bool) {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
     let amount = Some(Quantity::new_checked(0.5, 8).unwrap());
 
     let result = if with_conversion {
@@ -2792,9 +2215,10 @@ async fn test_repay_spot_borrow_rejects_failed_result_status(#[case] with_conver
         client.repay_spot_borrow("FAIL", amount).await.map(|_| ())
     };
 
-    let error = result.expect_err("failed result status should return an error");
+    // Bitget reports a failed repay as a business error code, not a result status
+    let error = result.expect_err("failed repay should return an error");
     assert!(
-        error.to_string().contains("result status FA"),
+        error.to_string().contains("25202"),
         "Unexpected error: {error}"
     );
 }
@@ -2805,22 +2229,11 @@ async fn test_get_spot_borrow_amount_returns_zero_when_no_borrow() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
-    let borrow_amount = client.get_spot_borrow_amount("BTC").await.unwrap();
+    let borrow_amount = client.get_spot_borrow_amount("USDT").await.unwrap();
 
-    // BTC should have zero borrow in the test data
+    // USDT has zero debt in the test data
     assert_eq!(borrow_amount, rust_decimal::Decimal::ZERO);
 }
 
@@ -2830,18 +2243,7 @@ async fn test_get_spot_borrow_amount_returns_zero_when_coin_not_found() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     let borrow_amount = client.get_spot_borrow_amount("UNKNOWN").await.unwrap();
 
@@ -2855,25 +2257,14 @@ async fn test_spot_position_report_short_from_borrowed_balance() {
     let (addr, _state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     client.set_use_spot_position_reports(true);
 
     let eth = Currency::from("ETH");
     let usdt = Currency::from("USDT");
     let ethusdt = CurrencyPair::builder()
-        .instrument_id("ETHUSDT-SPOT.BYBIT".into())
+        .instrument_id("ETHUSDT-SPOT.BITGET".into())
         .raw_symbol("ETHUSDT".into())
         .base_currency(eth)
         .quote_currency(usdt)
@@ -2887,12 +2278,12 @@ async fn test_spot_position_report_short_from_borrowed_balance() {
         .unwrap();
     client.cache_instrument(InstrumentAny::CurrencyPair(ethusdt));
 
-    let account_id = AccountId::new("BYBIT-UNIFIED");
+    let account_id = AccountId::new("BITGET-UNIFIED");
     let reports = client
         .request_position_status_reports(
             account_id,
-            BybitProductType::Spot,
-            Some(InstrumentId::from("ETHUSDT-SPOT.BYBIT")),
+            BitgetProductType::Spot,
+            Some(InstrumentId::from("ETHUSDT-SPOT.BITGET")),
         )
         .await
         .unwrap();
@@ -2912,18 +2303,7 @@ async fn test_unscoped_spot_position_reports_fail_without_wallet_request() {
     let (addr, state) = start_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+    let client = credentialed_client(base_url);
 
     client.set_use_spot_position_reports(true);
 
@@ -2931,7 +2311,7 @@ async fn test_unscoped_spot_position_reports_fail_without_wallet_request() {
 
     for (symbol, quote) in [("ETHUSDT", "USDT"), ("ETHUSDC", "USDC")] {
         let instrument = CurrencyPair::builder()
-            .instrument_id(format!("{symbol}-SPOT.BYBIT").into())
+            .instrument_id(format!("{symbol}-SPOT.BITGET").into())
             .raw_symbol(symbol.into())
             .base_currency(eth)
             .quote_currency(Currency::from(quote))
@@ -2948,8 +2328,8 @@ async fn test_unscoped_spot_position_reports_fail_without_wallet_request() {
 
     let error = client
         .request_position_status_reports(
-            AccountId::new("BYBIT-UNIFIED"),
-            BybitProductType::Spot,
+            AccountId::new("BITGET-UNIFIED"),
+            BitgetProductType::Spot,
             None,
         )
         .await
@@ -2963,38 +2343,15 @@ async fn test_unscoped_spot_position_reports_fail_without_wallet_request() {
 #[tokio::test]
 async fn test_request_order_status_reports_with_time_filtering() {
     let (addr, state) = start_reconciliation_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
+    let client = reconciliation_client(addr).await;
+    let account_id = AccountId::from("BITGET-UNIFIED");
     let start_time = Timestamp::now() - jiff::SignedDuration::from_hours(24 * (7));
     let end_time = Timestamp::now();
 
     let _reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             None,
             false, // Query history
             Some(start_time),
@@ -3005,13 +2362,24 @@ async fn test_request_order_status_reports_with_time_filtering() {
         .unwrap();
 
     // The history endpoint should have been called with startTime and endTime
-    let queries = state.settle_coin_queries.lock().await;
+    let queries = state.endpoint_queries.lock().await;
+    let history: Vec<&HashMap<String, String>> = queries
+        .iter()
+        .filter(|(endpoint, _)| endpoint == "history")
+        .map(|(_, query)| query)
+        .collect();
 
-    // Should have called history endpoint for each settle coin (USDT, USDC)
-    assert!(
-        queries.len() >= 2,
-        "Should have called history endpoint at least twice (one per settle coin)"
-    );
+    assert!(!history.is_empty(), "Should have called history endpoint");
+    for query in history {
+        assert_eq!(
+            query.get("startTime"),
+            Some(&start_time.as_millisecond().to_string())
+        );
+        assert_eq!(
+            query.get("endTime"),
+            Some(&end_time.as_millisecond().to_string())
+        );
+    }
 }
 
 /// Handler that returns only a partial bar on first page, then closed bars on second page.
@@ -3020,17 +2388,11 @@ async fn handle_get_klines_partial_first_page(
     State(state): State<TestServerState>,
 ) -> impl IntoResponse {
     if !query.contains_key("category") || !query.contains_key("symbol") {
-        return (
+        return bitget_error(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Missing required parameters",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+            "400172",
+            "Parameter verification failed",
+        );
     }
 
     let mut count = state.request_count.lock().await;
@@ -3045,49 +2407,52 @@ async fn handle_get_klines_partial_first_page(
     let bar_duration_ms = 60_000i64;
     let partial_bar_start = (now_ms / bar_duration_ms) * bar_duration_ms;
 
+    // `/api/v3/market/candles` rows: [ts, open, high, low, close, baseVolume, quoteTurnover]
     if page == 1 {
-        Json(json!({
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "category": "linear",
-                "symbol": "BTCUSDT",
-                "list": [
-                    [partial_bar_start.to_string(), "100000", "100100", "99900", "100050", "1000", "100000000"]
-                ]
-            },
-            "retExtInfo": {},
-            "time": now_ms
-        }))
+        Json(bitget_ok(&json!([[
+            partial_bar_start.to_string(),
+            "100000",
+            "100100",
+            "99900",
+            "100050",
+            "1000",
+            "100000000"
+        ]])))
         .into_response()
     } else {
         let closed_bar_2_start = partial_bar_start - 2 * bar_duration_ms;
         let closed_bar_1_start = partial_bar_start - 3 * bar_duration_ms;
 
-        Json(json!({
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "category": "linear",
-                "symbol": "BTCUSDT",
-                "list": [
-                    [closed_bar_2_start.to_string(), "99800", "99900", "99700", "99850", "600", "60000000"],
-                    [closed_bar_1_start.to_string(), "99700", "99800", "99600", "99750", "500", "50000000"]
-                ]
-            },
-            "retExtInfo": {},
-            "time": now_ms
-        }))
+        Json(bitget_ok(&json!([
+            [
+                closed_bar_1_start.to_string(),
+                "99700",
+                "99800",
+                "99600",
+                "99750",
+                "500",
+                "50000000"
+            ],
+            [
+                closed_bar_2_start.to_string(),
+                "99800",
+                "99900",
+                "99700",
+                "99850",
+                "600",
+                "60000000"
+            ]
+        ])))
         .into_response()
     }
 }
 
 fn create_partial_first_page_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
         .route(
-            "/v5/market/kline",
+            "/api/v3/market/candles",
             get(handle_get_klines_partial_first_page),
         )
         .with_state(state)
@@ -3104,7 +2469,7 @@ async fn start_partial_first_page_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
 
     Ok((addr, state))
 }
@@ -3116,10 +2481,10 @@ async fn test_request_bars_continues_pagination_when_first_page_only_partial() {
     let (addr, state) = start_partial_first_page_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
+    let client = BitgetHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
 
     let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
+        .request_instruments(BitgetProductType::Linear, None, None)
         .await
         .unwrap();
 
@@ -3127,9 +2492,9 @@ async fn test_request_bars_continues_pagination_when_first_page_only_partial() {
         client.cache_instrument(instrument);
     }
 
-    let bar_type = BarType::from("BTCUSDT-LINEAR.BYBIT-1-MINUTE-LAST-EXTERNAL");
+    let bar_type = BarType::from("BTCUSDT-PERP.BITGET-1-MINUTE-LAST-EXTERNAL");
     let bars = client
-        .request_bars(BybitProductType::Linear, bar_type, None, None, None, true)
+        .request_bars(BitgetProductType::Linear, bar_type, None, None, None, true)
         .await
         .unwrap();
 
@@ -3148,11 +2513,22 @@ async fn test_request_bars_continues_pagination_when_first_page_only_partial() {
 #[allow(dead_code)]
 fn create_order_capture_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/order/create", post(handle_post_order_with_capture))
-        .route("/v5/order/realtime", get(handle_get_orders))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route(
+            "/api/v3/trade/place-order",
+            post(handle_post_order_with_capture),
+        )
+        .route(
+            "/api/v3/trade/place-strategy-order",
+            post(handle_post_order_with_capture),
+        )
+        .route("/api/v3/trade/order-info", get(handle_get_order_info))
+        .route(
+            "/api/v3/trade/unfilled-strategy-orders",
+            get(handle_get_strategy_orders),
+        )
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
         .with_state(state)
 }
 
@@ -3167,32 +2543,19 @@ async fn start_order_capture_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
 
     Ok((addr, state))
 }
 
-#[rstest]
-#[tokio::test]
-async fn test_submit_order_stop_market_with_trigger_price() {
-    let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
+async fn order_capture_client(
+    addr: SocketAddr,
+    product_type: BitgetProductType,
+) -> BitgetHttpClient {
+    let client = credentialed_client(format!("http://{addr}"));
 
     let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
+        .request_instruments(product_type, None, None)
         .await
         .unwrap();
 
@@ -3200,8 +2563,20 @@ async fn test_submit_order_stop_market_with_trigger_price() {
         client.cache_instrument(instrument);
     }
 
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    client
+}
+
+const PLACE_ORDER_PATH: &str = "/api/v3/trade/place-order";
+const PLACE_STRATEGY_ORDER_PATH: &str = "/api/v3/trade/place-strategy-order";
+
+#[rstest]
+#[tokio::test]
+async fn test_submit_order_stop_market_with_trigger_price() {
+    let (addr, state) = start_order_capture_test_server().await.unwrap();
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
+
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("stop-market-test-1");
     let quantity = Quantity::new(0.001, 3);
     let trigger_price = Price::new(100_000.0, 2);
@@ -3209,7 +2584,7 @@ async fn test_submit_order_stop_market_with_trigger_price() {
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             instrument_id,
             client_order_id,
             OrderSide::Buy,
@@ -3235,25 +2610,24 @@ async fn test_submit_order_stop_market_with_trigger_price() {
     let orders = state.order_submissions.lock().await;
     assert_eq!(orders.len(), 1, "Should have captured one order");
 
+    // Bitget places conditional orders as `trigger` strategy orders
     let order = &orders[0];
-    assert_eq!(order.category, "linear");
+    assert_eq!(order.path, PLACE_STRATEGY_ORDER_PATH);
+    assert_eq!(order.category, "USDT-FUTURES");
     assert_eq!(order.symbol, "BTCUSDT");
-    assert_eq!(order.side, "Buy");
-    assert_eq!(order.order_type, "Market");
+    assert_eq!(order.side, "buy");
+    assert_eq!(order.raw_body["type"], "trigger");
+    assert_eq!(order.trigger_order_type.as_deref(), Some("market"));
     assert_eq!(
         order.trigger_price.as_deref(),
         Some("100000.00"),
         "Should have trigger price"
     );
 
-    // Buy stop triggers on rise (triggerDirection=1)
-    assert_eq!(
-        order.trigger_direction.as_deref(),
-        Some("1"),
-        "Buy stop should trigger on rise"
-    );
+    // The venue derives the trigger direction from the trigger price
+    assert!(order.raw_body.get("triggerDirection").is_none());
 
-    // Market orders don't send timeInForce
+    // Strategy orders carry no timeInForce
     assert!(
         order.time_in_force.is_none(),
         "Market orders should not have timeInForce"
@@ -3264,32 +2638,10 @@ async fn test_submit_order_stop_market_with_trigger_price() {
 #[tokio::test]
 async fn test_submit_order_stop_limit_with_trigger_price_and_limit_price() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("stop-limit-test-1");
     let quantity = Quantity::new(0.001, 3);
     let trigger_price = Price::new(99_000.0, 2);
@@ -3298,7 +2650,7 @@ async fn test_submit_order_stop_limit_with_trigger_price_and_limit_price() {
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             instrument_id,
             client_order_id,
             OrderSide::Sell,
@@ -3325,12 +2677,13 @@ async fn test_submit_order_stop_limit_with_trigger_price_and_limit_price() {
     assert_eq!(orders.len(), 1, "Should have captured one order");
 
     let order = &orders[0];
-    assert_eq!(order.category, "linear");
+    assert_eq!(order.path, PLACE_STRATEGY_ORDER_PATH);
+    assert_eq!(order.category, "USDT-FUTURES");
     assert_eq!(order.symbol, "BTCUSDT");
-    assert_eq!(order.side, "Sell");
-    assert_eq!(order.order_type, "Limit");
+    assert_eq!(order.side, "sell");
+    assert_eq!(order.trigger_order_type.as_deref(), Some("limit"));
     assert_eq!(
-        order.price.as_deref(),
+        order.trigger_order_price.as_deref(),
         Some("98500.00"),
         "Should have limit price"
     );
@@ -3339,47 +2692,18 @@ async fn test_submit_order_stop_limit_with_trigger_price_and_limit_price() {
         Some("99000.00"),
         "Should have trigger price"
     );
-
-    // Sell stop triggers on fall (triggerDirection=2)
-    assert_eq!(
-        order.trigger_direction.as_deref(),
-        Some("2"),
-        "Sell stop should trigger on fall"
-    );
-    assert_eq!(order.time_in_force.as_deref(), Some("GTC"));
-    assert_eq!(order.reduce_only, Some(true));
+    assert!(order.raw_body.get("triggerDirection").is_none());
+    assert_eq!(order.reduce_only.as_deref(), Some("YES"));
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_submit_order_market_if_touched_trigger_direction() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("mit-test-1");
     let quantity = Quantity::new(0.001, 3);
     let trigger_price = Price::new(95_000.0, 2);
@@ -3388,7 +2712,7 @@ async fn test_submit_order_market_if_touched_trigger_direction() {
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             instrument_id,
             client_order_id,
             OrderSide::Buy,
@@ -3414,13 +2738,15 @@ async fn test_submit_order_market_if_touched_trigger_direction() {
     let orders = state.order_submissions.lock().await;
     assert_eq!(orders.len(), 1);
 
+    // Bitget takes no trigger direction: a trigger fires when the price crosses triggerPrice
+    // from either side, so a Buy MIT is the same trigger order as a Buy Stop
     let order = &orders[0];
-
-    // Buy MIT triggers on fall (triggerDirection=2) - opposite of Buy Stop
-    assert_eq!(
-        order.trigger_direction.as_deref(),
-        Some("2"),
-        "Buy MIT should trigger on fall"
+    assert_eq!(order.path, PLACE_STRATEGY_ORDER_PATH);
+    assert_eq!(order.trigger_price.as_deref(), Some("95000.00"));
+    assert_eq!(order.trigger_order_type.as_deref(), Some("market"));
+    assert!(
+        order.raw_body.get("triggerDirection").is_none(),
+        "Bitget derives the direction"
     );
 }
 
@@ -3428,32 +2754,10 @@ async fn test_submit_order_market_if_touched_trigger_direction() {
 #[tokio::test]
 async fn test_submit_order_post_only() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("post-only-test-1");
     let quantity = Quantity::new(0.001, 3);
     let price = Price::new(100_000.0, 2);
@@ -3461,7 +2765,7 @@ async fn test_submit_order_post_only() {
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             instrument_id,
             client_order_id,
             OrderSide::Buy,
@@ -3488,11 +2792,12 @@ async fn test_submit_order_post_only() {
     assert_eq!(orders.len(), 1);
 
     let order = &orders[0];
-    assert_eq!(order.order_type, "Limit");
+    assert_eq!(order.path, PLACE_ORDER_PATH);
+    assert_eq!(order.order_type, "limit");
     assert_eq!(
         order.time_in_force.as_deref(),
-        Some("PostOnly"),
-        "Post-only orders should have timeInForce=PostOnly"
+        Some("post_only"),
+        "Post-only orders should have timeInForce=post_only"
     );
 }
 
@@ -3500,35 +2805,13 @@ async fn test_submit_order_post_only() {
 #[tokio::test]
 async fn test_submit_order_with_bbo_sends_bbo_and_omits_price() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
     let result = client
         .submit_order(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
-            InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE),
+            AccountId::from("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
+            InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE),
             ClientOrderId::from("bbo-test-1"),
             OrderSide::Buy,
             OrderType::Limit,
@@ -3541,8 +2824,8 @@ async fn test_submit_order_with_bbo_sends_bbo_and_omits_price() {
             false,
             false,
             None,
-            Some(BybitBboSideType::Queue),
-            Some("3".to_string()),
+            Some(BitgetBboSideType::Queue),
+            Some("1".to_string()),
             None,
             None,
         )
@@ -3553,54 +2836,33 @@ async fn test_submit_order_with_bbo_sends_bbo_and_omits_price() {
     let orders = state.order_submissions.lock().await;
     assert_eq!(orders.len(), 1);
 
+    // Bitget combines the BBO side type and level into one `bboLevel` value
     let order = &orders[0];
-    assert_eq!(order.order_type, "Limit");
+    assert_eq!(order.order_type, "limit");
     assert_eq!(order.price, None);
-    assert_eq!(order.bbo_side_type.as_deref(), Some("Queue"));
-    assert_eq!(order.bbo_level.as_deref(), Some("3"));
+    assert!(order.raw_body.get("bboSideType").is_none());
+    assert_eq!(order.bbo_level.as_deref(), Some("queue1"));
 }
 
 #[rstest]
-#[case(Some(BybitOrderSmpType::None), Some("None"))]
-#[case(Some(BybitOrderSmpType::CancelMaker), Some("CancelMaker"))]
-#[case(Some(BybitOrderSmpType::CancelTaker), Some("CancelTaker"))]
-#[case(Some(BybitOrderSmpType::CancelBoth), Some("CancelBoth"))]
+#[case(Some(BitgetOrderSmpType::None), Some("none"))]
+#[case(Some(BitgetOrderSmpType::CancelMaker), Some("cancel_maker"))]
+#[case(Some(BitgetOrderSmpType::CancelTaker), Some("cancel_taker"))]
+#[case(Some(BitgetOrderSmpType::CancelBoth), Some("cancel_both"))]
 #[case(None, None)]
 #[tokio::test]
 async fn test_submit_order_serializes_smp_type(
-    #[case] smp_type: Option<BybitOrderSmpType>,
+    #[case] smp_type: Option<BitgetOrderSmpType>,
     #[case] expected: Option<&str>,
 ) {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
     let result = client
         .submit_order(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
-            InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE),
+            AccountId::from("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
+            InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE),
             ClientOrderId::from("smp-test-1"),
             OrderSide::Buy,
             OrderType::Limit,
@@ -3627,47 +2889,25 @@ async fn test_submit_order_serializes_smp_type(
 
     let body = &orders[0].raw_body;
 
-    assert_eq!(body.get("smpType").and_then(|v| v.as_str()), expected);
+    // Bitget calls self-trade prevention `stpMode`
+    assert_eq!(body.get("stpMode").and_then(|v| v.as_str()), expected);
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_submit_order_with_native_tp_sl_serializes_fields() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let native_tp_sl = BybitNativeTpSlParams {
+    let native_tp_sl = BitgetNativeTpSlParams {
         take_profit: Some("55000".to_string()),
         stop_loss: Some("47000".to_string()),
-        tp_trigger_by: Some(BybitTriggerType::LastPrice),
-        sl_trigger_by: Some(BybitTriggerType::MarkPrice),
-        tp_order_type: Some(BybitOrderType::Limit),
-        sl_order_type: Some(BybitOrderType::Market),
+        tp_trigger_by: Some(BitgetTriggerType::LastPrice),
+        sl_trigger_by: Some(BitgetTriggerType::MarkPrice),
+        tp_order_type: Some(BitgetOrderType::Limit),
+        sl_order_type: Some(BitgetOrderType::Market),
         tp_limit_price: Some("55100".to_string()),
         sl_limit_price: None,
-        // Left unset: the client must default it to `Full` because TP/SL are present.
         tpsl_mode: None,
         close_on_trigger: Some(true),
         order_iv: None,
@@ -3676,9 +2916,9 @@ async fn test_submit_order_with_native_tp_sl_serializes_fields() {
 
     let result = client
         .submit_order(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
-            InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE),
+            AccountId::from("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
+            InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE),
             ClientOrderId::from("native-tpsl-test-1"),
             OrderSide::Buy,
             OrderType::Limit,
@@ -3711,140 +2951,44 @@ async fn test_submit_order_with_native_tp_sl_serializes_fields() {
     assert_eq!(body.get("stopLoss").and_then(|v| v.as_str()), Some("47000"));
     assert_eq!(
         body.get("tpTriggerBy").and_then(|v| v.as_str()),
-        Some("LastPrice")
+        Some("market")
     );
     assert_eq!(
         body.get("slTriggerBy").and_then(|v| v.as_str()),
-        Some("MarkPrice")
+        Some("mark")
     );
     assert_eq!(
         body.get("tpOrderType").and_then(|v| v.as_str()),
-        Some("Limit")
+        Some("limit")
     );
     assert_eq!(
         body.get("slOrderType").and_then(|v| v.as_str()),
-        Some("Market")
+        Some("market")
     );
     assert_eq!(
         body.get("tpLimitPrice").and_then(|v| v.as_str()),
         Some("55100")
     );
-    assert_eq!(
-        body.get("closeOnTrigger").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    // No explicit mode set, so the client must default to `Full`.
-    assert_eq!(body.get("tpslMode").and_then(|v| v.as_str()), Some("Full"));
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_submit_order_with_explicit_partial_tpsl_mode_is_preserved() {
-    let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let native_tp_sl = BybitNativeTpSlParams {
-        take_profit: Some("55000".to_string()),
-        tpsl_mode: Some(BybitTpSlMode::Partial),
-        ..Default::default()
-    };
-
-    let result = client
-        .submit_order(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
-            InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE),
-            ClientOrderId::from("native-tpsl-partial-1"),
-            OrderSide::Buy,
-            OrderType::Limit,
-            Quantity::new(0.001, 3),
-            Some(TimeInForce::Gtc),
-            Some(Price::new(50_000.0, 2)),
-            None,
-            None,
-            false,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            Some(&native_tp_sl),
-        )
-        .await;
-
-    assert!(result.is_ok(), "Order submission should succeed");
-
-    let orders = state.order_submissions.lock().await;
-    assert_eq!(orders.len(), 1);
-
-    // A user-set `Partial` must survive instead of being overwritten with `Full`.
-    let body = &orders[0].raw_body;
-    assert_eq!(
-        body.get("tpslMode").and_then(|v| v.as_str()),
-        Some("Partial")
-    );
+    // place-order has no closeOnTrigger or tpslMode
+    assert!(body.get("closeOnTrigger").is_none());
+    assert!(body.get("tpslMode").is_none());
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_submit_order_spot_market_base_quantity() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Spot).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Spot, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-SPOT"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-SPOT"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("spot-base-qty-test-1");
     let quantity = Quantity::new(0.001, 3);
 
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Spot,
+            BitgetProductType::Spot,
             instrument_id,
             client_order_id,
             OrderSide::Buy,
@@ -3855,7 +2999,7 @@ async fn test_submit_order_spot_market_base_quantity() {
             None,
             None,
             false,
-            false, // is_quote_quantity=false -> baseCoin
+            false, // is_quote_quantity=false -> base coin
             true,  // is_leverage
             None,  // position_idx
             None,  // bbo_side_type
@@ -3865,63 +3009,30 @@ async fn test_submit_order_spot_market_base_quantity() {
         )
         .await;
 
-    assert!(result.is_ok(), "Order submission should succeed");
-
-    let orders = state.order_submissions.lock().await;
-    assert_eq!(orders.len(), 1);
-
-    let order = &orders[0];
-    assert_eq!(order.category, "spot");
-    assert_eq!(order.order_type, "Market");
-    assert_eq!(
-        order.market_unit.as_deref(),
-        Some("baseCoin"),
-        "SPOT market order with is_quote_quantity=false should use baseCoin"
+    // Bitget sizes spot market buys in the quote coin only (no `marketUnit`)
+    let error = result.expect_err("base-quantity spot market buy should be refused");
+    assert!(
+        error.to_string().contains("require a quote quantity"),
+        "unexpected error: {error}"
     );
-    assert_eq!(
-        order.is_leverage,
-        Some(1),
-        "is_leverage=true should send isLeverage=1"
-    );
+    assert!(state.order_submissions.lock().await.is_empty());
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_submit_order_spot_market_quote_quantity() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Spot).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Spot, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-SPOT"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-SPOT"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("spot-quote-qty-test-1");
     let quantity = Quantity::new(100.0, 2); // 100 USDT worth
 
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Spot,
+            BitgetProductType::Spot,
             instrument_id,
             client_order_id,
             OrderSide::Buy,
@@ -3932,7 +3043,7 @@ async fn test_submit_order_spot_market_quote_quantity() {
             None,
             None,
             false,
-            true,  // is_quote_quantity=true -> quoteCoin
+            true,  // is_quote_quantity=true -> quote coin
             false, // is_leverage
             None,  // position_idx
             None,  // bbo_side_type
@@ -3948,17 +3059,16 @@ async fn test_submit_order_spot_market_quote_quantity() {
     assert_eq!(orders.len(), 1);
 
     let order = &orders[0];
-    assert_eq!(order.category, "spot");
-    assert_eq!(order.order_type, "Market");
-    assert_eq!(
-        order.market_unit.as_deref(),
-        Some("quoteCoin"),
-        "SPOT market order with is_quote_quantity=true should use quoteCoin"
+    assert_eq!(order.category, "SPOT");
+    assert_eq!(order.order_type, "market");
+    assert_eq!(order.qty, "100.00");
+    assert!(
+        order.raw_body.get("marketUnit").is_none(),
+        "Bitget has no marketUnit"
     );
-    assert_eq!(
-        order.is_leverage,
-        Some(0),
-        "is_leverage=false should send isLeverage=0"
+    assert!(
+        order.raw_body.get("isLeverage").is_none(),
+        "Bitget has no isLeverage"
     );
 }
 
@@ -3966,39 +3076,17 @@ async fn test_submit_order_spot_market_quote_quantity() {
 #[tokio::test]
 async fn test_submit_order_linear_does_not_send_market_unit() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("linear-market-test-1");
     let quantity = Quantity::new(0.001, 3);
 
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             instrument_id,
             client_order_id,
             OrderSide::Buy,
@@ -4025,13 +3113,13 @@ async fn test_submit_order_linear_does_not_send_market_unit() {
     assert_eq!(orders.len(), 1);
 
     let order = &orders[0];
-    assert_eq!(order.category, "linear");
+    assert_eq!(order.category, "USDT-FUTURES");
     assert!(
-        order.market_unit.is_none(),
+        order.raw_body.get("marketUnit").is_none(),
         "LINEAR market orders should not have marketUnit"
     );
     assert!(
-        order.is_leverage.is_none(),
+        order.raw_body.get("isLeverage").is_none(),
         "LINEAR orders should not have isLeverage"
     );
 }
@@ -4040,32 +3128,10 @@ async fn test_submit_order_linear_does_not_send_market_unit() {
 #[tokio::test]
 async fn test_submit_order_limit_if_touched_trigger_direction() {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("lit-test-1");
     let quantity = Quantity::new(0.001, 3);
     let trigger_price = Price::new(105_000.0, 2);
@@ -4075,7 +3141,7 @@ async fn test_submit_order_limit_if_touched_trigger_direction() {
     let result = client
         .submit_order(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             instrument_id,
             client_order_id,
             OrderSide::Sell,
@@ -4102,66 +3168,44 @@ async fn test_submit_order_limit_if_touched_trigger_direction() {
     assert_eq!(orders.len(), 1);
 
     let order = &orders[0];
-    assert_eq!(order.order_type, "Limit");
+    assert_eq!(order.path, PLACE_STRATEGY_ORDER_PATH);
+    assert_eq!(order.trigger_order_type.as_deref(), Some("limit"));
     assert_eq!(
         order.trigger_price.as_deref(),
         Some("105000.00"),
         "Should have trigger price"
     );
     assert_eq!(
-        order.price.as_deref(),
+        order.trigger_order_price.as_deref(),
         Some("105500.00"),
         "Should have limit price"
     );
 
-    // Sell LIT triggers on rise (triggerDirection=1) - opposite of Sell Stop
-    assert_eq!(
-        order.trigger_direction.as_deref(),
-        Some("1"),
-        "Sell LIT should trigger on rise"
+    // Bitget takes no trigger direction (see the MIT test)
+    assert!(
+        order.raw_body.get("triggerDirection").is_none(),
+        "Bitget derives the direction"
     );
 }
 
 #[rstest]
 #[case::omitted(None, None)]
-#[case::one_way(Some(BybitPositionIdx::OneWay), Some(0))]
-#[case::buy_hedge(Some(BybitPositionIdx::BuyHedge), Some(1))]
-#[case::sell_hedge(Some(BybitPositionIdx::SellHedge), Some(2))]
+#[case::one_way(Some(BitgetPositionIdx::OneWay), None)]
+#[case::buy_hedge(Some(BitgetPositionIdx::BuyHedge), Some("long"))]
+#[case::sell_hedge(Some(BitgetPositionIdx::SellHedge), Some("short"))]
 #[tokio::test]
 async fn test_submit_order_serializes_position_idx(
-    #[case] position_idx: Option<BybitPositionIdx>,
-    #[case] expected: Option<i64>,
+    #[case] position_idx: Option<BitgetPositionIdx>,
+    #[case] expected: Option<&str>,
 ) {
     let (addr, state) = start_order_capture_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
-
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
     let result = client
         .submit_order(
-            AccountId::from("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
-            InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE),
+            AccountId::from("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
+            InstrumentId::new(Symbol::from("BTCUSDT-PERP"), *BITGET_VENUE),
             ClientOrderId::from("posidx-test"),
             OrderSide::Buy,
             OrderType::Limit,
@@ -4183,46 +3227,45 @@ async fn test_submit_order_serializes_position_idx(
 
     assert!(result.is_ok(), "Order submission should succeed");
 
+    // Bitget sends `posSide` in hedge mode only; one-way orders omit it
     let orders = state.order_submissions.lock().await;
     assert_eq!(orders.len(), 1);
-    assert_eq!(orders[0].position_idx, expected);
+    assert_eq!(orders[0].pos_side.as_deref(), expected);
 }
 
 async fn handle_empty_orders(headers: axum::http::HeaderMap) -> Response {
-    if !headers.contains_key("X-BAPI-API-KEY") {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
     }
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "list": [],
-            "nextPageCursor": ""
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    Json(empty_page()).into_response()
+}
+
+/// `order-info` answers an unknown order with `25204 Order does not exist`.
+async fn handle_unknown_order_info(headers: axum::http::HeaderMap) -> Response {
+    if let Some(response) = require_bitget_auth(&headers) {
+        return response;
+    }
+
+    bitget_error(StatusCode::BAD_REQUEST, "25204", "Order does not exist")
 }
 
 fn create_empty_orders_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
-        .route("/v5/order/realtime", get(handle_empty_orders))
-        .route("/v5/order/history", get(handle_empty_orders))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/trade/order-info", get(handle_unknown_order_info))
+        .route("/api/v3/trade/unfilled-orders", get(handle_empty_orders))
+        .route("/api/v3/trade/history-orders", get(handle_empty_orders))
+        .route(
+            "/api/v3/trade/unfilled-strategy-orders",
+            get(handle_empty_orders),
+        )
+        .route(
+            "/api/v3/trade/history-strategy-orders",
+            get(handle_empty_orders),
+        )
         .with_state(state)
 }
 
@@ -4237,102 +3280,58 @@ async fn start_empty_orders_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
     Ok((addr, state))
 }
 
 #[rstest]
 #[tokio::test]
-async fn test_query_order_option_not_found_returns_none() {
+async fn test_query_order_not_found_returns_none() {
     let (addr, _state) = start_empty_orders_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Option, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTC-27MAR26-70000-C-OPTION"), *BYBIT_VENUE);
-    let client_order_id = ClientOrderId::from("option-query-test-1");
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("TSLAUSDT-PERP"), *BITGET_VENUE);
+    let client_order_id = ClientOrderId::from("query-test-1");
 
     let result = client
         .query_order(
             account_id,
-            BybitProductType::Option,
+            BitgetProductType::Linear,
             instrument_id,
             Some(client_order_id),
             None,
         )
         .await;
 
-    assert!(result.is_ok(), "query_order should not error for options");
+    assert!(
+        result.is_ok(),
+        "query_order should not error for an unknown order"
+    );
     assert!(
         result.unwrap().is_none(),
-        "query_order should return None when option order not found"
+        "query_order should return None when the order is not found"
     );
 }
 
-// Handler that returns TP/SL orders for StopOrder filter, empty for regular
-#[allow(dead_code)]
-async fn handle_get_orders_realtime_tp_sl(
-    query: Query<HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    if !headers.contains_key("X-BAPI-API-KEY") {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "retExtInfo": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
-    }
-
-    let order_filter = query.get("orderFilter").map(String::as_str);
-    if order_filter == Some("StopOrder") {
-        let orders = load_test_data("http_get_orders_realtime_tp_sl.json");
-        Json(orders).into_response()
-    } else {
-        Json(json!({
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": { "list": [], "nextPageCursor": "" },
-            "retExtInfo": {},
-            "time": 1704470400123i64
-        }))
-        .into_response()
-    }
-}
-
+// Serves the trigger order on the conditional (strategy) list, nothing on the regular lists
 #[allow(dead_code)]
 fn create_tp_sl_test_router() -> Router {
     Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
-        .route("/v5/order/realtime", get(handle_get_orders_realtime_tp_sl))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/trade/unfilled-orders", get(handle_empty_orders))
+        .route("/api/v3/trade/history-orders", get(handle_empty_orders))
+        .route(
+            "/api/v3/trade/unfilled-strategy-orders",
+            get(handle_get_strategy_orders),
+        )
+        .route(
+            "/api/v3/trade/history-strategy-orders",
+            get(handle_empty_orders),
+        )
+        .with_state(TestServerState::default())
 }
 
 #[allow(dead_code)]
@@ -4345,7 +3344,7 @@ async fn start_tp_sl_test_server() -> Result<SocketAddr, Box<dyn std::error::Err
         axum::serve(listener, router).await.unwrap();
     });
 
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
     Ok(addr)
 }
 
@@ -4353,37 +3352,15 @@ async fn start_tp_sl_test_server() -> Result<SocketAddr, Box<dyn std::error::Err
 #[tokio::test]
 async fn test_request_order_status_reports_tp_sl_orders() {
     let addr = start_tp_sl_test_server().await.unwrap();
-    let base_url = format!("http://{addr}");
+    let client = order_capture_client(addr, BitgetProductType::Linear).await;
 
-    let client = BybitHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap();
-
-    let instruments = client
-        .request_instruments(BybitProductType::Linear, None, None)
-        .await
-        .unwrap();
-
-    for instrument in instruments {
-        client.cache_instrument(instrument);
-    }
-
-    let account_id = AccountId::from("BYBIT-UNIFIED");
-    let instrument_id = InstrumentId::new(Symbol::from("BTCUSDT-LINEAR"), *BYBIT_VENUE);
+    let account_id = AccountId::from("BITGET-UNIFIED");
+    let instrument_id = InstrumentId::new(Symbol::from("TSLAUSDT-PERP"), *BITGET_VENUE);
 
     let reports = client
         .request_order_status_reports(
             account_id,
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             Some(instrument_id),
             true,
             None,
@@ -4393,196 +3370,36 @@ async fn test_request_order_status_reports_tp_sl_orders() {
         .await
         .unwrap();
 
-    // Should get 2 orders: TakeProfit + StopLoss from the StopOrder filter
-    assert_eq!(reports.len(), 2, "Should have 2 TP/SL orders");
+    // The demo trigger buy-market order, mark-price triggered at 396.89
+    assert_eq!(reports.len(), 1, "Should have 1 conditional order");
 
-    // First order: TakeProfit sell (RisesTo) -> MarketIfTouched
-    let tp_report = reports
-        .iter()
-        .find(|r| r.venue_order_id.as_str() == "tp-order-001")
-        .unwrap();
-    assert_eq!(tp_report.order_type, OrderType::MarketIfTouched);
-    assert_eq!(tp_report.order_side, Some(OrderSide::Sell));
-    assert_eq!(tp_report.trigger_price, Some(Price::from("55000.00")));
-    assert_eq!(tp_report.trigger_type, Some(TriggerType::LastPrice));
-    assert!(tp_report.reduce_only);
-
-    // Second order: StopLoss limit sell (FallsTo) -> StopLimit
-    let sl_report = reports
-        .iter()
-        .find(|r| r.venue_order_id.as_str() == "sl-order-001")
-        .unwrap();
-    assert_eq!(sl_report.order_type, OrderType::StopLimit);
-    assert_eq!(sl_report.order_side, Some(OrderSide::Sell));
-    assert_eq!(sl_report.trigger_price, Some(Price::from("48000.00")));
-    assert_eq!(sl_report.price, Some(Price::from("47500.00")));
-    assert_eq!(sl_report.trigger_type, Some(TriggerType::LastPrice));
-    assert!(sl_report.reduce_only);
+    let report = &reports[0];
+    assert_eq!(report.venue_order_id.as_str(), "1503521064568303616");
+    assert_eq!(report.order_type, OrderType::StopMarket);
+    assert_eq!(report.order_side, Some(OrderSide::Buy));
+    assert_eq!(report.trigger_price, Some(Price::from("396.89")));
+    assert_eq!(report.trigger_type, Some(TriggerType::MarkPrice));
+    assert_eq!(report.order_status, OrderStatus::Canceled);
+    assert!(!report.reduce_only);
 }
 
 // -------------------------------------------------------------------------------------------------
-// User API endpoints (/v5/user/*) wire-up tests
+// Sub-account endpoints (/api/v3/user/*)
 //
-// These tests verify the client-layer wiring of the user-management endpoints:
-//   - the request hits the expected route,
-//   - authentication headers are attached,
-//   - query strings carry the expected fields,
-//   - request bodies carry the expected fields,
-//   - responses decode into the typed DTOs.
-// Deserialization details are covered by the unit tests in
-// `src/http/models.rs` and are not duplicated here.
+// Bitget's sub-account listing and API-key management need a master key and their schemas are
+// unverified; the client keeps the Bybit-parity methods and returns an unsupported error
+// without sending a request.
 // -------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Default)]
-struct UserApiCapture {
-    last_query: Arc<tokio::sync::Mutex<Option<String>>>,
-    last_body: Arc<tokio::sync::Mutex<Option<Value>>>,
+fn user_test_client(base_url: String) -> BitgetHttpClient {
+    credentialed_client(base_url)
 }
 
-/// Rejects requests lacking Bybit signed auth headers with 401.
-fn require_bybit_auth(headers: &axum::http::HeaderMap) -> Option<Response> {
-    if !headers.contains_key("X-BAPI-API-KEY")
-        || !headers.contains_key("X-BAPI-SIGN")
-        || !headers.contains_key("X-BAPI-TIMESTAMP")
-    {
-        return Some(
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "retCode": 10003,
-                    "retMsg": "Invalid API key",
-                    "result": {},
-                    "retExtInfo": {},
-                    "time": 1700000000000i64
-                })),
-            )
-                .into_response(),
-        );
-    }
-    None
-}
-
-async fn user_handle_sub_members(headers: axum::http::HeaderMap) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-    Json(load_test_data("http_get_user_sub_members.json")).into_response()
-}
-
-async fn user_handle_sub_members_paged(
-    State(cap): State<UserApiCapture>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-    *cap.last_query.lock().await = uri.query().map(str::to_owned);
-    Json(load_test_data("http_get_user_sub_members_paged.json")).into_response()
-}
-
-async fn user_handle_escrow_sub_members(
-    State(cap): State<UserApiCapture>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-    *cap.last_query.lock().await = uri.query().map(str::to_owned);
-    Json(load_test_data("http_get_user_escrow_sub_members.json")).into_response()
-}
-
-async fn user_handle_sub_apikeys(
-    State(cap): State<UserApiCapture>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-    *cap.last_query.lock().await = uri.query().map(str::to_owned);
-    Json(load_test_data("http_get_user_sub_apikeys.json")).into_response()
-}
-
-async fn user_handle_update_sub_api(
-    State(cap): State<UserApiCapture>,
-    headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-
-    if let Ok(value) = serde_json::from_slice::<Value>(&body) {
-        *cap.last_body.lock().await = Some(value);
-    }
-    Json(load_test_data("http_post_user_update_sub_api.json")).into_response()
-}
-
-async fn user_handle_update_master_api(
-    State(cap): State<UserApiCapture>,
-    headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-
-    if let Ok(value) = serde_json::from_slice::<Value>(&body) {
-        *cap.last_body.lock().await = Some(value);
-    }
-    Json(load_test_data("http_post_user_update_master_api.json")).into_response()
-}
-
-fn create_user_api_router(cap: UserApiCapture) -> Router {
-    Router::new()
-        .route("/v5/user/query-sub-members", get(user_handle_sub_members))
-        .route("/v5/user/submembers", get(user_handle_sub_members_paged))
-        .route(
-            "/v5/user/escrow_sub_members",
-            get(user_handle_escrow_sub_members),
-        )
-        .route("/v5/user/sub-apikeys", get(user_handle_sub_apikeys))
-        .route("/v5/user/update-sub-api", post(user_handle_update_sub_api))
-        .route("/v5/user/update-api", post(user_handle_update_master_api))
-        // Exposed so the readiness probe can reach a known endpoint.
-        .route("/v5/market/time", get(handle_get_server_time))
-        .with_state(cap)
-}
-
-async fn start_user_api_server()
--> Result<(SocketAddr, UserApiCapture), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let cap = UserApiCapture::default();
-    let router = create_user_api_router(cap.clone());
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    wait_for_server(addr, "/v5/market/time").await;
-    Ok((addr, cap))
-}
-
-fn user_test_client(base_url: String) -> BybitHttpClient {
-    BybitHttpClient::with_credentials(
+fn user_raw_test_client(base_url: String) -> BitgetRawHttpClient {
+    BitgetRawHttpClient::with_credentials(
         "test_api_key".to_string(),
         "test_api_secret".to_string(),
-        Some(base_url),
-        60,
-        3,
-        1000,
-        10_000,
-        5_000,
-        None,
-    )
-    .unwrap()
-}
-
-fn user_raw_test_client(base_url: String) -> BybitRawHttpClient {
-    BybitRawHttpClient::with_credentials(
-        "test_api_key".to_string(),
-        "test_api_secret".to_string(),
+        "test_api_passphrase".to_string(),
         Some(base_url),
         60,
         3,
@@ -4595,524 +3412,95 @@ fn user_raw_test_client(base_url: String) -> BybitRawHttpClient {
 }
 
 #[rstest]
+#[case::sub_members("sub_members")]
+#[case::sub_members_paged("sub_members_paged")]
+#[case::escrow_sub_members("escrow_sub_members")]
+#[case::sub_api_keys("sub_api_keys")]
+#[case::update_sub_api_key("update_sub_api_key")]
+#[case::update_master_api_key("update_master_api_key")]
+#[case::fetch_all_sub_members_paged("fetch_all_sub_members_paged")]
+#[case::fetch_all_escrow_sub_members("fetch_all_escrow_sub_members")]
+#[case::fetch_all_sub_api_keys("fetch_all_sub_api_keys")]
 #[tokio::test]
-async fn test_get_sub_members_no_params() {
-    use nautilus_bybit::http::models::BybitSubMembersResponse;
+async fn test_sub_account_endpoints_are_unsupported(#[case] endpoint: &str) {
+    use nautilus_bitget::http::query::{
+        BitgetSubApiKeysParamsBuilder, BitgetSubMembersPageParamsBuilder,
+        BitgetUpdateMasterApiParamsBuilder, BitgetUpdateSubApiParamsBuilder,
+    };
 
-    let (addr, _cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let response: BybitSubMembersResponse = client.get_sub_members().await.unwrap();
-    assert_eq!(response.ret_code, 0);
-    assert_eq!(response.result.sub_members.len(), 2);
-    assert_eq!(response.result.sub_members[0].uid, "106314365");
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_get_sub_members_paged_sends_cursor_and_size() {
-    use nautilus_bybit::http::query::BybitSubMembersPageParamsBuilder;
-
-    let (addr, cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let params = BybitSubMembersPageParamsBuilder::default()
+    // Unreachable host: an unsupported endpoint must fail before any request is sent
+    let client = user_test_client("http://127.0.0.1:9".to_string());
+    let raw = user_raw_test_client("http://127.0.0.1:9".to_string());
+    let page = BitgetSubMembersPageParamsBuilder::default()
         .page_size(50u32)
-        .next_cursor("page-token-xyz".to_string())
         .build()
         .unwrap();
 
-    let response = client.get_sub_members_paged(&params).await.unwrap();
-    assert_eq!(response.result.sub_members.len(), 2);
-    assert_eq!(response.result.next_cursor.as_deref(), Some("0"));
-
-    let q = cap.last_query.lock().await.clone().expect("query captured");
-    assert!(
-        q.contains("pageSize=50"),
-        "query should carry pageSize: {q}"
-    );
-    assert!(
-        q.contains("nextCursor=page-token-xyz"),
-        "query should carry nextCursor: {q}"
-    );
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_get_escrow_sub_members_hits_escrow_route() {
-    use nautilus_bybit::http::query::BybitSubMembersPageParamsBuilder;
-
-    let (addr, cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let params = BybitSubMembersPageParamsBuilder::default()
-        .page_size(20u32)
-        .build()
-        .unwrap();
-
-    let response = client.get_escrow_sub_members(&params).await.unwrap();
-    assert_eq!(response.result.sub_members[0].member_type, 12);
-    // A non-`"0"` cursor indicates more pages remain to be fetched.
-    assert_eq!(response.result.next_cursor.as_deref(), Some("344"));
-
-    let q = cap.last_query.lock().await.clone().expect("query captured");
-    assert!(
-        q.contains("pageSize=20"),
-        "query should carry pageSize: {q}"
-    );
-    assert!(
-        !q.contains("nextCursor"),
-        "nextCursor should be omitted when None: {q}"
-    );
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_get_sub_api_keys_sends_required_params() {
-    use nautilus_bybit::http::query::BybitSubApiKeysParamsBuilder;
-
-    let (addr, cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let params = BybitSubApiKeysParamsBuilder::default()
-        .sub_member_id("533285".to_string())
-        .limit(10u32)
-        .cursor("next-token".to_string())
-        .build()
-        .unwrap();
-
-    let response = client.get_sub_api_keys(&params).await.unwrap();
-    assert_eq!(response.result.keys.len(), 1);
-    assert!(!response.result.keys[0].read_only);
-    assert_eq!(response.result.keys[0].secret, None);
-
-    let q = cap.last_query.lock().await.clone().expect("query captured");
-    assert!(q.contains("subMemberId=533285"), "query: {q}");
-    assert!(q.contains("limit=10"), "query: {q}");
-    assert!(q.contains("cursor=next-token"), "query: {q}");
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_update_sub_api_key_omits_none_permissions() {
-    use nautilus_bybit::http::query::BybitUpdateSubApiParamsBuilder;
-
-    let (addr, cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let params = BybitUpdateSubApiParamsBuilder::default()
-        .read_only(true)
-        .build()
-        .unwrap();
-
-    let response = client.update_sub_api_key(&params).await.unwrap();
-    assert!(!response.result.read_only);
-
-    let body = cap.last_body.lock().await.clone().expect("body captured");
-    let obj = body.as_object().expect("json object");
-    assert_eq!(obj.get("readOnly").and_then(Value::as_i64), Some(1));
-    assert!(
-        !obj.contains_key("permissions"),
-        "permissions must be skipped when None: {body}"
-    );
-    assert!(
-        !obj.contains_key("apiKey"),
-        "apiKey must be skipped when None: {body}"
-    );
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_update_sub_api_key_serializes_permissions_pascal_case() {
-    use nautilus_bybit::http::query::{
-        BybitApiKeyPermissionUpdateBuilder, BybitUpdateSubApiParamsBuilder,
-    };
-
-    let (addr, cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let permissions = BybitApiKeyPermissionUpdateBuilder::default()
-        .spot(vec!["SpotTrade".to_string()])
-        .wallet(vec!["AccountTransfer".to_string()])
-        .build()
-        .unwrap();
-
-    let params = BybitUpdateSubApiParamsBuilder::default()
-        .api_key("sub-key-id".to_string())
-        .permissions(permissions)
-        .build()
-        .unwrap();
-
-    client.update_sub_api_key(&params).await.unwrap();
-
-    let body = cap.last_body.lock().await.clone().expect("body captured");
-    let perms = body
-        .get("permissions")
-        .and_then(Value::as_object)
-        .expect("permissions object");
-    // Permission keys must be serialized in PascalCase and must contain only
-    // the buckets that were explicitly set on the builder.
-    assert!(perms.contains_key("Spot"));
-    assert!(perms.contains_key("Wallet"));
-    assert!(
-        !perms.contains_key("ContractTrade"),
-        "unset permission keys must be skipped: {body}"
-    );
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_update_master_api_key_emits_renamed_permission_keys() {
-    // Regression guard: `NFT`, `FiatP2P`, and `ByXPost` carry non-standard
-    // casing that the struct-level `rename_all = "PascalCase"` rule would
-    // otherwise mangle into `Nft`, `FiatP2p`, `ByxPost` - which Bybit would
-    // silently ignore.
-    use nautilus_bybit::http::query::{
-        BybitApiKeyPermissionUpdateBuilder, BybitUpdateMasterApiParamsBuilder,
-    };
-
-    let (addr, cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let permissions = BybitApiKeyPermissionUpdateBuilder::default()
-        .nft(vec!["NFTQueryProductList".to_string()])
-        .fiat_p2p(vec!["P2PDeposit".to_string()])
-        .byx_post(vec!["PostContent".to_string()])
-        .build()
-        .unwrap();
-
-    let params = BybitUpdateMasterApiParamsBuilder::default()
-        .permissions(permissions)
-        .build()
-        .unwrap();
-
-    client.update_master_api_key(&params).await.unwrap();
-
-    let body = cap.last_body.lock().await.clone().expect("body captured");
-    let perms = body
-        .get("permissions")
-        .and_then(Value::as_object)
-        .expect("permissions object");
-    assert!(perms.contains_key("NFT"), "expected key `NFT`: {body}");
-    assert!(
-        perms.contains_key("FiatP2P"),
-        "expected key `FiatP2P`: {body}"
-    );
-    assert!(
-        perms.contains_key("ByXPost"),
-        "expected key `ByXPost`: {body}"
-    );
-    assert!(
-        !perms.contains_key("Nft")
-            && !perms.contains_key("FiatP2p")
-            && !perms.contains_key("ByxPost"),
-        "default PascalCase casing must not leak through: {body}"
-    );
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_update_master_api_key_body_has_no_ips() {
-    // Regression guard: the Bybit docs explicitly exclude `ips` from the
-    // `update-api` request parameters, even though it appears in the response.
-    use nautilus_bybit::http::query::{
-        BybitApiKeyPermissionUpdateBuilder, BybitUpdateMasterApiParamsBuilder,
-    };
-
-    let (addr, cap) = start_user_api_server().await.unwrap();
-    let client = user_test_client(format!("http://{addr}"));
-
-    let permissions = BybitApiKeyPermissionUpdateBuilder::default()
-        .contract_trade(vec!["Order".to_string(), "Position".to_string()])
-        .build()
-        .unwrap();
-
-    let params = BybitUpdateMasterApiParamsBuilder::default()
-        .read_only(false)
-        .permissions(permissions)
-        .build()
-        .unwrap();
-
-    let response = client.update_master_api_key(&params).await.unwrap();
-    // `nft` exercises the explicit `#[serde(rename = "NFT")]` on the response
-    // side; the fixture carries a non-empty value so a rename regression
-    // surfaces as a length mismatch rather than a silent empty `Vec`.
-    assert_eq!(response.result.permissions.nft, vec!["NFTQueryProductList"]);
-
-    let body = cap.last_body.lock().await.clone().expect("body captured");
-    let obj = body.as_object().expect("json object");
-    assert!(
-        !obj.contains_key("ips"),
-        "update-api must not send ips: {body}"
-    );
-    assert!(
-        !obj.contains_key("apiKey"),
-        "update-api has no apiKey: {body}"
-    );
-    assert_eq!(obj.get("readOnly").and_then(Value::as_i64), Some(0));
-}
-
-async fn paged_sub_members_handler(
-    State(calls): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
+    let error = match endpoint {
+        "sub_members" => client.get_sub_members().await.map(|_| ()),
+        "sub_members_paged" => client.get_sub_members_paged(&page).await.map(|_| ()),
+        "escrow_sub_members" => client.get_escrow_sub_members(&page).await.map(|_| ()),
+        "sub_api_keys" => {
+            let params = BitgetSubApiKeysParamsBuilder::default()
+                .sub_member_id("533285".to_string())
+                .build()
+                .unwrap();
+            client.get_sub_api_keys(&params).await.map(|_| ())
+        }
+        "update_sub_api_key" => {
+            let params = BitgetUpdateSubApiParamsBuilder::default()
+                .read_only(true)
+                .build()
+                .unwrap();
+            client.update_sub_api_key(&params).await.map(|_| ())
+        }
+        "update_master_api_key" => {
+            let params = BitgetUpdateMasterApiParamsBuilder::default()
+                .read_only(false)
+                .build()
+                .unwrap();
+            client.update_master_api_key(&params).await.map(|_| ())
+        }
+        "fetch_all_sub_members_paged" => raw.fetch_all_sub_members_paged(Some(2)).await.map(|_| ()),
+        "fetch_all_escrow_sub_members" => {
+            raw.fetch_all_escrow_sub_members(Some(50)).await.map(|_| ())
+        }
+        "fetch_all_sub_api_keys" => raw
+            .fetch_all_sub_api_keys("533285", Some(10))
+            .await
+            .map(|_| ()),
+        _ => unreachable!(),
     }
-    let query = uri.query().unwrap_or_default().to_string();
-    let mut log = calls.lock().await;
-    log.push(query.clone());
+    .unwrap_err();
 
-    // First request has no cursor, second carries `nextCursor=page-2`,
-    // final page uses the `"0"` end-of-pages sentinel.
-    let body = if query.contains("nextCursor=page-2") {
-        json!({
-            "retCode": 0,
-            "retMsg": "",
-            "result": {
-                "subMembers": [{
-                    "uid": "300",
-                    "username": "third",
-                    "memberType": 1,
-                    "status": 1,
-                    "accountMode": 5
-                }],
-                "nextCursor": "0"
-            },
-            "retExtInfo": {},
-            "time": 1760388041006i64
-        })
-    } else {
-        json!({
-            "retCode": 0,
-            "retMsg": "",
-            "result": {
-                "subMembers": [
-                    {"uid": "100", "username": "first", "memberType": 1, "status": 1, "accountMode": 5},
-                    {"uid": "200", "username": "second", "memberType": 1, "status": 1, "accountMode": 6}
-                ],
-                "nextCursor": "page-2"
-            },
-            "retExtInfo": {},
-            "time": 1760388041006i64
-        })
-    };
-    Json(body).into_response()
+    assert!(
+        error
+            .to_string()
+            .contains("not supported by the Bitget adapter"),
+        "unexpected error: {error}"
+    );
+}
+
+/// The demo `current-position` long (TSLAUSDT) plus an ETHUSDT short derived from it.
+fn two_positions() -> Value {
+    let mut positions = load_test_data("http_get_positions.json");
+    let list = positions["data"]["list"].as_array_mut().unwrap();
+    let mut short = list[0].clone();
+    short["symbol"] = json!("ETHUSDT");
+    short["posSide"] = json!("short");
+    short["total"] = json!("5");
+    short["available"] = json!("5");
+    short["avgPrice"] = json!("3000");
+    short["updatedTime"] = json!("1794193100112");
+    list.push(short);
+    positions
 }
 
 #[rstest]
-#[tokio::test]
-async fn test_fetch_all_sub_members_paged_walks_cursor() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let calls: Arc<tokio::sync::Mutex<Vec<String>>> = Arc::default();
-    let router = Router::new()
-        .route("/v5/user/submembers", get(paged_sub_members_handler))
-        .route("/v5/market/time", get(handle_get_server_time))
-        .with_state(calls.clone());
-
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    wait_for_server(addr, "/v5/market/time").await;
-
-    let client = user_raw_test_client(format!("http://{addr}"));
-    let members = client.fetch_all_sub_members_paged(Some(2)).await.unwrap();
-
-    assert_eq!(members.len(), 3);
-    assert_eq!(members[0].uid, "100");
-    assert_eq!(members[2].uid, "300");
-
-    let log = calls.lock().await.clone();
-    assert_eq!(log.len(), 2, "expected exactly two page requests: {log:?}");
-    assert!(
-        !log[0].contains("nextCursor"),
-        "first page must not carry a cursor: {log:?}"
-    );
-    assert!(
-        log[1].contains("nextCursor=page-2"),
-        "second page must carry cursor: {log:?}"
-    );
-}
-
-async fn paged_escrow_sub_members_handler(
-    State(calls): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-    let query = uri.query().unwrap_or_default().to_string();
-    calls.lock().await.push(query.clone());
-
-    let body = if query.contains("nextCursor=escrow-2") {
-        json!({
-            "retCode": 0,
-            "retMsg": "",
-            "result": {
-                "subMembers": [{
-                    "uid": "777",
-                    "username": "Fund3",
-                    "memberType": 12,
-                    "status": 1,
-                    "remark": "earn fund",
-                    "accountMode": 3
-                }],
-                "nextCursor": "0"
-            },
-            "retExtInfo": {},
-            "time": 1760388041006i64
-        })
-    } else {
-        json!({
-            "retCode": 0,
-            "retMsg": "",
-            "result": {
-                "subMembers": [
-                    {"uid": "555", "username": "Fund1", "memberType": 12, "status": 1, "remark": "earn fund", "accountMode": 3},
-                    {"uid": "666", "username": "Fund2", "memberType": 12, "status": 1, "remark": "earn fund", "accountMode": 3}
-                ],
-                "nextCursor": "escrow-2"
-            },
-            "retExtInfo": {},
-            "time": 1760388041006i64
-        })
-    };
-    Json(body).into_response()
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_fetch_all_escrow_sub_members_walks_cursor() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let calls: Arc<tokio::sync::Mutex<Vec<String>>> = Arc::default();
-    let router = Router::new()
-        .route(
-            "/v5/user/escrow_sub_members",
-            get(paged_escrow_sub_members_handler),
-        )
-        .route("/v5/market/time", get(handle_get_server_time))
-        .with_state(calls.clone());
-
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    wait_for_server(addr, "/v5/market/time").await;
-
-    let client = user_raw_test_client(format!("http://{addr}"));
-    let members = client.fetch_all_escrow_sub_members(Some(50)).await.unwrap();
-
-    assert_eq!(members.len(), 3);
-    assert_eq!(members[0].uid, "555");
-    assert_eq!(members[2].uid, "777");
-    assert_eq!(members[2].member_type, 12);
-
-    let log = calls.lock().await.clone();
-    assert_eq!(log.len(), 2, "expected exactly two page requests: {log:?}");
-    assert!(
-        log[1].contains("nextCursor=escrow-2"),
-        "second page must carry cursor: {log:?}"
-    );
-}
-
-async fn paged_sub_apikeys_handler(
-    State(calls): State<Arc<tokio::sync::Mutex<Vec<String>>>>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-) -> Response {
-    if let Some(r) = require_bybit_auth(&headers) {
-        return r;
-    }
-    let query = uri.query().unwrap_or_default().to_string();
-    calls.lock().await.push(query.clone());
-
-    // Final-page sentinel on this endpoint is `""`, not `"0"`.
-    let body = if query.contains("cursor=keys-2") {
-        json!({
-            "retCode": 0,
-            "retMsg": "",
-            "result": {
-                "result": [{
-                    "id": "33", "ips": ["*"], "apiKey": "K3", "note": "",
-                    "status": 1, "createdAt": "2026-01-01T00:00:00Z",
-                    "type": 1, "permissions": {}, "secret": "******",
-                    "readOnly": true, "flag": "hmac"
-                }],
-                "nextPageCursor": ""
-            },
-            "retExtInfo": {},
-            "time": 1699515251698i64
-        })
-    } else {
-        json!({
-            "retCode": 0,
-            "retMsg": "",
-            "result": {
-                "result": [
-                    {"id": "11", "ips": ["*"], "apiKey": "K1", "note": "", "status": 1, "createdAt": "2026-01-01T00:00:00Z", "type": 1, "permissions": {}, "secret": "******", "readOnly": false, "flag": "hmac"},
-                    {"id": "22", "ips": ["*"], "apiKey": "K2", "note": "", "status": 1, "createdAt": "2026-01-01T00:00:00Z", "type": 1, "permissions": {}, "secret": "******", "readOnly": false, "flag": "hmac"}
-                ],
-                "nextPageCursor": "keys-2"
-            },
-            "retExtInfo": {},
-            "time": 1699515251698i64
-        })
-    };
-    Json(body).into_response()
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_fetch_all_sub_api_keys_walks_cursor() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let calls: Arc<tokio::sync::Mutex<Vec<String>>> = Arc::default();
-    let router = Router::new()
-        .route("/v5/user/sub-apikeys", get(paged_sub_apikeys_handler))
-        .route("/v5/market/time", get(handle_get_server_time))
-        .with_state(calls.clone());
-
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    wait_for_server(addr, "/v5/market/time").await;
-
-    let client = user_raw_test_client(format!("http://{addr}"));
-    let keys = client
-        .fetch_all_sub_api_keys("533285", Some(10))
-        .await
-        .unwrap();
-
-    assert_eq!(keys.len(), 3);
-    assert_eq!(keys[0].id, "11");
-    assert_eq!(keys[2].id, "33");
-    assert!(keys[2].read_only);
-
-    let log = calls.lock().await.clone();
-    assert_eq!(log.len(), 2, "expected exactly two page requests: {log:?}");
-    assert!(
-        log[0].contains("subMemberId=533285"),
-        "subMemberId must be sent: {log:?}"
-    );
-    assert!(log[0].contains("limit=10"), "limit must be sent: {log:?}");
-    assert!(
-        !log[0].contains("cursor="),
-        "first page must not carry a cursor: {log:?}"
-    );
-    assert!(
-        log[1].contains("cursor=keys-2"),
-        "second page must carry cursor: {log:?}"
-    );
-}
-
-#[rstest]
-#[case(false, "cache", "Instrument ETHUSDT-LINEAR not found in cache")]
-#[case(true, "cache", "Instrument ETHUSDT-LINEAR not found in cache")]
-#[case(false, "size", "position.size")]
-#[case(true, "size", "position.size")]
+#[case(false, "cache", "Instrument ETHUSDT-PERP not found in cache")]
+#[case(true, "cache", "Instrument ETHUSDT-PERP not found in cache")]
+#[case(false, "total", "position.size")]
+#[case(true, "total", "position.size")]
 #[case(false, "avgPrice", "Invalid decimal")]
 #[case(true, "avgPrice", "Invalid decimal")]
 #[case(false, "updatedTime", "position.updatedTime")]
@@ -5125,24 +3513,20 @@ async fn test_position_reports_reject_incomplete_rows(
     #[case] failure: &'static str,
     #[case] expected_error: &'static str,
 ) {
-    let mut positions = load_test_data("http_get_positions.json");
-    positions["result"]["list"]
-        .as_array_mut()
-        .unwrap()
-        .truncate(2);
+    let mut positions = two_positions();
 
     if failure != "cache" {
-        positions["result"]["list"][1][failure] =
+        positions["data"]["list"][1][failure] =
             json!(if failure == "symbol" { "" } else { "invalid" });
     }
 
-    let (addr, state) = start_position_report_server(positions, false).await;
+    let (addr, state) = start_position_report_server(positions).await;
     let client = user_test_client(format!("http://{addr}"));
-    let instruments: BybitInstrumentLinearResponse =
+    let instruments: BitgetInstrumentLinearResponse =
         serde_json::from_value(load_test_data("http_get_instruments_linear.json")).unwrap();
 
     for definition in instruments.result.list {
-        if failure != "cache" || definition.symbol == "BTCUSDT" {
+        if failure != "cache" || definition.symbol == "TSLAUSDT" {
             let instrument = parse_linear_instrument(&definition, 0.into(), 0.into()).unwrap();
             client.cache_instrument(instrument);
         }
@@ -5150,9 +3534,9 @@ async fn test_position_reports_reject_incomplete_rows(
 
     let result = client
         .request_position_status_reports(
-            AccountId::new("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
-            scoped.then_some(InstrumentId::from("ETHUSDT-LINEAR.BYBIT")),
+            AccountId::new("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
+            scoped.then_some(InstrumentId::from("ETHUSDT-PERP.BITGET")),
         )
         .await;
     let error =
@@ -5166,32 +3550,29 @@ async fn test_position_reports_reject_incomplete_rows(
         assert_eq!(
             error.to_string(),
             format!(
-                "Position symbol is empty, category=Linear, symbol={:?}, settle_coin={:?}",
+                "Position symbol is empty, category=Linear, symbol={:?}, settle_coin=None",
                 scoped.then_some("ETHUSDT"),
-                (!scoped).then_some("USDT"),
             )
         );
     } else if failure != "cache" {
         assert_eq!(
             error.to_string(),
-            "failed to parse position report for ETHUSDT-LINEAR"
+            "failed to parse position report for ETHUSDT-PERP"
         );
     }
 
+    // Bitget lists positions per category in one request (no settle coin, no cursor)
     let queries = state.position_queries.lock().await;
     assert_eq!(queries.len(), 1);
     assert_eq!(
         queries[0].get("category").map(String::as_str),
-        Some("linear")
+        Some("USDT-FUTURES")
     );
     assert_eq!(
         queries[0].get("symbol").map(String::as_str),
         scoped.then_some("ETHUSDT")
     );
-    assert_eq!(
-        queries[0].get("settleCoin").map(String::as_str),
-        (!scoped).then_some("USDT")
-    );
+    assert_eq!(queries[0].get("settleCoin"), None);
 }
 
 #[rstest]
@@ -5203,31 +3584,27 @@ async fn test_position_reports_preserve_held_and_flat_rows(
     #[case] scoped: bool,
     #[case] flat: bool,
 ) {
-    let mut positions = load_test_data("http_get_positions.json");
-    positions["result"]["list"]
-        .as_array_mut()
-        .unwrap()
-        .truncate(2);
+    let mut positions = two_positions();
 
     if flat {
-        positions["result"]["list"][1]["side"] = json!("");
-        positions["result"]["list"][1]["size"] = json!("0");
-        positions["result"]["list"][1]["avgPrice"] = json!("0");
+        // A closed one-way position keeps `posSide` with a zero total
+        positions["data"]["list"][1]["total"] = json!("0");
+        positions["data"]["list"][1]["avgPrice"] = json!("0");
     }
 
-    let (addr, state) = start_position_report_server(positions, false).await;
+    let (addr, state) = start_position_report_server(positions).await;
     let client = user_test_client(format!("http://{addr}"));
     client
-        .request_instruments(BybitProductType::Linear, None, None)
+        .request_instruments(BitgetProductType::Linear, None, None)
         .await
         .unwrap();
-    let account_id = AccountId::new("BYBIT-UNIFIED");
+    let account_id = AccountId::new("BITGET-UNIFIED");
     let ts_before = get_atomic_clock_realtime().get_time_ns();
     let reports = client
         .request_position_status_reports(
             account_id,
-            BybitProductType::Linear,
-            scoped.then_some(InstrumentId::from("ETHUSDT-LINEAR.BYBIT")),
+            BitgetProductType::Linear,
+            scoped.then_some(InstrumentId::from("ETHUSDT-PERP.BITGET")),
         )
         .await
         .unwrap();
@@ -5236,15 +3613,15 @@ async fn test_position_reports_preserve_held_and_flat_rows(
 
     let expected_rows = [
         (
-            "BTCUSDT-LINEAR.BYBIT",
+            "TSLAUSDT-PERP.BITGET",
             PositionSide::Long,
-            "0.500",
-            "0.5",
-            Some("50000.00"),
-            1_697_673_600_012_000_000_u64,
+            "0.02",
+            "0.02",
+            Some("360.72"),
+            1_794_193_099_832_000_000_u64,
         ),
         (
-            "ETHUSDT-LINEAR.BYBIT",
+            "ETHUSDT-PERP.BITGET",
             if flat {
                 PositionSide::Flat
             } else {
@@ -5252,8 +3629,8 @@ async fn test_position_reports_preserve_held_and_flat_rows(
             },
             if flat { "0.00" } else { "5.00" },
             if flat { "0" } else { "-5" },
-            if flat { None } else { Some("3000.00") },
-            1_697_673_700_112_000_000_u64,
+            if flat { None } else { Some("3000") },
+            1_794_193_100_112_000_000_u64,
         ),
     ];
 
@@ -5295,108 +3672,54 @@ async fn test_position_reports_preserve_held_and_flat_rows(
         assert_ne!(reports[0].report_id, reports[1].report_id);
     }
 
+    // One request per call: Bitget has no settle coin pass
     let queries = state.position_queries.lock().await;
-    assert_eq!(queries.len(), if scoped { 1 } else { 2 });
-    assert_eq!(
-        queries[0].get("settleCoin").map(String::as_str),
-        (!scoped).then_some("USDT")
-    );
-
-    if !scoped {
-        assert_eq!(
-            queries[1].get("settleCoin").map(String::as_str),
-            Some("USDC")
-        );
-    }
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].get("settleCoin"), None);
 }
 
 #[rstest]
-#[case("cache", "Instrument ETHUSDT-LINEAR not found in cache")]
-#[case("size", "position.size")]
 #[tokio::test]
-async fn test_position_reports_reject_incomplete_later_page(
-    #[case] failure: &str,
-    #[case] expected_error: &str,
-) {
-    let mut positions = load_test_data("http_get_positions.json");
-    positions["result"]["list"]
-        .as_array_mut()
-        .unwrap()
-        .truncate(2);
-
-    if failure == "size" {
-        positions["result"]["list"][1]["size"] = json!("invalid");
-    }
-
-    let (addr, state) = start_position_report_server(positions, true).await;
+async fn test_position_reports_empty_list_is_null() {
+    // `current-position` returns `"list": null` when the account holds no position
+    let (addr, state) =
+        start_position_report_server(load_test_data("http_get_positions_empty.json")).await;
     let client = user_test_client(format!("http://{addr}"));
-    let instruments: BybitInstrumentLinearResponse =
-        serde_json::from_value(load_test_data("http_get_instruments_linear.json")).unwrap();
+    client
+        .request_instruments(BitgetProductType::Linear, None, None)
+        .await
+        .unwrap();
 
-    for definition in instruments.result.list {
-        if failure != "cache" || definition.symbol == "BTCUSDT" {
-            client.cache_instrument(
-                parse_linear_instrument(&definition, 0.into(), 0.into()).unwrap(),
-            );
-        }
-    }
-
-    let error = client
+    let reports = client
         .request_position_status_reports(
-            AccountId::new("BYBIT-UNIFIED"),
-            BybitProductType::Linear,
+            AccountId::new("BITGET-UNIFIED"),
+            BitgetProductType::Linear,
             None,
         )
         .await
-        .expect_err("a later page failure must discard earlier position reports");
+        .unwrap();
 
-    assert!(
-        format!("{error:#}").contains(expected_error),
-        "unexpected error: {error:#}"
-    );
-    let queries = state.position_queries.lock().await;
-    assert_eq!(queries.len(), 2);
-    assert_eq!(queries[0].get("cursor"), None);
-    assert_eq!(
-        queries[1].get("cursor").map(String::as_str),
-        Some("position-page-2")
-    );
-    assert_eq!(
-        queries[0].get("settleCoin").map(String::as_str),
-        Some("USDT")
-    );
-    assert_eq!(
-        queries[1].get("settleCoin").map(String::as_str),
-        Some("USDT")
-    );
+    assert!(reports.is_empty());
+    assert_eq!(state.position_queries.lock().await.len(), 1);
 }
 
-async fn start_position_report_server(
-    positions: Value,
-    paginated: bool,
-) -> (SocketAddr, TestServerState) {
+async fn start_position_report_server(positions: Value) -> (SocketAddr, TestServerState) {
     let state = TestServerState::default();
 
     let router = Router::new()
-        .route("/v5/market/time", get(handle_get_server_time))
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
         .route(
-            "/v5/position/list",
+            "/api/v3/position/current-position",
             get(
                 move |Query(query): Query<HashMap<String, String>>,
                       State(state): State<TestServerState>| {
                     let mut response = positions.clone();
                     async move {
-                        let list = response["result"]["list"].as_array_mut().unwrap();
-                        if query.get("settleCoin").map(String::as_str) == Some("USDC") {
-                            list.clear();
-                        } else if query.contains_key("symbol")
-                            || (paginated && query.contains_key("cursor"))
+                        if query.contains_key("symbol")
+                            && let Some(list) = response["data"]["list"].as_array_mut()
                         {
                             list.remove(0);
-                        } else if paginated {
-                            list.truncate(1);
-                            response["result"]["nextPageCursor"] = json!("position-page-2");
                         }
 
                         state.position_queries.lock().await.push(query);
@@ -5410,6 +3733,6 @@ async fn start_position_report_server(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    wait_for_server(addr, "/v5/market/time").await;
+    wait_for_server(addr, "/api/v3/market/time").await;
     (addr, state)
 }

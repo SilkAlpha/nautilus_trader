@@ -1,43 +1,58 @@
 {
-    "retCode": 0,
-    "retMsg": "OK",
-    "result": {
-        "list": [
-            {
-                "totalEquity": "3000.00",
-                "accountIMRate": "0",
-                "totalMarginBalance": "2500.00",
-                "totalInitialMargin": "0",
-                "accountType": "UNIFIED",
-                "totalAvailableBalance": "2500.00",
-                "accountMMRate": "0",
-                "totalPerpUPL": "0",
-                "totalWalletBalance": "2500.00",
-                "accountLTV": "0",
-                "totalMaintenanceMargin": "0",
-                "coin": [
-                    {
-                        "availableToBorrow": "5000",
-                        "bonus": "0",
-                        "accruedInterest": "0.50",
-                        "availableToWithdraw": "800.00",
-                        "equity": "1000.00",
-                        "usdValue": "1000.00",
-                        "unrealisedPnl": "0",
-                        "borrowAmount": "200.00",
-                        "walletBalance": "1200.00",
-                        "cumRealisedPnl": "100.00",
-                        "locked": "0",
-                        "collateralSwitch": true,
-                        "marginCollateral": true,
-                        "coin": "USDT",
-                        "spotHedgingQty": "0",
-                        "spotBorrow": "200.00"
-                    }
-                ]
-            }
-        ]
-    },
-    "retExtInfo": {},
-    "time": 1234567890
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794193114981,
+  "data": {
+    "accountEquity": "99923.24521669",
+    "usdtEquity": "100073.4463621",
+    "btcEquity": "1.32889622",
+    "unrealisedPnl": "0",
+    "usdtUnrealisedPnl": "0",
+    "btcUnrealizedPnl": "0",
+    "effEquity": "49923.24521669",
+    "mmr": "9.26",
+    "imr": "91.05",
+    "mgnRatio": "0.0001",
+    "positionMgnRatio": "0",
+    "positionValue": "454.34424553",
+    "leverage": "0",
+    "assets": [
+      {
+        "coin": "USD",
+        "equity": "50000",
+        "usdValue": "50000",
+        "balance": "50000",
+        "available": "50000",
+        "debt": "0",
+        "locked": "0",
+        "bonus": "0",
+        "interestBase": "0",
+        "balanceOriginal": "50000"
+      },
+      {
+        "coin": "USDT",
+        "equity": "49998.28810184",
+        "usdValue": "49923.24521669",
+        "balance": "49998.28810184",
+        "available": "49998.28810184",
+        "debt": "0",
+        "locked": "0",
+        "bonus": "0",
+        "interestBase": "0",
+        "balanceOriginal": "49998.28810184"
+      },
+      {
+        "coin": "ETH",
+        "equity": "1.5",
+        "usdValue": "4800",
+        "balance": "1.5",
+        "available": "1.5",
+        "debt": "0.5",
+        "locked": "0",
+        "bonus": "0",
+        "interestBase": "0",
+        "balanceOriginal": "1.5"
+      }
+    ]
+  }
 }

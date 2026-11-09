@@ -1,0 +1,25 @@
+{
+  "action": "snapshot",
+  "arg": {
+    "instType": "usdt-futures",
+    "topic": "funding-rate",
+    "symbol": "BTCUSDT"
+  },
+  "data": [
+    {
+      "baseInterestRate": "0.0001",
+      "cashDividend": "",
+      "cashDividendNextUpdate": "",
+      "fundingRate": "0.000054",
+      "fundingRateInterval": "8",
+      "impactMarginNotional": "60000",
+      "lastFundingRate": "0.000041",
+      "maxFundingRate": "0.003",
+      "minFundingRate": "-0.003",
+      "nextFundingRate": "0.000054",
+      "nextUpdate": "1794211200000",
+      "symbol": "BTCUSDT"
+    }
+  ],
+  "ts": 1794192890492
+}

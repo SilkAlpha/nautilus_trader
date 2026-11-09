@@ -13,15 +13,15 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Connects to the Bybit public WebSocket feed and streams specified market data topics.
+//! Connects to the Bitget public WebSocket feed and streams specified market data topics.
 //! Useful when manually validating the Rust WebSocket client implementation.
 
 use std::error::Error;
 
 use futures_util::StreamExt;
-use nautilus_bybit::{
-    common::enums::{BybitEnvironment, BybitProductType},
-    websocket::{client::BybitWebSocketClient, messages::BybitWsMessage},
+use nautilus_bitget::{
+    common::enums::{BitgetEnvironment, BitgetProductType},
+    websocket::{client::BitgetWebSocketClient, messages::BitgetWsMessage},
 };
 use nautilus_network::websocket::TransportBackend;
 use tokio::{pin, signal};
@@ -30,9 +30,9 @@ use tokio::{pin, signal};
 async fn main() -> Result<(), Box<dyn Error>> {
     nautilus_common::logging::ensure_logging_initialized();
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         None,
         20,
         TransportBackend::default(),
@@ -42,9 +42,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     client
         .subscribe(vec![
-            "orderbook.1.BTCUSDT".to_string(),
+            "books1.BTCUSDT".to_string(),
             "publicTrade.BTCUSDT".to_string(),
-            "tickers.BTCUSDT".to_string(),
+            "ticker.BTCUSDT".to_string(),
         ])
         .await?;
 
@@ -53,19 +53,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     pin!(stream);
     pin!(shutdown);
 
-    log::info!("Streaming Bybit market data; press Ctrl+C to exit");
+    log::info!("Streaming Bitget market data; press Ctrl+C to exit");
 
     loop {
         tokio::select! {
             Some(event) = stream.next() => {
                 match event {
-                    BybitWsMessage::Orderbook(msg) => {
+                    BitgetWsMessage::Orderbook(msg) => {
                         log::info!(
                             "orderbook: topic={}, type={}, count={}",
                             msg.topic, msg.msg_type, msg.data.b.len() + msg.data.a.len()
                         );
                     }
-                    BybitWsMessage::Trade(msg) => {
+                    BitgetWsMessage::Trade(msg) => {
                         for trade in &msg.data {
                             log::info!(
                                 "trade: symbol={}, price={}, size={}, side={:?}",
@@ -73,33 +73,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                     }
-                    BybitWsMessage::Kline(msg) => {
+                    BitgetWsMessage::Kline(msg) => {
+                        // Bitget klines carry no confirm flag: a later `start` closes a bar
                         for kline in &msg.data {
                             log::info!(
-                                "kline: topic={}, close={}, confirm={}",
-                                msg.topic, kline.close, kline.confirm
+                                "kline: topic={}, start={}, close={}",
+                                msg.topic, kline.start, kline.close
                             );
                         }
                     }
-                    BybitWsMessage::TickerLinear(msg) => {
+                    BitgetWsMessage::TickerLinear(msg) => {
                         log::info!(
                             "ticker linear: symbol={}, last_price={:?}, mark_price={:?}",
                             msg.data.symbol, msg.data.last_price, msg.data.mark_price
                         );
                     }
-                    BybitWsMessage::TickerOption(msg) => {
+                    BitgetWsMessage::TickerOption(msg) => {
                         log::info!(
                             "ticker option: symbol={}, bid={}, ask={}",
                             msg.data.symbol, msg.data.bid_price, msg.data.ask_price
                         );
                     }
-                    BybitWsMessage::Error(err) => {
+                    BitgetWsMessage::Error(err) => {
                         log::warn!("WebSocket error: code={}, message={}", err.code, err.message);
                     }
-                    BybitWsMessage::Reconnected => {
+                    BitgetWsMessage::Reconnected => {
                         log::warn!("WebSocket reconnected");
                     }
-                    BybitWsMessage::Auth(result) => {
+                    BitgetWsMessage::Auth(result) => {
                         log::info!("Auth result: success={:?}", result.success);
                     }
                     _ => {

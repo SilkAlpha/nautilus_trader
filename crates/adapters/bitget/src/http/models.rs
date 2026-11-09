@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Data transfer objects for deserializing Bybit HTTP API payloads.
+//! Data transfer objects for deserializing Bitget HTTP API payloads.
 
 use nautilus_core::string::secret::SecretString;
 use rust_decimal::Decimal;
@@ -22,21 +22,24 @@ use ustr::Ustr;
 
 use crate::common::{
     enums::{
-        BybitAccountType, BybitApiKeyType, BybitCancelType, BybitContractType, BybitCreateType,
-        BybitExecType, BybitInnovationFlag, BybitInstrumentStatus, BybitMarginMode,
-        BybitMarginTrading, BybitOptionType, BybitOrderSide, BybitOrderStatus, BybitOrderType,
-        BybitPositionIdx, BybitPositionSide, BybitPositionStatus, BybitProductType,
-        BybitRepayStatus, BybitSmpType, BybitStopOrderType, BybitSymbolType, BybitTimeInForce,
-        BybitTpSlMode, BybitTriggerDirection, BybitTriggerType, BybitUnifiedMarginStatus,
+        BitgetAccountType, BitgetApiKeyType, BitgetCancelType, BitgetContractType,
+        BitgetCreateType, BitgetExecType, BitgetInnovationFlag, BitgetInstrumentStatus,
+        BitgetMarginMode, BitgetMarginTrading, BitgetOptionType, BitgetOrderSide,
+        BitgetOrderStatus, BitgetOrderType, BitgetPositionIdx, BitgetPositionMode,
+        BitgetPositionSide, BitgetPositionStatus, BitgetProductType, BitgetRepayStatus,
+        BitgetSmpType, BitgetStopOrderType, BitgetSymbolType, BitgetTimeInForce, BitgetTpSlMode,
+        BitgetTriggerDirection, BitgetTriggerType, BitgetUnifiedMarginStatus,
     },
     models::{
-        BybitCursorList, BybitCursorListResponse, BybitListResponse, BybitResponse, LeverageFilter,
-        LinearLotSizeFilter, LinearPriceFilter, OptionLotSizeFilter, SpotLotSizeFilter,
-        SpotPriceFilter,
+        BitgetCursorList, BitgetCursorListResponse, BitgetListResponse, BitgetResponse,
+        LeverageFilter, LinearLotSizeFilter, LinearPriceFilter, OptionLotSizeFilter,
+        SpotLotSizeFilter, SpotPriceFilter,
     },
     parse::{
-        bool_or_int, deserialize_decimal_or_zero, deserialize_i32_or_string,
-        deserialize_optional_decimal_or_zero, deserialize_string_to_u8, masked_secret, on_off_bool,
+        bool_or_int, deserialize_decimal_or_zero, deserialize_fee_detail_sum,
+        deserialize_i32_or_string, deserialize_i64_or_string, deserialize_null_default,
+        deserialize_optional_decimal_or_zero, deserialize_string_or_null, masked_secret,
+        yes_no_bool,
     },
 };
 
@@ -44,24 +47,24 @@ use crate::common::{
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
-pub struct BybitOrderCursorList {
+pub struct BitgetOrderCursorList {
     /// Collection of orders returned by the endpoint.
-    pub list: Vec<BybitOrder>,
+    pub list: Vec<BitgetOrder>,
     /// Pagination cursor for the next page.
     pub next_page_cursor: Option<String>,
     /// Optional product category when the API includes it.
     #[serde(default)]
-    pub category: Option<BybitProductType>,
+    pub category: Option<BitgetProductType>,
 }
 
-impl From<BybitCursorList<BybitOrder>> for BybitOrderCursorList {
-    fn from(cursor_list: BybitCursorList<BybitOrder>) -> Self {
+impl From<BitgetCursorList<BitgetOrder>> for BitgetOrderCursorList {
+    fn from(cursor_list: BitgetCursorList<BitgetOrder>) -> Self {
         Self {
             list: cursor_list.list,
             next_page_cursor: cursor_list.next_page_cursor,
@@ -72,10 +75,10 @@ impl From<BybitCursorList<BybitOrder>> for BybitOrderCursorList {
 
 #[cfg(feature = "python")]
 #[pyo3::pymethods]
-impl BybitOrderCursorList {
+impl BitgetOrderCursorList {
     #[getter]
     #[must_use]
-    pub fn list(&self) -> Vec<BybitOrder> {
+    pub fn list(&self) -> Vec<BitgetOrder> {
         self.list.clone()
     }
 
@@ -87,67 +90,86 @@ impl BybitOrderCursorList {
 
     #[getter]
     #[must_use]
-    pub fn category(&self) -> Option<BybitProductType> {
+    pub fn category(&self) -> Option<BitgetProductType> {
         self.category
     }
 }
 
-/// Response payload returned by `GET /v5/market/time`.
+/// Response payload returned by `GET /api/v3/market/time`.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/time>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
 #[serde(rename_all = "camelCase")]
-pub struct BybitServerTime {
-    /// Server timestamp in seconds represented as string.
-    pub time_second: String,
-    /// Server timestamp in nanoseconds represented as string.
-    pub time_nano: String,
+pub struct BitgetServerTime {
+    /// Server timestamp in milliseconds represented as string.
+    pub server_time: String,
+    /// Server timestamp in microseconds represented as string.
+    pub server_time_micros: String,
 }
 
 #[cfg(feature = "python")]
 #[pyo3::pymethods]
-impl BybitServerTime {
+impl BitgetServerTime {
     #[getter]
     #[must_use]
-    pub fn time_second(&self) -> &str {
-        &self.time_second
+    pub fn time_second(&self) -> String {
+        self.time_second_str()
     }
 
     #[getter]
     #[must_use]
-    pub fn time_nano(&self) -> &str {
-        &self.time_nano
+    pub fn time_nano(&self) -> String {
+        self.time_nano_str()
+    }
+}
+
+impl BitgetServerTime {
+    /// Returns the server time in whole seconds (Bitget reports milliseconds).
+    #[must_use]
+    pub fn time_second_str(&self) -> String {
+        self.server_time
+            .parse::<u64>()
+            .map_or_else(|_| String::new(), |ms| (ms / 1_000).to_string())
+    }
+
+    /// Returns the server time in nanoseconds (Bitget reports microseconds).
+    #[must_use]
+    pub fn time_nano_str(&self) -> String {
+        self.server_time_micros
+            .parse::<u64>()
+            .map_or_else(|_| String::new(), |us| (us * 1_000).to_string())
     }
 }
 
 /// Type alias for the server time response envelope.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/time>
-pub type BybitServerTimeResponse = BybitResponse<BybitServerTime>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetServerTimeResponse = BitgetResponse<BitgetServerTime>;
 
 /// Ticker payload for spot instruments.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitTickerSpot {
+pub struct BitgetTickerSpot {
     pub symbol: Ustr,
     pub bid1_price: String,
     pub bid1_size: String,
     pub ask1_price: String,
     pub ask1_size: String,
     pub last_price: String,
+    #[serde(rename = "openPrice24h")]
     pub prev_price24h: String,
     pub price24h_pcnt: String,
     pub high_price24h: String,
@@ -161,43 +183,53 @@ pub struct BybitTickerSpot {
 /// Ticker payload for linear and inverse perpetual/futures instruments.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitTickerLinear {
+pub struct BitgetTickerLinear {
     pub symbol: Ustr,
     pub last_price: String,
     pub index_price: String,
     pub mark_price: String,
+    #[serde(rename = "openPrice24h")]
     pub prev_price24h: String,
     pub price24h_pcnt: String,
     pub high_price24h: String,
     pub low_price24h: String,
+    #[serde(default)]
     pub prev_price1h: String,
     pub open_interest: String,
+    #[serde(default)]
     pub open_interest_value: String,
     pub turnover24h: String,
     pub volume24h: String,
     pub funding_rate: String,
+    /// Not part of the REST ticker (WebSocket `ticker` carries it).
+    #[serde(default)]
     pub next_funding_time: String,
+    #[serde(default)]
     pub predicted_delivery_price: String,
+    #[serde(default)]
     pub basis_rate: String,
+    #[serde(default)]
     pub delivery_fee_rate: String,
+    #[serde(default)]
     pub delivery_time: String,
     pub ask1_size: String,
     pub bid1_price: String,
     pub ask1_price: String,
     pub bid1_size: String,
+    #[serde(default)]
     pub basis: String,
 }
 
-/// Ticker payload for option instruments.
+/// Ticker payload for option instruments (Bitget lists no options; kept for API parity).
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitTickerOption {
+pub struct BitgetTickerOption {
     pub symbol: Ustr,
     pub bid1_price: String,
     pub bid1_size: String,
@@ -228,18 +260,18 @@ pub struct BybitTickerOption {
 /// Response alias for spot ticker requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
-pub type BybitTickersSpotResponse = BybitListResponse<BybitTickerSpot>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetTickersSpotResponse = BitgetListResponse<BitgetTickerSpot>;
 /// Response alias for linear/inverse ticker requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
-pub type BybitTickersLinearResponse = BybitListResponse<BybitTickerLinear>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetTickersLinearResponse = BitgetListResponse<BitgetTickerLinear>;
 /// Response alias for option ticker requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
-pub type BybitTickersOptionResponse = BybitListResponse<BybitTickerOption>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetTickersOptionResponse = BitgetListResponse<BitgetTickerOption>;
 
 /// Unified ticker data structure containing common fields across all product types.
 ///
@@ -249,13 +281,13 @@ pub type BybitTickersOptionResponse = BybitListResponse<BybitTickerOption>;
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
-pub struct BybitTickerData {
+pub struct BitgetTickerData {
     pub symbol: Ustr,
     pub bid1_price: String,
     pub bid1_size: String,
@@ -280,7 +312,7 @@ pub struct BybitTickerData {
 
 #[cfg(feature = "python")]
 #[pyo3::pymethods]
-impl BybitTickerData {
+impl BitgetTickerData {
     #[getter]
     #[must_use]
     pub fn symbol(&self) -> &str {
@@ -372,8 +404,8 @@ impl BybitTickerData {
     }
 }
 
-impl From<BybitTickerSpot> for BybitTickerData {
-    fn from(ticker: BybitTickerSpot) -> Self {
+impl From<BitgetTickerSpot> for BitgetTickerData {
+    fn from(ticker: BitgetTickerSpot) -> Self {
         Self {
             symbol: ticker.symbol,
             bid1_price: ticker.bid1_price,
@@ -394,8 +426,8 @@ impl From<BybitTickerSpot> for BybitTickerData {
     }
 }
 
-impl From<BybitTickerLinear> for BybitTickerData {
-    fn from(ticker: BybitTickerLinear) -> Self {
+impl From<BitgetTickerLinear> for BitgetTickerData {
+    fn from(ticker: BitgetTickerLinear) -> Self {
         Self {
             symbol: ticker.symbol,
             bid1_price: ticker.bid1_price,
@@ -416,8 +448,8 @@ impl From<BybitTickerLinear> for BybitTickerData {
     }
 }
 
-impl From<BybitTickerOption> for BybitTickerData {
-    fn from(ticker: BybitTickerOption) -> Self {
+impl From<BitgetTickerOption> for BitgetTickerData {
+    fn from(ticker: BitgetTickerOption) -> Self {
         Self {
             symbol: ticker.symbol,
             bid1_price: ticker.bid1_price,
@@ -438,15 +470,15 @@ impl From<BybitTickerOption> for BybitTickerData {
     }
 }
 
-/// Kline/candlestick entry returned by `GET /v5/market/kline`.
+/// Kline/candlestick entry returned by `GET /api/v3/market/candles`.
 ///
-/// Bybit returns klines as arrays with 7 elements:
+/// Bitget returns klines as arrays with 7 elements:
 /// [startTime, openPrice, highPrice, lowPrice, closePrice, volume, turnover]
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/kline>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize)]
-pub struct BybitKline {
+pub struct BitgetKline {
     pub start: String,
     pub open: String,
     pub high: String,
@@ -456,7 +488,7 @@ pub struct BybitKline {
     pub turnover: String,
 }
 
-impl<'de> Deserialize<'de> for BybitKline {
+impl<'de> Deserialize<'de> for BitgetKline {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -475,37 +507,54 @@ impl<'de> Deserialize<'de> for BybitKline {
     }
 }
 
-/// Kline list result returned by Bybit.
+/// Kline list result returned by Bitget.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/kline>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+///
+/// Bitget returns the candles as a bare array in `data`; `category` and `symbol` are not echoed
+/// and are set by the caller.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitKlineResult {
-    pub category: BybitProductType,
+#[serde(rename_all = "camelCase", from = "Vec<BitgetKline>")]
+pub struct BitgetKlineResult {
+    pub category: BitgetProductType,
     pub symbol: Ustr,
-    pub list: Vec<BybitKline>,
+    pub list: Vec<BitgetKline>,
+}
+
+impl From<Vec<BitgetKline>> for BitgetKlineResult {
+    fn from(list: Vec<BitgetKline>) -> Self {
+        Self {
+            category: BitgetProductType::default(),
+            symbol: Ustr::default(),
+            list,
+        }
+    }
 }
 
 /// Response alias for kline history requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/kline>
-pub type BybitKlinesResponse = BybitResponse<BybitKlineResult>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetKlinesResponse = BitgetResponse<BitgetKlineResult>;
 
-/// Trade entry returned by `GET /v5/market/recent-trade`.
+/// Trade entry returned by `GET /api/v3/market/fills`.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/recent-trade>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitTrade {
+pub struct BitgetTrade {
     pub exec_id: String,
+    /// Not echoed by Bitget; set by the caller.
+    #[serde(default)]
     pub symbol: Ustr,
     pub price: String,
     pub size: String,
-    pub side: BybitOrderSide,
+    pub side: BitgetOrderSide,
+    #[serde(rename = "ts")]
     pub time: String,
+    #[serde(default)]
     pub is_block_trade: bool,
     #[serde(default)]
     pub m_p: Option<String>,
@@ -517,171 +566,515 @@ pub struct BybitTrade {
     pub iv: Option<String>,
 }
 
-/// Trade list result returned by Bybit.
+/// Trade list result returned by Bitget.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/recent-trade>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+///
+/// Bitget returns the trades as a bare array in `data`; `category` is set by the caller.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitTradeResult {
-    pub category: BybitProductType,
-    pub list: Vec<BybitTrade>,
+#[serde(rename_all = "camelCase", from = "Vec<BitgetTrade>")]
+pub struct BitgetTradeResult {
+    pub category: BitgetProductType,
+    pub list: Vec<BitgetTrade>,
+}
+
+impl From<Vec<BitgetTrade>> for BitgetTradeResult {
+    fn from(list: Vec<BitgetTrade>) -> Self {
+        Self {
+            category: BitgetProductType::default(),
+            list,
+        }
+    }
 }
 
 /// Response alias for recent trades requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/recent-trade>
-pub type BybitTradesResponse = BybitResponse<BybitTradeResult>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetTradesResponse = BitgetResponse<BitgetTradeResult>;
 
-/// Funding entry returned by `GET /v5/market/funding/history`.
+/// Funding entry returned by `GET /api/v3/market/history-fund-rate`.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/history-fund-rate>
+/// - <https://www.bitget.com/docs/catalog/market/derivatives>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitFunding {
+pub struct BitgetFunding {
     pub symbol: Ustr,
     pub funding_rate: String,
     pub funding_rate_timestamp: String,
 }
 
-/// Funding list result returned by Bybit.
+/// Funding list result returned by Bitget.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/history-fund-rate>
+/// - <https://www.bitget.com/docs/catalog/market/derivatives>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitFundingResult {
-    pub category: BybitProductType,
-    pub list: Vec<BybitFunding>,
+pub struct BitgetFundingResult {
+    /// Not echoed by Bitget; set by the caller.
+    #[serde(default)]
+    pub category: BitgetProductType,
+    #[serde(
+        rename = "resultList",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub list: Vec<BitgetFunding>,
 }
 
 /// Response alias for historical funding requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/history-fund-rate>
-pub type BybitFundingResponse = BybitResponse<BybitFundingResult>;
+/// - <https://www.bitget.com/docs/catalog/market/derivatives>
+pub type BitgetFundingResponse = BitgetResponse<BitgetFundingResult>;
 
-/// Orderbook result returned by Bybit.
+/// Orderbook result returned by Bitget.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/orderbook>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitOrderbookResult {
-    /// Symbol.
+pub struct BitgetOrderbookResult {
+    /// Symbol (not echoed by Bitget; set by the caller).
+    #[serde(default)]
     pub s: Ustr,
-    /// Bid levels represented as `[price, size]` string pairs.
+    /// Bid levels represented as `[price, size]` string pairs (Bitget sends JSON numbers).
+    #[serde(deserialize_with = "deserialize_book_levels")]
     pub b: Vec<[String; 2]>,
-    /// Ask levels represented as `[price, size]` string pairs.
+    /// Ask levels represented as `[price, size]` string pairs (Bitget sends JSON numbers).
+    #[serde(deserialize_with = "deserialize_book_levels")]
     pub a: Vec<[String; 2]>,
+    #[serde(deserialize_with = "deserialize_i64_or_string")]
     pub ts: i64,
-    /// Update identifier.
+    /// Update identifier (Bitget's REST book has no sequence; always 0).
+    #[serde(default)]
     pub u: i64,
-    /// Cross sequence number.
+    /// Cross sequence number (Bitget's REST book has no sequence; always 0).
+    #[serde(default)]
     pub seq: i64,
+    #[serde(default)]
     pub cts: i64,
+}
+
+/// Deserializes order book levels given as JSON numbers or strings into `[price, size]` strings.
+fn deserialize_book_levels<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<[String; 2]>, D::Error> {
+    let levels = Vec::<[serde_json::Value; 2]>::deserialize(d)?;
+    Ok(levels
+        .into_iter()
+        .map(|[price, size]| [json_scalar_to_string(price), json_scalar_to_string(size)])
+        .collect())
+}
+
+fn json_scalar_to_string(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    }
 }
 
 /// Response alias for orderbook requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/orderbook>
-pub type BybitOrderbookResponse = BybitResponse<BybitOrderbookResult>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetOrderbookResponse = BitgetResponse<BitgetOrderbookResult>;
 
 /// Instrument definition for spot symbols.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitInstrumentSpot {
+pub struct BitgetInstrumentSpot {
     pub symbol: Ustr,
     pub base_coin: Ustr,
     pub quote_coin: Ustr,
-    pub innovation: BybitInnovationFlag,
-    pub status: BybitInstrumentStatus,
-    pub margin_trading: BybitMarginTrading,
-    pub lot_size_filter: SpotLotSizeFilter,
-    pub price_filter: SpotPriceFilter,
+    /// No Bitget field; always `Other`.
+    #[serde(default = "default_innovation")]
+    pub innovation: BitgetInnovationFlag,
+    pub status: BitgetInstrumentStatus,
+    /// No Bitget field; always `Other`.
+    #[serde(default = "default_margin_trading")]
+    pub margin_trading: BitgetMarginTrading,
+    /// Price decimal places; the tick size is `10^-pricePrecision`.
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub price_precision: String,
+    /// Quantity decimal places; the lot step is `10^-quantityPrecision`.
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub quantity_precision: String,
+    /// Quote-amount decimal places of market orders.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub quote_precision: String,
+    /// Minimum order quantity (`0` = no limit).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub min_order_qty: String,
+    /// Maximum order quantity (`0` = no limit).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub max_order_qty: String,
+    /// Minimum order notional in quote currency.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub min_order_amount: String,
+    /// Maximum market order notional in quote currency.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub max_market_order_amount: String,
+    /// `yes` for Bitget "Reality" stock tokens (rTokens).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub is_reality: String,
     #[serde(default)]
     pub symbol_id: Option<i64>,
-    #[serde(default)]
-    pub symbol_type: Option<BybitSymbolType>,
+    #[serde(default, rename = "instrumentType")]
+    pub symbol_type: Option<BitgetSymbolType>,
+    /// No Bitget field.
     #[serde(default)]
     pub xstock_multiplier: Option<String>,
+}
+
+impl BitgetInstrumentSpot {
+    /// Returns the lot size filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn lot_size_filter(&self) -> SpotLotSizeFilter {
+        SpotLotSizeFilter {
+            base_precision: precision_to_step(&self.quantity_precision),
+            quote_precision: precision_to_step(&self.quote_precision),
+            min_order_qty: self.min_order_qty.clone(),
+            max_order_qty: self.max_order_qty.clone(),
+            min_order_amt: self.min_order_amount.clone(),
+            max_order_amt: self.max_market_order_amount.clone(),
+        }
+    }
+
+    /// Returns the price filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn price_filter(&self) -> SpotPriceFilter {
+        SpotPriceFilter {
+            tick_size: precision_to_step(&self.price_precision),
+        }
+    }
+}
+
+const fn default_innovation() -> BitgetInnovationFlag {
+    BitgetInnovationFlag::Other
+}
+
+const fn default_margin_trading() -> BitgetMarginTrading {
+    BitgetMarginTrading::Other
+}
+
+/// Converts a Bitget decimal-places value (e.g. `"4"`) into a step string (e.g. `"0.0001"`).
+fn precision_to_step(precision: &str) -> String {
+    precision.parse::<u32>().map_or_else(
+        |_| String::new(),
+        |places| Decimal::new(1, places).to_string(),
+    )
 }
 
 /// Instrument definition for linear contracts.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitInstrumentLinear {
+pub struct BitgetInstrumentLinear {
     pub symbol: Ustr,
-    pub contract_type: BybitContractType,
-    pub status: BybitInstrumentStatus,
+    /// Bitget `type` (`perpetual`/`delivery`); see `contract_type()`.
+    #[serde(rename = "type")]
+    pub contract_kind: String,
+    pub status: BitgetInstrumentStatus,
     pub base_coin: Ustr,
     pub quote_coin: Ustr,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
     pub launch_time: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub delivery_time: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub delivery_fee_rate: String,
+    /// Price decimal places.
+    #[serde(
+        rename = "pricePrecision",
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub price_scale: String,
-    pub leverage_filter: LeverageFilter,
-    pub price_filter: LinearPriceFilter,
-    pub lot_size_filter: LinearLotSizeFilter,
+    /// Quantity decimal places.
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub quantity_precision: String,
+    /// Price step (an order price must be a multiple of it).
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub price_multiplier: String,
+    /// Quantity step (an order quantity must be a multiple of it).
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub quantity_multiplier: String,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub min_order_qty: String,
+    /// Maximum quantity of a single limit order (`0` = no limit).
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub max_order_qty: String,
+    /// Maximum quantity of a single market order.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub max_market_order_qty: String,
+    /// Minimum order notional in quote currency.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub min_order_amount: String,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub min_leverage: String,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub max_leverage: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub maker_fee_rate: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub taker_fee_rate: String,
+    /// Maximum buy price as a ratio away from the reference price.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub buy_limit_price_ratio: String,
+    /// Minimum sell price as a ratio away from the reference price.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub sell_limit_price_ratio: String,
+    /// Scheduled halt time in milliseconds (`-1` when none).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub off_time: String,
+    /// No Bitget field; Bitget UTA trades every listed contract.
+    #[serde(default = "default_true")]
     pub unified_margin_trade: bool,
+    /// Funding interval in minutes (Bitget `fundInterval` is in hours; `0` for deliveries).
+    #[serde(
+        rename = "fundInterval",
+        deserialize_with = "deserialize_hours_to_minutes"
+    )]
     pub funding_interval: i64,
+    /// Bitget sends no settle coin: quote coin for USDT-FUTURES, base coin for COIN-FUTURES.
+    #[serde(default)]
     pub settle_coin: Ustr,
     #[serde(default)]
     pub symbol_id: Option<i64>,
-    #[serde(default)]
-    pub symbol_type: Option<BybitSymbolType>,
+    #[serde(default, rename = "instrumentType")]
+    pub symbol_type: Option<BitgetSymbolType>,
+}
+
+impl BitgetInstrumentLinear {
+    /// Returns the contract type derived from the category and Bitget `type`.
+    #[must_use]
+    pub fn contract_type(&self) -> BitgetContractType {
+        match (self.contract_kind.as_str(), false) {
+            ("delivery", false) => BitgetContractType::LinearFutures,
+            ("delivery", true) => BitgetContractType::InverseFutures,
+            (_, false) => BitgetContractType::LinearPerpetual,
+            (_, true) => BitgetContractType::InversePerpetual,
+        }
+    }
+
+    /// Returns the price filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn price_filter(&self) -> LinearPriceFilter {
+        LinearPriceFilter {
+            min_price: String::new(),
+            max_price: String::new(),
+            tick_size: self.price_multiplier.clone(),
+        }
+    }
+
+    /// Returns the lot size filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn lot_size_filter(&self) -> LinearLotSizeFilter {
+        LinearLotSizeFilter {
+            max_order_qty: self.max_order_qty.clone(),
+            min_order_qty: self.min_order_qty.clone(),
+            qty_step: self.quantity_multiplier.clone(),
+            post_only_max_order_qty: None,
+            max_mkt_order_qty: Some(self.max_market_order_qty.clone()),
+            min_notional_value: Some(self.min_order_amount.clone()),
+        }
+    }
+
+    /// Returns the leverage filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn leverage_filter(&self) -> LeverageFilter {
+        LeverageFilter {
+            min_leverage: self.min_leverage.clone(),
+            max_leverage: self.max_leverage.clone(),
+            leverage_step: "1".to_string(),
+        }
+    }
+
+    /// Returns the settlement coin (`settleCoin` is not sent by Bitget).
+    #[must_use]
+    pub fn settle_coin(&self) -> Ustr {
+        if self.settle_coin.is_empty() {
+            self.quote_coin
+        } else {
+            self.settle_coin
+        }
+    }
 }
 
 /// Instrument definition for inverse contracts.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitInstrumentInverse {
+pub struct BitgetInstrumentInverse {
     pub symbol: Ustr,
-    pub contract_type: BybitContractType,
-    pub status: BybitInstrumentStatus,
+    /// Bitget `type` (`perpetual`/`delivery`); see `contract_type()`.
+    #[serde(rename = "type")]
+    pub contract_kind: String,
+    pub status: BitgetInstrumentStatus,
     pub base_coin: Ustr,
     pub quote_coin: Ustr,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
     pub launch_time: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub delivery_time: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub delivery_fee_rate: String,
+    /// Price decimal places.
+    #[serde(
+        rename = "pricePrecision",
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub price_scale: String,
-    pub leverage_filter: LeverageFilter,
-    pub price_filter: LinearPriceFilter,
-    pub lot_size_filter: LinearLotSizeFilter,
+    /// Quantity decimal places.
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub quantity_precision: String,
+    /// Price step (an order price must be a multiple of it).
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub price_multiplier: String,
+    /// Quantity step (an order quantity must be a multiple of it).
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub quantity_multiplier: String,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub min_order_qty: String,
+    /// Maximum quantity of a single limit order (`0` = no limit).
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub max_order_qty: String,
+    /// Maximum quantity of a single market order.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub max_market_order_qty: String,
+    /// Minimum order notional in quote currency.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub min_order_amount: String,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub min_leverage: String,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
+    pub max_leverage: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub maker_fee_rate: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub taker_fee_rate: String,
+    /// Maximum buy price as a ratio away from the reference price.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub buy_limit_price_ratio: String,
+    /// Minimum sell price as a ratio away from the reference price.
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub sell_limit_price_ratio: String,
+    /// Scheduled halt time in milliseconds (`-1` when none).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub off_time: String,
+    /// No Bitget field; Bitget UTA trades every listed contract.
+    #[serde(default = "default_true")]
     pub unified_margin_trade: bool,
+    /// Funding interval in minutes (Bitget `fundInterval` is in hours; `0` for deliveries).
+    #[serde(
+        rename = "fundInterval",
+        deserialize_with = "deserialize_hours_to_minutes"
+    )]
     pub funding_interval: i64,
+    /// Bitget sends no settle coin: quote coin for USDT-FUTURES, base coin for COIN-FUTURES.
+    #[serde(default)]
     pub settle_coin: Ustr,
     #[serde(default)]
     pub symbol_id: Option<i64>,
-    #[serde(default)]
-    pub symbol_type: Option<BybitSymbolType>,
+    #[serde(default, rename = "instrumentType")]
+    pub symbol_type: Option<BitgetSymbolType>,
 }
 
-/// Instrument definition for option contracts.
+impl BitgetInstrumentInverse {
+    /// Returns the contract type derived from the category and Bitget `type`.
+    #[must_use]
+    pub fn contract_type(&self) -> BitgetContractType {
+        match (self.contract_kind.as_str(), true) {
+            ("delivery", false) => BitgetContractType::LinearFutures,
+            ("delivery", true) => BitgetContractType::InverseFutures,
+            (_, false) => BitgetContractType::LinearPerpetual,
+            (_, true) => BitgetContractType::InversePerpetual,
+        }
+    }
+
+    /// Returns the price filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn price_filter(&self) -> LinearPriceFilter {
+        LinearPriceFilter {
+            min_price: String::new(),
+            max_price: String::new(),
+            tick_size: self.price_multiplier.clone(),
+        }
+    }
+
+    /// Returns the lot size filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn lot_size_filter(&self) -> LinearLotSizeFilter {
+        LinearLotSizeFilter {
+            max_order_qty: self.max_order_qty.clone(),
+            min_order_qty: self.min_order_qty.clone(),
+            qty_step: self.quantity_multiplier.clone(),
+            post_only_max_order_qty: None,
+            max_mkt_order_qty: Some(self.max_market_order_qty.clone()),
+            min_notional_value: Some(self.min_order_amount.clone()),
+        }
+    }
+
+    /// Returns the leverage filter built from the flat Bitget fields.
+    #[must_use]
+    pub fn leverage_filter(&self) -> LeverageFilter {
+        LeverageFilter {
+            min_leverage: self.min_leverage.clone(),
+            max_leverage: self.max_leverage.clone(),
+            leverage_step: "1".to_string(),
+        }
+    }
+
+    /// Returns the settlement coin (`settleCoin` is not sent by Bitget).
+    #[must_use]
+    pub fn settle_coin(&self) -> Ustr {
+        if self.settle_coin.is_empty() {
+            self.base_coin
+        } else {
+            self.settle_coin
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// Deserializes Bitget `fundInterval` (hours, as a string; empty for deliveries) into minutes.
+fn deserialize_hours_to_minutes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let raw = deserialize_string_or_null(d)?;
+    if raw.is_empty() {
+        return Ok(0);
+    }
+    raw.parse::<i64>()
+        .map(|hours| hours * 60)
+        .map_err(serde::de::Error::custom)
+}
+
+/// Instrument definition for option contracts (Bitget lists no options; kept for API parity).
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitInstrumentOption {
+pub struct BitgetInstrumentOption {
     pub symbol: Ustr,
-    pub status: BybitInstrumentStatus,
+    pub status: BitgetInstrumentStatus,
     pub base_coin: Ustr,
     pub quote_coin: Ustr,
     pub settle_coin: Ustr,
-    pub options_type: BybitOptionType,
+    pub options_type: BitgetOptionType,
     pub launch_time: String,
     pub delivery_time: String,
     pub delivery_fee_rate: String,
@@ -694,39 +1087,39 @@ pub struct BybitInstrumentOption {
 /// Response alias for instrument info requests that return spot instruments.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
-pub type BybitInstrumentSpotResponse = BybitCursorListResponse<BybitInstrumentSpot>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetInstrumentSpotResponse = BitgetCursorListResponse<BitgetInstrumentSpot>;
 /// Response alias for instrument info requests that return linear contracts.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
-pub type BybitInstrumentLinearResponse = BybitCursorListResponse<BybitInstrumentLinear>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetInstrumentLinearResponse = BitgetCursorListResponse<BitgetInstrumentLinear>;
 /// Response alias for instrument info requests that return inverse contracts.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
-pub type BybitInstrumentInverseResponse = BybitCursorListResponse<BybitInstrumentInverse>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetInstrumentInverseResponse = BitgetCursorListResponse<BitgetInstrumentInverse>;
 /// Response alias for instrument info requests that return option contracts.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
-pub type BybitInstrumentOptionResponse = BybitCursorListResponse<BybitInstrumentOption>;
+/// - <https://www.bitget.com/docs/catalog/market/market-data>
+pub type BitgetInstrumentOptionResponse = BitgetCursorListResponse<BitgetInstrumentOption>;
 
-/// Fee rate structure returned by `GET /v5/account/fee-rate`.
+/// Fee rate structure returned by `GET /api/v3/account/all-fee-rate`.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/fee-rate>
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
-pub struct BybitFeeRate {
+pub struct BitgetFeeRate {
     pub symbol: Ustr,
     pub taker_fee_rate: String,
     pub maker_fee_rate: String,
@@ -736,7 +1129,7 @@ pub struct BybitFeeRate {
 
 #[cfg(feature = "python")]
 #[pyo3::pymethods]
-impl BybitFeeRate {
+impl BitgetFeeRate {
     #[getter]
     #[must_use]
     pub fn symbol(&self) -> &str {
@@ -765,40 +1158,71 @@ impl BybitFeeRate {
 /// Response alias for fee rate requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/fee-rate>
-pub type BybitFeeRateResponse = BybitListResponse<BybitFeeRate>;
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
+pub type BitgetFeeRateResponse = BitgetListResponse<BitgetFeeRate>;
 
 /// Account balance snapshot coin entry.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/wallet-balance>
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitCoinBalance {
+pub struct BitgetCoinBalance {
+    /// No Bitget field.
+    #[serde(default)]
     pub available_to_borrow: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub bonus: String,
+    /// Interest base (`interestBase`).
+    #[serde(
+        rename = "interestBase",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub accrued_interest: String,
+    /// Available balance (`available`).
+    #[serde(rename = "available")]
     pub available_to_withdraw: String,
+    /// No Bitget field.
     #[serde(default, rename = "totalOrderIM")]
     pub total_order_im: Option<String>,
     pub equity: String,
     pub usd_value: String,
+    /// Liabilities (`debt`).
+    #[serde(
+        rename = "debt",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub borrow_amount: String,
+    /// No Bitget field.
     #[serde(default, rename = "totalPositionMM")]
     pub total_position_mm: Option<String>,
+    /// No Bitget field.
     #[serde(default, rename = "totalPositionIM")]
     pub total_position_im: Option<String>,
-    #[serde(deserialize_with = "deserialize_decimal_or_zero")]
+    /// Wallet balance (`balance`).
+    #[serde(rename = "balance", deserialize_with = "deserialize_decimal_or_zero")]
     pub wallet_balance: Decimal,
+    /// No Bitget field per coin.
+    #[serde(default)]
     pub unrealised_pnl: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub cum_realised_pnl: String,
     #[serde(deserialize_with = "deserialize_decimal_or_zero")]
     pub locked: Decimal,
+    /// No Bitget field; every unified asset is collateral.
+    #[serde(default = "default_true")]
     pub collateral_switch: bool,
+    /// No Bitget field; every unified asset is collateral.
+    #[serde(default = "default_true")]
     pub margin_collateral: bool,
     pub coin: Ustr,
+    /// No Bitget field.
     #[serde(default)]
     pub spot_hedging_qty: Option<String>,
+    /// No Bitget field (borrowing is reported as `debt`).
     #[serde(default, deserialize_with = "deserialize_optional_decimal_or_zero")]
     pub spot_borrow: Decimal,
 }
@@ -806,126 +1230,315 @@ pub struct BybitCoinBalance {
 /// Wallet balance snapshot containing per-coin balances.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/wallet-balance>
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitWalletBalance {
+pub struct BitgetWalletBalance {
+    /// Account equity in USD (`accountEquity`).
+    #[serde(rename = "accountEquity")]
     pub total_equity: String,
-    #[serde(rename = "accountIMRate")]
+    /// No Bitget field.
+    #[serde(default, rename = "accountIMRate")]
     pub account_im_rate: String,
+    /// Effective equity (`effEquity`).
+    #[serde(
+        rename = "effEquity",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub total_margin_balance: String,
+    /// Initial margin in USD (`imr`).
+    #[serde(
+        rename = "imr",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub total_initial_margin: String,
-    pub account_type: BybitAccountType,
+    /// Bitget UTA has a single unified wallet.
+    #[serde(default = "default_account_type")]
+    pub account_type: BitgetAccountType,
+    /// No Bitget field.
+    #[serde(default)]
     pub total_available_balance: String,
-    #[serde(rename = "accountMMRate")]
+    /// Margin ratio (`mgnRatio`).
+    #[serde(
+        rename = "mgnRatio",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub account_mm_rate: String,
-    #[serde(rename = "totalPerpUPL")]
+    /// Unrealized PnL in USD (`unrealisedPnl`).
+    #[serde(
+        rename = "unrealisedPnl",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub total_perp_upl: String,
+    /// USDT-denominated equity (`usdtEquity`).
+    #[serde(
+        rename = "usdtEquity",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub total_wallet_balance: String,
-    #[serde(rename = "accountLTV")]
+    /// No Bitget field.
+    #[serde(default, rename = "accountLTV")]
     pub account_ltv: String,
+    /// Maintenance margin in USD (`mmr`).
+    #[serde(
+        rename = "mmr",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub total_maintenance_margin: String,
-    pub coin: Vec<BybitCoinBalance>,
+    /// Per-coin balances (`assets`, non-zero balances only).
+    #[serde(
+        rename = "assets",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub coin: Vec<BitgetCoinBalance>,
+}
+
+const fn default_account_type() -> BitgetAccountType {
+    BitgetAccountType::Unified
 }
 
 /// Response alias for wallet balance requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/wallet-balance>
-pub type BybitWalletBalanceResponse = BybitListResponse<BybitWalletBalance>;
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
+///
+/// Bitget returns one unified account object in `data` (no list).
+pub type BitgetWalletBalanceResponse = BitgetResponse<BitgetWalletBalance>;
 
-/// Account-level configuration returned by `GET /v5/account/info`.
+/// Account-level configuration returned by `GET /api/v3/account/settings`.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/account-info>
+/// - <https://www.bitget.com/docs/catalog/account/account-settings>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitAccountInfo {
-    pub unified_margin_status: BybitUnifiedMarginStatus,
-    pub margin_mode: BybitMarginMode,
+pub struct BitgetAccountInfo {
+    /// Account mode (`accountMode`: `unified`/`hybrid`/...).
+    #[serde(rename = "accountMode")]
+    pub unified_margin_status: BitgetUnifiedMarginStatus,
+    /// Account level (`accountLevel`: `basic`/`advanced`/`isolated`).
+    #[serde(rename = "accountLevel")]
+    pub margin_mode: BitgetMarginMode,
+    /// No Bitget field.
+    #[serde(default)]
     pub is_master_trader: bool,
-    #[serde(with = "on_off_bool")]
+    /// Delta switch (`deltaSwitch`: `yes`/`no`).
+    #[serde(rename = "deltaSwitch", default, with = "yes_no_bool")]
     pub spot_hedging_status: bool,
+    /// No Bitget field.
+    #[serde(default)]
     pub updated_time: String,
-    // `dcp_status`, `time_window`, and `smp_group` are absent from responses
-    // for accounts that predate the disconnection-protection feature.
-    #[serde(default, with = "on_off_bool")]
+    /// No Bitget field (no disconnection-protection setting).
+    #[serde(default)]
     pub dcp_status: bool,
+    /// No Bitget field.
     #[serde(default, deserialize_with = "deserialize_i32_or_string")]
     pub time_window: i32,
+    /// No Bitget field.
     #[serde(default, deserialize_with = "deserialize_i32_or_string")]
     pub smp_group: i32,
+    /// Account UID.
+    #[serde(default)]
+    pub uid: String,
+    /// Position (hold) mode.
+    #[serde(default)]
+    pub hold_mode: Option<BitgetPositionMode>,
+    /// Account default self-trade prevention mode.
+    #[serde(default)]
+    pub stp_mode: Option<BitgetSmpType>,
+    /// Asset mode (e.g. `multi_assets`).
+    #[serde(default)]
+    pub asset_mode: String,
+    /// Repay mode (`auto`/`manual`).
+    #[serde(default)]
+    pub repay_mode: String,
+    /// Per-symbol margin mode and leverage.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub symbol_config_list: Vec<BitgetSymbolConfig>,
+}
+
+/// Per-symbol margin mode and leverage from `GET /api/v3/account/settings`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BitgetSymbolConfig {
+    pub category: BitgetProductType,
+    pub symbol: Ustr,
+    pub margin_mode: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub leverage: String,
 }
 
 /// Response alias for account info requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/account-info>
-pub type BybitAccountInfoResponse = BybitResponse<BybitAccountInfo>;
+/// - <https://www.bitget.com/docs/catalog/account/account-settings>
+pub type BitgetAccountInfoResponse = BitgetResponse<BitgetAccountInfo>;
 
 /// Order representation as returned by order-related endpoints.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/order-list>
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
 #[serde(rename_all = "camelCase")]
-pub struct BybitOrder {
+pub struct BitgetOrder {
     pub order_id: Ustr,
+    #[serde(rename = "clientOid", default)]
     pub order_link_id: Ustr,
+    /// No Bitget field.
+    #[serde(default)]
     pub block_trade_id: Option<Ustr>,
     pub symbol: Ustr,
+    /// Limit price (`0` or empty for market orders); strategy orders report `triggerOrderPrice`.
+    #[serde(
+        alias = "triggerOrderPrice",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub price: String,
     pub qty: String,
-    pub side: BybitOrderSide,
+    pub side: BitgetOrderSide,
+    /// No Bitget field.
+    #[serde(default)]
     pub is_leverage: String,
-    #[serde(deserialize_with = "deserialize_i32_or_string")]
+    /// Bitget sends `holdMode` + `posSide` instead; see `parse::resolve_order_position_idx`.
+    #[serde(default, deserialize_with = "deserialize_i32_or_string")]
     pub position_idx: i32,
-    pub order_status: BybitOrderStatus,
-    pub cancel_type: BybitCancelType,
+    /// Order status (`orderStatus`; strategy orders report `status`).
+    #[serde(rename = "orderStatus", alias = "status")]
+    pub order_status: BitgetOrderStatus,
+    /// Cancel reason (`cancelReason`, empty when not cancelled).
+    #[serde(
+        rename = "cancelReason",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub cancel_type: BitgetCancelType,
+    /// No Bitget field: rejected orders never reach the order lists.
+    #[serde(default)]
     pub reject_reason: Ustr,
+    #[serde(default)]
     pub avg_price: Option<String>,
+    /// No Bitget field (`qty - cumExecQty`).
+    #[serde(default)]
     pub leaves_qty: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub leaves_value: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub cum_exec_qty: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub cum_exec_value: String,
+    /// Signed sum of `feeDetail[].fee` (positive = cost).
+    #[serde(
+        rename = "feeDetail",
+        default,
+        deserialize_with = "deserialize_fee_detail_sum"
+    )]
     pub cum_exec_fee: String,
-    pub time_in_force: BybitTimeInForce,
-    pub order_type: BybitOrderType,
-    pub stop_order_type: BybitStopOrderType,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub time_in_force: BitgetTimeInForce,
+    /// Order type (`orderType`; strategy orders report `triggerOrderType`).
+    #[serde(
+        alias = "triggerOrderType",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub order_type: BitgetOrderType,
+    /// Strategy order type (`type`: `trigger`, `tpsl`, ...); `None` for plain orders.
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub stop_order_type: BitgetStopOrderType,
+    /// No Bitget field.
+    #[serde(default)]
     pub order_iv: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub trigger_price: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub take_profit: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub stop_loss: String,
-    pub tp_trigger_by: BybitTriggerType,
-    pub sl_trigger_by: BybitTriggerType,
-    pub trigger_direction: BybitTriggerDirection,
-    pub trigger_by: BybitTriggerType,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub tp_trigger_by: BitgetTriggerType,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub sl_trigger_by: BitgetTriggerType,
+    /// No Bitget field (the venue infers the direction from the trigger price).
+    #[serde(default)]
+    pub trigger_direction: BitgetTriggerDirection,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub trigger_by: BitgetTriggerType,
+    /// No Bitget field.
+    #[serde(default)]
     pub last_price_on_created: String,
+    /// `YES`/`NO` (REST), `yes`/`no` (WebSocket), `false` (strategy orders).
+    #[serde(default, with = "yes_no_bool")]
     pub reduce_only: bool,
+    /// No Bitget field.
+    #[serde(default)]
     pub close_on_trigger: bool,
-    pub smp_type: BybitSmpType,
-    #[serde(deserialize_with = "deserialize_i32_or_string")]
+    /// Self-trade prevention mode (`stpMode`).
+    #[serde(
+        rename = "stpMode",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub smp_type: BitgetSmpType,
+    /// No Bitget field.
+    #[serde(default, deserialize_with = "deserialize_i32_or_string")]
     pub smp_group: i32,
+    /// No Bitget field.
+    #[serde(default)]
     pub smp_order_id: Ustr,
-    pub tpsl_mode: Option<BybitTpSlMode>,
+    #[serde(default)]
+    pub tpsl_mode: Option<BitgetTpSlMode>,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub tp_limit_price: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub sl_limit_price: String,
+    /// Delegate type (`delegateType`: `normal`, `market`, `liquidation`, ...).
+    #[serde(rename = "delegateType", default)]
     pub place_type: Ustr,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
     pub created_time: String,
+    #[serde(deserialize_with = "deserialize_string_or_null")]
     pub updated_time: String,
+    /// Product category (`USDT-FUTURES`, ...).
+    #[serde(default)]
+    pub category: Option<BitgetProductType>,
+    /// Position side the order acts on (`posSide`; WebSocket `holdSide`).
+    #[serde(
+        alias = "holdSide",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub pos_side: BitgetPositionSide,
+    /// Hold mode (`one_way_mode`/`hedge_mode`, empty for spot).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub hold_mode: String,
+    /// Trade side (`open`/`close`, or the one-way `*_single` values).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub trade_side: String,
 }
 
 #[cfg(feature = "python")]
 #[pyo3::pymethods]
-impl BybitOrder {
+impl BitgetOrder {
     #[getter]
     #[must_use]
     pub fn order_id(&self) -> &str {
@@ -964,7 +1577,7 @@ impl BybitOrder {
 
     #[getter]
     #[must_use]
-    pub fn side(&self) -> BybitOrderSide {
+    pub fn side(&self) -> BitgetOrderSide {
         self.side
     }
 
@@ -982,13 +1595,13 @@ impl BybitOrder {
 
     #[getter]
     #[must_use]
-    pub fn order_status(&self) -> BybitOrderStatus {
+    pub fn order_status(&self) -> BitgetOrderStatus {
         self.order_status
     }
 
     #[getter]
     #[must_use]
-    pub fn cancel_type(&self) -> BybitCancelType {
+    pub fn cancel_type(&self) -> BitgetCancelType {
         self.cancel_type
     }
 
@@ -1036,19 +1649,19 @@ impl BybitOrder {
 
     #[getter]
     #[must_use]
-    pub fn time_in_force(&self) -> BybitTimeInForce {
+    pub fn time_in_force(&self) -> BitgetTimeInForce {
         self.time_in_force
     }
 
     #[getter]
     #[must_use]
-    pub fn order_type(&self) -> BybitOrderType {
+    pub fn order_type(&self) -> BitgetOrderType {
         self.order_type
     }
 
     #[getter]
     #[must_use]
-    pub fn stop_order_type(&self) -> BybitStopOrderType {
+    pub fn stop_order_type(&self) -> BitgetStopOrderType {
         self.stop_order_type
     }
 
@@ -1078,25 +1691,25 @@ impl BybitOrder {
 
     #[getter]
     #[must_use]
-    pub fn tp_trigger_by(&self) -> BybitTriggerType {
+    pub fn tp_trigger_by(&self) -> BitgetTriggerType {
         self.tp_trigger_by
     }
 
     #[getter]
     #[must_use]
-    pub fn sl_trigger_by(&self) -> BybitTriggerType {
+    pub fn sl_trigger_by(&self) -> BitgetTriggerType {
         self.sl_trigger_by
     }
 
     #[getter]
     #[must_use]
-    pub fn trigger_direction(&self) -> BybitTriggerDirection {
+    pub fn trigger_direction(&self) -> BitgetTriggerDirection {
         self.trigger_direction
     }
 
     #[getter]
     #[must_use]
-    pub fn trigger_by(&self) -> BybitTriggerType {
+    pub fn trigger_by(&self) -> BitgetTriggerType {
         self.trigger_by
     }
 
@@ -1126,7 +1739,7 @@ impl BybitOrder {
     )]
     pub fn smp_type(&self) -> String {
         serde_json::to_string(&self.smp_type)
-            .expect("Failed to serialize BybitSmpType")
+            .expect("Failed to serialize BitgetSmpType")
             .trim_matches('"')
             .to_string()
     }
@@ -1145,7 +1758,7 @@ impl BybitOrder {
 
     #[getter]
     #[must_use]
-    pub fn tpsl_mode(&self) -> Option<BybitTpSlMode> {
+    pub fn tpsl_mode(&self) -> Option<BitgetTpSlMode> {
         self.tpsl_mode
     }
 
@@ -1183,142 +1796,278 @@ impl BybitOrder {
 /// Response alias for open order queries.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/order-list>
-pub type BybitOpenOrdersResponse = BybitCursorListResponse<BybitOrder>;
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
+pub type BitgetOpenOrdersResponse = BitgetCursorListResponse<BitgetOrder>;
 /// Response alias for order history queries with pagination.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/order-list>
-pub type BybitOrderHistoryResponse = BybitCursorListResponse<BybitOrder>;
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
+pub type BitgetOrderHistoryResponse = BitgetCursorListResponse<BitgetOrder>;
 
 /// Payload returned after placing a single order.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/create-order>
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitPlaceOrderResult {
+pub struct BitgetPlaceOrderResult {
+    /// `null` when a one-way reduce-only order replaced an existing one.
     pub order_id: Option<Ustr>,
+    #[serde(rename = "clientOid", default)]
     pub order_link_id: Option<Ustr>,
 }
 
 /// Response alias for order placement endpoints.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/create-order>
-pub type BybitPlaceOrderResponse = BybitResponse<BybitPlaceOrderResult>;
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
+pub type BitgetPlaceOrderResponse = BitgetResponse<BitgetPlaceOrderResult>;
 
 /// Payload returned after cancelling a single order.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/cancel-order>
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitCancelOrderResult {
+pub struct BitgetCancelOrderResult {
     pub order_id: Option<Ustr>,
+    #[serde(rename = "clientOid", default)]
     pub order_link_id: Option<Ustr>,
 }
 
 /// Response alias for order cancellation endpoints.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/cancel-order>
-pub type BybitCancelOrderResponse = BybitResponse<BybitCancelOrderResult>;
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
+pub type BitgetCancelOrderResponse = BitgetResponse<BitgetCancelOrderResult>;
 
-/// Execution/Fill payload returned by `GET /v5/execution/list`.
+/// Execution/Fill payload returned by `GET /api/v3/trade/fills`.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/execution>
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitExecution {
+pub struct BitgetExecution {
     pub symbol: Ustr,
     pub order_id: Ustr,
+    #[serde(rename = "clientOid", default)]
     pub order_link_id: Ustr,
-    pub side: BybitOrderSide,
+    pub side: BitgetOrderSide,
+    /// No Bitget field.
+    #[serde(default)]
     pub order_price: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub order_qty: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub leaves_qty: String,
-    pub create_type: Option<BybitCreateType>,
-    pub order_type: BybitOrderType,
-    pub stop_order_type: Option<BybitStopOrderType>,
+    /// No Bitget field.
+    #[serde(default)]
+    pub create_type: Option<BitgetCreateType>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub order_type: BitgetOrderType,
+    /// No Bitget field.
+    #[serde(default)]
+    pub stop_order_type: Option<BitgetStopOrderType>,
+    /// Signed sum of `feeDetail[].fee` (positive = cost).
+    #[serde(
+        rename = "feeDetail",
+        default,
+        deserialize_with = "deserialize_fee_detail_sum"
+    )]
     pub exec_fee: String,
     pub exec_id: String,
     pub exec_price: String,
     pub exec_qty: String,
-    pub exec_type: BybitExecType,
+    /// Derived from `tradeSide` (liquidation, ADL, delivery, rebase or a plain trade).
+    #[serde(
+        rename = "tradeSide",
+        default,
+        deserialize_with = "deserialize_exec_type"
+    )]
+    pub exec_type: BitgetExecType,
     pub exec_value: String,
+    /// Fill time (`createdTime`; the WebSocket `fill` topic sends `execTime`).
+    #[serde(rename = "createdTime", alias = "execTime")]
     pub exec_time: String,
+    /// Currency of the first `feeDetail` entry.
+    #[serde(skip_deserializing)]
     pub fee_currency: Ustr,
+    /// `tradeScope == "maker"`.
+    #[serde(rename = "tradeScope", deserialize_with = "deserialize_is_maker")]
     pub is_maker: bool,
+    /// No Bitget field.
+    #[serde(default)]
     pub fee_rate: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub trade_iv: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub mark_iv: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub mark_price: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub index_price: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub underlying_price: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub block_trade_id: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub closed_size: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub seq: i64,
+    /// Realized PnL of the fill (`execPnl`).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub exec_pnl: String,
+    /// Product category (`USDT-FUTURES`, ...).
+    #[serde(default)]
+    pub category: Option<BitgetProductType>,
+}
+
+fn deserialize_exec_type<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BitgetExecType, D::Error> {
+    let trade_side = deserialize_string_or_null(d)?;
+    Ok(BitgetExecType::from_trade_side(&trade_side))
+}
+
+fn deserialize_is_maker<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(deserialize_string_or_null(d)?.eq_ignore_ascii_case("maker"))
 }
 
 /// Response alias for trade history requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/order/execution>
-pub type BybitTradeHistoryResponse = BybitCursorListResponse<BybitExecution>;
+/// - <https://www.bitget.com/docs/catalog/trading/order-management>
+pub type BitgetTradeHistoryResponse = BitgetCursorListResponse<BitgetExecution>;
 
-/// Represents a position returned by the Bybit API.
+/// Represents a position returned by the Bitget API.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/position>
+/// - <https://www.bitget.com/docs/catalog/trading/position-management>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitPosition {
-    pub position_idx: BybitPositionIdx,
-    #[serde(deserialize_with = "deserialize_i32_or_string")]
+pub struct BitgetPosition {
+    /// Bitget sends `holdMode` + `posSide` instead; see `parse::resolve_position_idx`.
+    #[serde(default)]
+    pub position_idx: BitgetPositionIdx,
+    /// No Bitget field.
+    #[serde(default, deserialize_with = "deserialize_i32_or_string")]
     pub risk_id: i32,
+    /// No Bitget field.
+    #[serde(default)]
     pub risk_limit_value: String,
     pub symbol: Ustr,
-    pub side: BybitPositionSide,
+    /// Position side (`posSide`: `long`/`short`).
+    #[serde(
+        rename = "posSide",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub side: BitgetPositionSide,
+    /// Position size (`total` = available + frozen, always positive).
+    #[serde(rename = "total")]
     pub size: String,
     pub avg_price: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub position_value: String,
-    #[serde(deserialize_with = "deserialize_i32_or_string")]
+    /// `0` cross, `1` isolated (from `marginMode`).
+    #[serde(
+        rename = "marginMode",
+        default,
+        deserialize_with = "deserialize_trade_mode"
+    )]
     pub trade_mode: i32,
-    pub position_status: BybitPositionStatus,
-    #[serde(deserialize_with = "deserialize_i32_or_string")]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub position_status: BitgetPositionStatus,
+    /// No Bitget field.
+    #[serde(default, deserialize_with = "deserialize_i32_or_string")]
     pub auto_add_margin: i32,
-    #[serde(deserialize_with = "deserialize_i32_or_string")]
+    /// No Bitget field.
+    #[serde(default, deserialize_with = "deserialize_i32_or_string")]
     pub adl_rank_indicator: i32,
     pub leverage: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub position_balance: String,
     pub mark_price: String,
+    /// Liquidation price (`liquidationPrice`, `<= 0` when none).
+    #[serde(
+        rename = "liquidationPrice",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub liq_price: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub bust_price: String,
-    #[serde(rename = "positionMM")]
+    /// Maintenance margin rate (`mmr`).
+    #[serde(
+        rename = "mmr",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub position_mm: String,
-    #[serde(rename = "positionIM")]
+    /// No Bitget field.
+    #[serde(default, rename = "positionIM")]
     pub position_im: String,
-    pub tpsl_mode: BybitTpSlMode,
+    /// No Bitget field.
+    #[serde(default)]
+    pub tpsl_mode: BitgetTpSlMode,
+    /// No Bitget field.
+    #[serde(default)]
     pub take_profit: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub stop_loss: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub trailing_stop: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub unrealised_pnl: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
     pub cur_realised_pnl: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub cum_realised_pnl: String,
+    /// No Bitget field.
     #[serde(default = "default_position_seq")]
     pub seq: i64,
+    /// No Bitget field.
     #[serde(default)]
     pub is_reduce_only: bool,
+    /// No Bitget field.
     #[serde(default)]
     pub mmr_sys_updated_time: String,
+    /// No Bitget field.
     #[serde(default)]
     pub leverage_sys_updated_time: String,
     pub created_time: String,
     pub updated_time: String,
+    /// No Bitget field (`createdTime` is the open time).
     #[serde(default)]
     pub open_time: i64,
+    /// Hold mode (`one_way_mode`/`hedge_mode`).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub hold_mode: String,
+    /// Settlement coin of the position margin.
+    #[serde(default)]
+    pub margin_coin: Ustr,
+    /// Product category (`USDT-FUTURES`, ...).
+    #[serde(default)]
+    pub category: Option<BitgetProductType>,
+}
+
+fn deserialize_trade_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    Ok(i32::from(deserialize_string_or_null(d)? == "isolated"))
 }
 
 const fn default_position_seq() -> i64 {
@@ -1328,16 +2077,16 @@ const fn default_position_seq() -> i64 {
 /// Response alias for position list requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/position>
-pub type BybitPositionListResponse = BybitCursorListResponse<BybitPosition>;
+/// - <https://www.bitget.com/docs/catalog/trading/position-management>
+pub type BitgetPositionListResponse = BitgetCursorListResponse<BitgetPosition>;
 
 /// Reason detail for set margin mode failures.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/set-margin-mode>
+/// - <https://www.bitget.com/docs/catalog/account/account-settings>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitSetMarginModeReason {
+pub struct BitgetSetMarginModeReason {
     pub reason_code: String,
     pub reason_msg: String,
 }
@@ -1345,54 +2094,93 @@ pub struct BybitSetMarginModeReason {
 /// Result payload for set margin mode operation.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/set-margin-mode>
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitSetMarginModeResult {
+/// - <https://www.bitget.com/docs/catalog/account/account-settings>
+///
+/// Bitget answers with `"data": null`; no reasons are reported.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", from = "serde_json::Value")]
+pub struct BitgetSetMarginModeResult {
     #[serde(default)]
-    pub reasons: Vec<BybitSetMarginModeReason>,
+    pub reasons: Vec<BitgetSetMarginModeReason>,
+}
+
+impl From<serde_json::Value> for BitgetSetMarginModeResult {
+    fn from(value: serde_json::Value) -> Self {
+        let reasons = value
+            .get("reasons")
+            .and_then(|reasons| serde_json::from_value(reasons.clone()).ok())
+            .unwrap_or_default();
+        Self { reasons }
+    }
 }
 
 /// Response alias for set margin mode requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/account/set-margin-mode>
-pub type BybitSetMarginModeResponse = BybitResponse<BybitSetMarginModeResult>;
+/// - <https://www.bitget.com/docs/catalog/account/account-settings>
+pub type BitgetSetMarginModeResponse = BitgetResponse<BitgetSetMarginModeResult>;
 
 /// Empty result for set leverage operation.
+///
+/// Bitget answers with `"data": "success"` (or `null`); the payload is ignored.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BybitSetLeverageResult {}
+#[serde(from = "serde_json::Value")]
+pub struct BitgetSetLeverageResult {}
+
+impl From<serde_json::Value> for BitgetSetLeverageResult {
+    fn from(_: serde_json::Value) -> Self {
+        Self {}
+    }
+}
 
 /// Response alias for set leverage requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/position/leverage>
-pub type BybitSetLeverageResponse = BybitResponse<BybitSetLeverageResult>;
+/// - <https://www.bitget.com/docs/catalog/account/account-settings>
+pub type BitgetSetLeverageResponse = BitgetResponse<BitgetSetLeverageResult>;
 
 /// Empty result for switch mode operation.
+///
+/// Bitget answers with `"data": "success"` (or `null`); the payload is ignored.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BybitSwitchModeResult {}
+#[serde(from = "serde_json::Value")]
+pub struct BitgetSwitchModeResult {}
+
+impl From<serde_json::Value> for BitgetSwitchModeResult {
+    fn from(_: serde_json::Value) -> Self {
+        Self {}
+    }
+}
 
 /// Response alias for switch mode requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/position/position-mode>
-pub type BybitSwitchModeResponse = BybitResponse<BybitSwitchModeResult>;
+/// - <https://www.bitget.com/docs/catalog/account/account-settings>
+pub type BitgetSwitchModeResponse = BitgetResponse<BitgetSwitchModeResult>;
 
 /// Empty result for set trading stop operation.
+///
+/// Bitget answers with `"data": "success"` (or `null`); the payload is ignored.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BybitSetTradingStopResult {}
+#[serde(from = "serde_json::Value")]
+pub struct BitgetSetTradingStopResult {}
+
+impl From<serde_json::Value> for BitgetSetTradingStopResult {
+    fn from(_: serde_json::Value) -> Self {
+        Self {}
+    }
+}
 
 /// Response alias for set trading stop requests.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/position/trading-stop>
-pub type BybitSetTradingStopResponse = BybitResponse<BybitSetTradingStopResult>;
+/// - <https://www.bitget.com/docs/catalog/trading/position-management>
+pub type BitgetSetTradingStopResponse = BitgetResponse<BitgetSetTradingStopResult>;
 
 /// Result from manual borrow operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitBorrowResult {
+pub struct BitgetBorrowResult {
     pub coin: Ustr,
     pub amount: String,
 }
@@ -1401,49 +2189,73 @@ pub struct BybitBorrowResult {
 ///
 /// # References
 ///
-/// - <https://bybit-exchange.github.io/docs/v5/account/borrow>
-pub type BybitBorrowResponse = BybitResponse<BybitBorrowResult>;
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
+pub type BitgetBorrowResponse = BitgetResponse<BitgetBorrowResult>;
 
 /// Result from no-convert repay operation.
+///
+/// Bitget answers with `"data": "success"` (or an object); a non-error response is a success.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitNoConvertRepayResult {
-    pub result_status: BybitRepayStatus,
+#[serde(rename_all = "camelCase", from = "serde_json::Value")]
+pub struct BitgetNoConvertRepayResult {
+    pub result_status: BitgetRepayStatus,
+}
+
+impl From<serde_json::Value> for BitgetNoConvertRepayResult {
+    fn from(value: serde_json::Value) -> Self {
+        let result_status = value
+            .get("resultStatus")
+            .and_then(|status| serde_json::from_value(status.clone()).ok())
+            .unwrap_or(BitgetRepayStatus::Success);
+        Self { result_status }
+    }
 }
 
 /// Response alias for no-convert repay requests.
 ///
 /// # References
 ///
-/// - <https://bybit-exchange.github.io/docs/v5/account/no-convert-repay>
-pub type BybitNoConvertRepayResponse = BybitResponse<BybitNoConvertRepayResult>;
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
+pub type BitgetNoConvertRepayResponse = BitgetResponse<BitgetNoConvertRepayResult>;
 
 /// Result from a manual repay (with conversion) operation.
+///
+/// Bitget answers with `"data": "success"` (or an object); a non-error response is a success.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitRepayResult {
-    pub result_status: BybitRepayStatus,
+#[serde(rename_all = "camelCase", from = "serde_json::Value")]
+pub struct BitgetRepayResult {
+    pub result_status: BitgetRepayStatus,
+}
+
+impl From<serde_json::Value> for BitgetRepayResult {
+    fn from(value: serde_json::Value) -> Self {
+        let result_status = value
+            .get("resultStatus")
+            .and_then(|status| serde_json::from_value(status.clone()).ok())
+            .unwrap_or(BitgetRepayStatus::Success);
+        Self { result_status }
+    }
 }
 
 /// Response alias for manual repay requests.
 ///
 /// # References
 ///
-/// - <https://bybit-exchange.github.io/docs/v5/account/repay>
-pub type BybitRepayResponse = BybitResponse<BybitRepayResult>;
+/// - <https://www.bitget.com/docs/catalog/account/assets-balance>
+pub type BitgetRepayResponse = BitgetResponse<BitgetRepayResult>;
 
 /// API key permissions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
 #[serde(rename_all = "PascalCase")]
-pub struct BybitApiKeyPermissions {
+pub struct BitgetApiKeyPermissions {
     #[serde(default)]
     pub contract_trade: Vec<String>,
     #[serde(default)]
@@ -1460,7 +2272,7 @@ pub struct BybitApiKeyPermissions {
     pub copy_trading: Vec<String>,
     #[serde(default)]
     pub block_trade: Vec<String>,
-    // Bybit ships this key uppercase (`"NFT"`); the struct-level PascalCase
+    // Bitget ships this key uppercase (`"NFT"`); the struct-level PascalCase
     // rule would otherwise serialize it as `"Nft"` and silently drop values.
     #[serde(rename = "NFT", default)]
     pub nft: Vec<String>,
@@ -1471,11 +2283,11 @@ pub struct BybitApiKeyPermissions {
     // to an empty `Vec` via `serde(default)`.
     #[serde(default)]
     pub earn: Vec<String>,
-    // Bybit uses `"FiatP2P"` - PascalCase rename would emit `"FiatP2p"`.
+    // Bitget uses `"FiatP2P"` - PascalCase rename would emit `"FiatP2p"`.
     #[serde(rename = "FiatP2P", default)]
     pub fiat_p2p: Vec<String>,
     #[serde(default)]
-    pub fiat_bybit_pay: Vec<String>,
+    pub fiat_bitget_pay: Vec<String>,
     #[serde(default)]
     pub fiat_bit_pay: Vec<String>,
     #[serde(default)]
@@ -1484,7 +2296,7 @@ pub struct BybitApiKeyPermissions {
     pub fiat_convert_broker: Vec<String>,
     #[serde(default)]
     pub bit_card: Vec<String>,
-    // Bybit uses `"ByXPost"` - PascalCase rename would emit `"ByxPost"`.
+    // Bitget uses `"ByXPost"` - PascalCase rename would emit `"ByxPost"`.
     #[serde(rename = "ByXPost", default)]
     pub byx_post: Vec<String>,
 }
@@ -1493,50 +2305,127 @@ pub struct BybitApiKeyPermissions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
 #[serde(rename_all = "camelCase")]
-pub struct BybitAccountDetails {
+pub struct BitgetAccountDetails {
+    /// No Bitget field.
+    #[serde(default)]
     pub id: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub note: String,
+    /// No Bitget field (the key is not echoed).
+    #[serde(default)]
     pub api_key: SecretString,
+    /// No Bitget field.
+    #[serde(default)]
     pub read_only: u8,
+    /// No Bitget field.
+    #[serde(default)]
     pub secret: SecretString,
-    #[serde(rename = "type")]
+    /// No Bitget field.
+    #[serde(rename = "type", default)]
     pub key_type: u8,
-    pub permissions: BybitApiKeyPermissions,
+    /// Permission names (`permissions`).
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub permissions: Vec<String>,
+    /// Whitelisted IPs (`ips`, comma separated; empty when unrestricted).
+    #[serde(default, deserialize_with = "deserialize_ip_list")]
     pub ips: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
     pub user_id: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
     pub inviter_id: Option<u64>,
+    /// No Bitget field.
+    #[serde(default)]
     pub vip_level: String,
-    #[serde(deserialize_with = "deserialize_string_to_u8", default)]
+    /// No Bitget field.
+    #[serde(default)]
     pub mkt_maker_level: u8,
+    /// No Bitget field.
     #[serde(default)]
     pub affiliate_id: Option<u64>,
+    /// No Bitget field.
+    #[serde(default)]
     pub rsa_public_key: String,
+    /// Whether the key belongs to a master account (no `parentId`).
+    #[serde(default)]
     pub is_master: bool,
+    /// Parent (master) UID (`parentId`).
+    #[serde(
+        rename = "parentId",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub parent_uid: String,
+    /// No Bitget field; Bitget v3 keys are UTA keys.
+    #[serde(default = "default_uta")]
     pub uta: u8,
+    /// No Bitget field.
+    #[serde(default)]
     pub kyc_level: String,
+    /// No Bitget field.
+    #[serde(default)]
     pub kyc_region: String,
+    /// No Bitget field.
     #[serde(default)]
     pub unified: Option<i32>,
+    /// No Bitget field.
     #[serde(default)]
     pub deadline_day: i64,
+    /// No Bitget field.
     #[serde(default)]
     pub expired_at: Option<String>,
+    /// Registration time in milliseconds (`regisTime`).
+    #[serde(
+        rename = "regisTime",
+        default,
+        deserialize_with = "deserialize_string_or_null"
+    )]
     pub created_at: String,
+    /// Permission type (`permType`).
+    #[serde(default, deserialize_with = "deserialize_string_or_null")]
+    pub perm_type: String,
+}
+
+const fn default_uta() -> u8 {
+    1
+}
+
+fn deserialize_ip_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(match Option::<serde_json::Value>::deserialize(d)? {
+        Some(serde_json::Value::String(ips)) => ips
+            .split(',')
+            .map(str::trim)
+            .filter(|ip| !ip.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_json::Value::Array(ips)) => ips
+            .into_iter()
+            .filter_map(|ip| ip.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+fn deserialize_optional_u64<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<u64>, D::Error> {
+    let raw = deserialize_string_or_null(d)?;
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    raw.parse().map(Some).map_err(serde::de::Error::custom)
 }
 
 #[cfg(feature = "python")]
 #[pyo3::pymethods]
-impl BybitAccountDetails {
+impl BitgetAccountDetails {
     #[getter]
     #[must_use]
     pub fn id(&self) -> &str {
@@ -1653,26 +2542,16 @@ impl BybitAccountDetails {
 }
 
 /// Response alias for API key info requests.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/apikey-info>
-pub type BybitAccountDetailsResponse = BybitResponse<BybitAccountDetails>;
+pub type BitgetAccountDetailsResponse = BitgetResponse<BitgetAccountDetails>;
 
 /// Basic information about a sub-account member.
 ///
 /// `member_type`, `status`, and `account_mode` use raw integer codes whose valid
 /// ranges differ per endpoint; values are kept as-is rather than mapped to Rust
 /// enums, consistent with other venue-raw fields in this module.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/subuid-list>
-/// - <https://bybit-exchange.github.io/docs/v5/user/page-subuid>
-/// - <https://bybit-exchange.github.io/docs/v5/user/fund-subuid-list>
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitSubMember {
+pub struct BitgetSubMember {
     pub uid: String,
     pub username: String,
     pub member_type: i32,
@@ -1682,42 +2561,38 @@ pub struct BybitSubMember {
     pub remark: String,
 }
 
-/// Result payload for `GET /v5/user/query-sub-members`.
+/// Result payload for `GET /api/v3/user/sub-list`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitSubMembersResult {
+pub struct BitgetSubMembersResult {
     #[serde(default)]
-    pub sub_members: Vec<BybitSubMember>,
+    pub sub_members: Vec<BitgetSubMember>,
 }
 
 /// Response alias for the non-paginated sub-UID list.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/subuid-list>
-pub type BybitSubMembersResponse = BybitResponse<BybitSubMembersResult>;
+pub type BitgetSubMembersResponse = BitgetResponse<BitgetSubMembersResult>;
 
 /// Result payload for cursor-paginated sub-account listings.
 ///
 /// The inner array is named `subMembers` and the cursor field is `nextCursor`
 /// (with `"0"` as the end-of-pages sentinel), so the standard
-/// `BybitCursorListResponse<T>` (which expects `list` / `nextPageCursor`)
+/// `BitgetCursorListResponse<T>` (which expects `list` / `nextPageCursor`)
 /// cannot be reused here. Callers treat `"0"` or an empty string as the
 /// termination sentinel.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitSubMembersPagedResult {
+pub struct BitgetSubMembersPagedResult {
     #[serde(default)]
-    pub sub_members: Vec<BybitSubMember>,
+    pub sub_members: Vec<BitgetSubMember>,
     #[serde(default)]
     pub next_cursor: Option<String>,
 }
 
-impl BybitSubMembersPagedResult {
+impl BitgetSubMembersPagedResult {
     /// Returns the cursor to use for the next page, or `None` when the final
     /// page has been fetched.
     ///
-    /// Bybit signals end-of-pages either by omitting the cursor or returning
+    /// Bitget signals end-of-pages either by omitting the cursor or returning
     /// `"0"`/`""`; both cases collapse to `None` here so callers can treat any
     /// non-`None` return value as a live cursor.
     #[must_use]
@@ -1735,32 +2610,20 @@ impl BybitSubMembersPagedResult {
     }
 }
 
-/// Response alias for paginated sub-UID list (`/v5/user/submembers`).
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/page-subuid>
-pub type BybitSubMembersPagedResponse = BybitResponse<BybitSubMembersPagedResult>;
+/// Response alias for paginated sub-UID list (`/api/v3/user/sub-list`).
+pub type BitgetSubMembersPagedResponse = BitgetResponse<BitgetSubMembersPagedResult>;
 
 /// Response alias for the escrow (fund-custodial) sub-account list
-/// (`/v5/user/escrow_sub_members`); shares the paginated sub-member shape.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/fund-subuid-list>
-pub type BybitEscrowSubMembersResponse = BybitResponse<BybitSubMembersPagedResult>;
+/// (`/api/v3/user/sub-list`); shares the paginated sub-member shape.
+pub type BitgetEscrowSubMembersResponse = BitgetResponse<BitgetSubMembersPagedResult>;
 
 /// Information about a single sub-account API key.
 ///
-/// Deliberately not shared with [`BybitAccountDetails`]: master-level fields
+/// Deliberately not shared with [`BitgetAccountDetails`]: master-level fields
 /// such as `is_master`, `parent_uid`, `uta`, and the KYC block are absent.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/list-sub-apikeys>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitSubApiKeyInfo {
+pub struct BitgetSubApiKeyInfo {
     pub id: String,
     #[serde(default)]
     pub ips: Vec<String>,
@@ -1772,7 +2635,7 @@ pub struct BybitSubApiKeyInfo {
     pub expired_at: Option<String>,
     pub created_at: String,
     #[serde(rename = "type")]
-    pub key_type: BybitApiKeyType,
+    pub key_type: BitgetApiKeyType,
     #[serde(with = "masked_secret")]
     pub secret: Option<SecretString>,
     #[serde(with = "bool_or_int")]
@@ -1781,24 +2644,24 @@ pub struct BybitSubApiKeyInfo {
     pub deadline_day: Option<i64>,
     #[serde(default)]
     pub flag: String,
-    pub permissions: BybitApiKeyPermissions,
+    pub permissions: BitgetApiKeyPermissions,
 }
 
-/// Result payload for `GET /v5/user/sub-apikeys`.
+/// Result payload for `GET /api/v3/user/sub-api-list`.
 ///
 /// The inner array field is named `result` (nested inside the outer
 /// `retCode/retMsg/result` envelope) rather than the usual `list`, so the
-/// standard `BybitCursorListResponse<T>` cannot be reused here.
+/// standard `BitgetCursorListResponse<T>` cannot be reused here.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitSubApiKeysResult {
+pub struct BitgetSubApiKeysResult {
     #[serde(rename = "result", default)]
-    pub keys: Vec<BybitSubApiKeyInfo>,
+    pub keys: Vec<BitgetSubApiKeyInfo>,
     #[serde(default)]
     pub next_page_cursor: Option<String>,
 }
 
-impl BybitSubApiKeysResult {
+impl BitgetSubApiKeysResult {
     /// Returns the cursor to use for the next page, or `None` when the final
     /// page has been fetched.
     ///
@@ -1820,21 +2683,17 @@ impl BybitSubApiKeysResult {
 }
 
 /// Response alias for sub-account API keys list.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/list-sub-apikeys>
-pub type BybitSubApiKeysResponse = BybitResponse<BybitSubApiKeysResult>;
+pub type BitgetSubApiKeysResponse = BitgetResponse<BitgetSubApiKeysResult>;
 
 /// Shared result payload for API-key update endpoints (sub or master).
 ///
-/// `/v5/user/update-sub-api` and `/v5/user/update-api` return the same field
+/// `/api/v3/user/update-sub-api` and the master-key update (no Bitget endpoint) share the field
 /// set; only the number of permission buckets populated inside `permissions`
-/// differs. Because [`BybitApiKeyPermissions`] covers the superset of both,
+/// differs. Because [`BitgetApiKeyPermissions`] covers the superset of both,
 /// the two endpoints reuse a single DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitApiKeyUpdateResult {
+pub struct BitgetApiKeyUpdateResult {
     pub id: String,
     #[serde(default)]
     pub note: String,
@@ -1843,31 +2702,20 @@ pub struct BybitApiKeyUpdateResult {
     pub read_only: bool,
     #[serde(with = "masked_secret")]
     pub secret: Option<SecretString>,
-    pub permissions: BybitApiKeyPermissions,
+    pub permissions: BitgetApiKeyPermissions,
     #[serde(default)]
     pub ips: Vec<String>,
 }
 
-/// Response alias for `POST /v5/user/update-sub-api`.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/modify-sub-apikey>
-pub type BybitUpdateSubApiResponse = BybitResponse<BybitApiKeyUpdateResult>;
+/// Response alias for `POST /api/v3/user/update-sub-api`.
+pub type BitgetUpdateSubApiResponse = BitgetResponse<BitgetApiKeyUpdateResult>;
 
-/// Response alias for `POST /v5/user/update-api`.
-///
-/// # References
-///
-/// - <https://bybit-exchange.github.io/docs/v5/user/modify-master-apikey>
-pub type BybitUpdateMasterApiResponse = BybitResponse<BybitApiKeyUpdateResult>;
+/// Response alias for the master API key update (no Bitget endpoint; kept for API parity).
+pub type BitgetUpdateMasterApiResponse = BitgetResponse<BitgetApiKeyUpdateResult>;
 
 #[cfg(test)]
 mod tests {
-    use nautilus_core::UnixNanos;
-    use nautilus_model::identifiers::AccountId;
     use rstest::rstest;
-    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::*;
@@ -1876,331 +2724,315 @@ mod tests {
     #[rstest]
     fn deserialize_spot_instrument_uses_enums() {
         let json = load_test_json("http_get_instruments_spot.json");
-        let response: BybitInstrumentSpotResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentSpotResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
 
-        assert_eq!(instrument.status, BybitInstrumentStatus::Trading);
-        assert_eq!(instrument.innovation, BybitInnovationFlag::Standard);
-        assert_eq!(instrument.margin_trading, BybitMarginTrading::UtaOnly);
+        assert_eq!(instrument.status, BitgetInstrumentStatus::Trading);
+        assert_eq!(instrument.innovation, BitgetInnovationFlag::Other);
+        assert_eq!(instrument.margin_trading, BitgetMarginTrading::Other);
+        assert_eq!(instrument.price_filter().tick_size, "0.01");
+        assert_eq!(instrument.lot_size_filter().base_precision, "0.000001");
     }
 
     #[rstest]
     fn deserialize_linear_instrument_status() {
         let json = load_test_json("http_get_instruments_linear.json");
-        let response: BybitInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
 
-        assert_eq!(instrument.status, BybitInstrumentStatus::Trading);
-        assert_eq!(instrument.contract_type, BybitContractType::LinearPerpetual);
+        assert_eq!(instrument.status, BitgetInstrumentStatus::Trading);
+        assert_eq!(
+            instrument.contract_type(),
+            BitgetContractType::LinearPerpetual
+        );
+        assert_eq!(instrument.price_filter().tick_size, "0.1");
+        assert_eq!(instrument.lot_size_filter().qty_step, "0.0001");
+        assert_eq!(instrument.funding_interval, 480);
+        assert_eq!(instrument.settle_coin(), "USDT");
+        assert_eq!(response.result.list.len(), 3);
     }
 
     #[rstest]
     fn deserialize_spot_instrument_with_xstock_fields() {
         let json = load_test_json("http_get_instruments_spot_xstocks.json");
-        let response: BybitInstrumentSpotResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentSpotResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
 
-        assert_eq!(instrument.symbol_id, Some(42));
-        assert_eq!(instrument.symbol_type, Some(BybitSymbolType::Xstocks));
-        assert_eq!(instrument.xstock_multiplier.as_deref(), Some("0.1"));
+        assert_eq!(instrument.symbol_id, None);
+        assert_eq!(instrument.symbol_type, Some(BitgetSymbolType::Stock));
+        assert_eq!(instrument.is_reality, "yes");
+        assert_eq!(instrument.xstock_multiplier, None);
     }
 
     #[rstest]
     fn deserialize_linear_instrument_with_symbol_type_and_id() {
         let json = load_test_json("http_get_instruments_linear_symbol_type.json");
-        let response: BybitInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
 
-        assert_eq!(instrument.symbol_id, Some(7));
-        assert_eq!(instrument.symbol_type, Some(BybitSymbolType::Stock));
+        assert_eq!(instrument.symbol_id, None);
+        assert_eq!(instrument.symbol_type, Some(BitgetSymbolType::Stock));
+        assert_eq!(instrument.buy_limit_price_ratio, "0.02");
     }
 
     #[derive(Deserialize)]
     struct SymbolTypeWrap {
         #[serde(rename = "symbolType")]
-        t: BybitSymbolType,
+        t: BitgetSymbolType,
     }
 
     #[rstest]
     fn deserialize_symbol_type_falls_back_to_other_for_unknown() {
         let json = r#"{"symbolType": "newthing"}"#;
         let parsed: SymbolTypeWrap = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.t, BybitSymbolType::Other);
+        assert_eq!(parsed.t, BitgetSymbolType::Other);
     }
 
     #[rstest]
     fn deserialize_account_info_response() {
         let json = load_test_json("http_get_account_info.json");
-        let response: BybitAccountInfoResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetAccountInfoResponse = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(response.result.margin_mode, BybitMarginMode::RegularMargin);
+        assert_eq!(response.result.margin_mode, BitgetMarginMode::RegularMargin);
         assert_eq!(
             response.result.unified_margin_status,
-            BybitUnifiedMarginStatus::UnifiedTradingAccount10Pro
+            BitgetUnifiedMarginStatus::Hybrid
+        );
+        assert_eq!(
+            response.result.hold_mode,
+            Some(crate::common::enums::BitgetPositionMode::MergedSingle)
         );
         assert!(!response.result.is_master_trader);
         assert!(!response.result.spot_hedging_status);
         assert!(!response.result.dcp_status);
-        assert_eq!(response.result.time_window, 10);
-        assert_eq!(response.result.smp_group, 0);
+        assert_eq!(response.result.symbol_config_list[0].leverage, "5");
     }
 
     #[rstest]
     fn deserialize_account_info_without_deprecated_fields() {
         let json = r#"{
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "marginMode": "PORTFOLIO_MARGIN",
-                "updatedTime": "1697078946000",
-                "unifiedMarginStatus": 5,
-                "isMasterTrader": true,
-                "spotHedgingStatus": "ON"
+            "code": "00000",
+            "msg": "success",
+            "requestTime": 1753787749280,
+            "data": {
+                "accountMode": "unified",
+                "accountLevel": "advanced",
+                "holdMode": "hedge_mode"
             }
         }"#;
-        let response: BybitAccountInfoResponse = serde_json::from_str(json).unwrap();
+        let response: BitgetAccountInfoResponse = serde_json::from_str(json).unwrap();
 
         assert_eq!(
             response.result.margin_mode,
-            BybitMarginMode::PortfolioMargin
+            BitgetMarginMode::PortfolioMargin
         );
         assert_eq!(
             response.result.unified_margin_status,
-            BybitUnifiedMarginStatus::UnifiedTradingAccount20
+            BitgetUnifiedMarginStatus::Unified
         );
-        assert!(response.result.is_master_trader);
-        assert!(response.result.spot_hedging_status);
-        assert!(!response.result.dcp_status);
+        assert!(!response.result.spot_hedging_status);
         assert_eq!(response.result.time_window, 0);
         assert_eq!(response.result.smp_group, 0);
-    }
-
-    #[rstest]
-    fn deserialize_account_info_accepts_string_time_window_and_smp_group() {
-        let mut json: serde_json::Value =
-            serde_json::from_str(&load_test_json("http_get_account_info.json")).unwrap();
-        json["result"]["timeWindow"] = serde_json::Value::String("10".to_string());
-        json["result"]["smpGroup"] = serde_json::Value::String("1234".to_string());
-
-        let response: BybitAccountInfoResponse = serde_json::from_value(json).unwrap();
-
-        assert_eq!(response.result.time_window, 10);
-        assert_eq!(response.result.smp_group, 1234);
+        assert!(response.result.symbol_config_list.is_empty());
     }
 
     #[rstest]
     fn deserialize_order_response_maps_enums() {
         let json = load_test_json("http_get_orders_history.json");
-        let response: BybitOrderHistoryResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetOrderHistoryResponse = serde_json::from_str(&json).unwrap();
         let order = &response.result.list[0];
 
-        assert_eq!(order.cancel_type, BybitCancelType::CancelByUser);
-        assert_eq!(order.tp_trigger_by, BybitTriggerType::MarkPrice);
-        assert_eq!(order.sl_trigger_by, BybitTriggerType::LastPrice);
-        assert_eq!(order.tpsl_mode, Some(BybitTpSlMode::Full));
-        assert_eq!(order.order_type, BybitOrderType::Limit);
-        assert_eq!(order.smp_type, BybitSmpType::None);
+        assert_eq!(order.cancel_type, BitgetCancelType::Other);
+        assert_eq!(order.tp_trigger_by, BitgetTriggerType::None);
+        assert_eq!(order.sl_trigger_by, BitgetTriggerType::None);
+        assert_eq!(order.tpsl_mode, None);
+        assert_eq!(order.order_type, BitgetOrderType::Market);
+        assert_eq!(order.order_status, BitgetOrderStatus::Filled);
+        assert_eq!(order.time_in_force, BitgetTimeInForce::Ioc);
+        assert_eq!(order.smp_type, BitgetSmpType::None);
         assert_eq!(order.smp_group, 0);
+        assert!(order.reduce_only);
+        assert_eq!(order.cum_exec_fee, "0.53523428");
+        assert_eq!(order.pos_side, BitgetPositionSide::Buy);
+        assert_eq!(order.hold_mode, "one_way_mode");
+        assert!(response.result.next_page_cursor.is_some());
     }
 
     #[rstest]
-    fn deserialize_order_response_accepts_string_smp_group() {
-        let mut json: serde_json::Value =
-            serde_json::from_str(&load_test_json("http_get_orders_history.json")).unwrap();
-        json["result"]["list"][0]["smpGroup"] = serde_json::Value::String("123456789".to_string());
+    fn deserialize_order_response_maps_cancel_reasons() {
+        let json = load_test_json("http_get_orders_history.json");
+        let response: BitgetOrderHistoryResponse = serde_json::from_str(&json).unwrap();
+        let reasons: Vec<BitgetCancelType> = response
+            .result
+            .list
+            .iter()
+            .filter(|order| order.order_status == BitgetOrderStatus::Canceled)
+            .map(|order| order.cancel_type)
+            .collect();
 
-        let response: BybitOrderHistoryResponse = serde_json::from_value(json).unwrap();
-
-        assert_eq!(response.result.list[0].smp_group, 123_456_789);
+        assert!(reasons.contains(&BitgetCancelType::CancelByIocNotFull));
+        assert!(reasons.contains(&BitgetCancelType::CancelByUser));
     }
 
     #[rstest]
-    fn deserialize_order_response_accepts_string_position_idx() {
-        let mut json: serde_json::Value =
-            serde_json::from_str(&load_test_json("http_get_orders_history.json")).unwrap();
-        json["result"]["list"][0]["positionIdx"] = serde_json::Value::String("1".to_string());
+    fn deserialize_open_order_with_null_tp_sl_fields() {
+        let json = load_test_json("http_get_orders_realtime.json");
+        let response: BitgetOpenOrdersResponse = serde_json::from_str(&json).unwrap();
+        let order = &response.result.list[0];
 
-        let response: BybitOrderHistoryResponse = serde_json::from_value(json).unwrap();
-
-        assert_eq!(response.result.list[0].position_idx, 1);
+        assert_eq!(order.order_status, BitgetOrderStatus::New);
+        assert_eq!(order.time_in_force, BitgetTimeInForce::PostOnly);
+        assert_eq!(order.take_profit, "");
+        assert_eq!(order.cum_exec_fee, "0");
+        assert!(!order.reduce_only);
     }
 
     #[rstest]
-    #[case::malformed(
-        "invalid",
-        "expected i32, received \"invalid\": invalid digit found in string"
-    )]
-    #[case::out_of_range(
-        "2147483648",
-        "expected i32, received \"2147483648\": number too large to fit in target type"
-    )]
-    fn deserialize_order_response_rejects_invalid_string_smp_group(
-        #[case] value: &str,
-        #[case] expected: &str,
-    ) {
-        let mut json: serde_json::Value =
-            serde_json::from_str(&load_test_json("http_get_orders_history.json")).unwrap();
-        json["result"]["list"][0]["smpGroup"] = serde_json::Value::String(value.to_string());
+    fn deserialize_order_info_partially_filled_then_cancelled() {
+        let json = load_test_json("http_get_order_partially_filled_rejected.json");
+        let response: BitgetResponse<BitgetOrder> = serde_json::from_str(&json).unwrap();
+        let order = &response.result;
 
-        let result: Result<BybitOrderHistoryResponse, _> = serde_json::from_value(json);
+        assert_eq!(order.order_status, BitgetOrderStatus::Canceled);
+        assert_eq!(order.cancel_type, BitgetCancelType::CancelByIocNotFull);
+        assert_eq!(order.cum_exec_qty, "3.71");
+        assert_eq!(order.qty, "4.71");
+        assert_eq!(order.pos_side, BitgetPositionSide::Sell);
+    }
 
-        assert_eq!(result.unwrap_err().to_string(), expected);
+    #[rstest]
+    fn deserialize_strategy_order_history() {
+        let json = load_test_json("http_get_strategy_orders_history.json");
+        let response: BitgetOrderHistoryResponse = serde_json::from_str(&json).unwrap();
+        let order = &response.result.list[0];
+
+        assert_eq!(order.stop_order_type, BitgetStopOrderType::Stop);
+        assert_eq!(order.order_status, BitgetOrderStatus::Canceled);
+        assert_eq!(order.trigger_by, BitgetTriggerType::MarkPrice);
+        assert_eq!(order.trigger_price, "396.89");
+        assert_eq!(order.order_type, BitgetOrderType::Market);
+        assert_eq!(
+            response.result.next_page_cursor.as_deref(),
+            Some("1503521067782803459")
+        );
     }
 
     #[rstest]
     fn deserialize_wallet_balance_without_optional_fields() {
         let json = r#"{
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "list": [{
-                    "totalEquity": "1000.00",
-                    "accountIMRate": "0",
-                    "totalMarginBalance": "1000.00",
-                    "totalInitialMargin": "0",
-                    "accountType": "UNIFIED",
-                    "totalAvailableBalance": "1000.00",
-                    "accountMMRate": "0",
-                    "totalPerpUPL": "0",
-                    "totalWalletBalance": "1000.00",
-                    "accountLTV": "0",
-                    "totalMaintenanceMargin": "0",
-                    "coin": [{
-                        "availableToBorrow": "0",
-                        "bonus": "0",
-                        "accruedInterest": "0",
-                        "availableToWithdraw": "1000.00",
-                        "equity": "1000.00",
-                        "usdValue": "1000.00",
-                        "borrowAmount": "0",
-                        "totalPositionIM": "0",
-                        "walletBalance": "1000.00",
-                        "unrealisedPnl": "0",
-                        "cumRealisedPnl": "0",
-                        "locked": "0",
-                        "collateralSwitch": true,
-                        "marginCollateral": true,
-                        "coin": "USDT"
-                    }]
+            "code": "00000",
+            "msg": "success",
+            "requestTime": 1746687063471,
+            "data": {
+                "accountEquity": "1000.00",
+                "assets": [{
+                    "coin": "USDT",
+                    "equity": "1000.00",
+                    "usdValue": "1000.00",
+                    "balance": "1000.00",
+                    "available": "1000.00",
+                    "locked": "0"
                 }]
             }
         }"#;
 
-        let response: BybitWalletBalanceResponse = serde_json::from_str(json)
+        let response: BitgetWalletBalanceResponse = serde_json::from_str(json)
             .expect("Failed to parse wallet balance without optional fields");
 
         assert_eq!(response.ret_code, 0);
-        assert_eq!(response.result.list[0].coin[0].total_order_im, None);
-        assert_eq!(response.result.list[0].coin[0].total_position_mm, None);
+        assert_eq!(response.result.coin[0].total_order_im, None);
+        assert_eq!(response.result.coin[0].total_position_mm, None);
+        assert_eq!(response.result.coin[0].borrow_amount, "");
     }
 
     #[rstest]
     fn deserialize_wallet_balance_from_docs() {
-        let json = include_str!("../../test_data/http_get_wallet_balance.json");
+        let json = load_test_json("http_get_wallet_balance.json");
 
-        let response: BybitWalletBalanceResponse = serde_json::from_str(json)
-            .expect("Failed to parse wallet balance from Bybit docs example");
+        let response: BitgetWalletBalanceResponse =
+            serde_json::from_str(&json).expect("Failed to parse wallet balance");
 
         assert_eq!(response.ret_code, 0);
-        assert_eq!(response.ret_msg, "OK");
+        assert_eq!(response.ret_msg, "success");
 
-        let wallet = &response.result.list[0];
-        assert_eq!(wallet.total_equity, "3.31216591");
-        assert_eq!(wallet.account_im_rate, "0");
-        assert_eq!(wallet.account_mm_rate, "0");
-        assert_eq!(wallet.total_perp_upl, "0");
-        assert_eq!(wallet.account_ltv, "0");
+        let wallet = &response.result;
+        assert_eq!(wallet.total_equity, "99923.24521669");
+        assert_eq!(wallet.total_initial_margin, "91.05");
+        assert_eq!(wallet.total_maintenance_margin, "9.26");
+        assert_eq!(wallet.account_type, BitgetAccountType::Unified);
 
-        // Check BTC coin
-        let btc = &wallet.coin[0];
-        assert_eq!(btc.coin, "BTC");
-        assert_eq!(btc.available_to_borrow, "3");
-        assert_eq!(btc.total_order_im, Some("0".to_string()));
-        assert_eq!(btc.total_position_mm, Some("0".to_string()));
-        assert_eq!(btc.total_position_im, Some("0".to_string()));
-
-        // Check USDT coin (without optional IM/MM fields)
-        let usdt = &wallet.coin[1];
-        assert_eq!(usdt.coin, "USDT");
-        assert_eq!(usdt.wallet_balance, dec!(1000.50));
-        assert_eq!(usdt.total_order_im, None);
-        assert_eq!(usdt.total_position_mm, None);
-        assert_eq!(usdt.total_position_im, None);
-        assert_eq!(btc.spot_borrow, Decimal::ZERO);
+        let usdt = wallet.coin.iter().find(|c| c.coin == "USDT").unwrap();
+        assert_eq!(usdt.wallet_balance, dec!(49998.28810184));
+        assert_eq!(usdt.available_to_withdraw, "49998.28810184");
+        assert_eq!(usdt.borrow_amount, "0");
         assert_eq!(usdt.spot_borrow, Decimal::ZERO);
     }
 
     #[rstest]
-    fn test_parse_wallet_balance_with_spot_borrow() {
-        let json = include_str!("../../test_data/http_get_wallet_balance_with_spot_borrow.json");
-        let response: BybitWalletBalanceResponse =
-            serde_json::from_str(json).expect("Failed to parse wallet balance with spotBorrow");
+    #[case("http_get_wallet_balance_spot_short.json", dec!(-0.5), "0.5")]
+    #[case("http_get_wallet_balance_with_spot_borrow.json", dec!(1.5), "0.5")]
+    fn deserialize_wallet_balance_with_borrowed_coin(
+        #[case] fixture: &str,
+        #[case] balance: Decimal,
+        #[case] debt: &str,
+    ) {
+        let response: BitgetWalletBalanceResponse =
+            serde_json::from_str(&load_test_json(fixture)).unwrap();
+        let eth = response
+            .result
+            .coin
+            .iter()
+            .find(|c| c.coin == "ETH")
+            .unwrap();
 
-        let wallet = &response.result.list[0];
-        let usdt = &wallet.coin[0];
-
-        assert_eq!(usdt.coin, "USDT");
-        assert_eq!(usdt.wallet_balance, dec!(1200.00));
-        assert_eq!(usdt.spot_borrow, dec!(200.00));
-        assert_eq!(usdt.borrow_amount, "200.00");
-
-        // Verify calculation: actual_balance = walletBalance - spotBorrow = 1200 - 200 = 1000
-        let account_id = crate::common::parse::parse_account_state(
-            wallet,
-            AccountId::new("BYBIT-001"),
-            UnixNanos::default(),
-        )
-        .expect("Failed to parse account state");
-
-        let balance = &account_id.balances[0];
-        assert_eq!(balance.total.as_f64(), 1000.0);
+        assert_eq!(eth.wallet_balance, balance);
+        assert_eq!(eth.borrow_amount, debt);
     }
 
     #[rstest]
-    fn test_parse_wallet_balance_spot_short() {
-        let json = include_str!("../../test_data/http_get_wallet_balance_spot_short.json");
-        let response: BybitWalletBalanceResponse = serde_json::from_str(json)
-            .expect("Failed to parse wallet balance with SHORT SPOT position");
+    fn deserialize_order_history_with_duplicate_row() {
+        let response: BitgetOrderHistoryResponse = serde_json::from_str(&load_test_json(
+            "http_get_orders_history_with_duplicate.json",
+        ))
+        .unwrap();
+        let list = &response.result.list;
 
-        let wallet = &response.result.list[0];
-        let eth = &wallet.coin[0];
+        assert_eq!(list[0].order_id, list[1].order_id);
+    }
 
-        assert_eq!(eth.coin, "ETH");
-        assert_eq!(eth.wallet_balance, dec!(0));
-        assert_eq!(eth.spot_borrow, dec!(0.06142));
-        assert_eq!(eth.borrow_amount, "0.06142");
+    #[rstest]
+    fn deserialize_open_order_with_tp_sl() {
+        let response: BitgetOpenOrdersResponse =
+            serde_json::from_str(&load_test_json("http_get_orders_realtime_tp_sl.json")).unwrap();
+        let order = &response.result.list[0];
 
-        let account_state = crate::common::parse::parse_account_state(
-            wallet,
-            AccountId::new("BYBIT-001"),
-            UnixNanos::default(),
-        )
-        .expect("Failed to parse account state");
+        assert_eq!(order.take_profit, "400");
+        assert_eq!(order.stop_loss, "300");
+        assert_eq!(order.sl_trigger_by, BitgetTriggerType::MarkPrice);
+    }
 
-        let eth_balance = account_state
-            .balances
-            .iter()
-            .find(|b| b.currency.code == "ETH")
-            .expect("ETH balance not found");
+    #[rstest]
+    fn deserialize_position_with_open_time() {
+        let response: BitgetPositionListResponse =
+            serde_json::from_str(&load_test_json("http_get_positions_with_open_time.json"))
+                .unwrap();
 
-        // Negative balance represents SHORT position (borrowed ETH)
-        assert_eq!(eth_balance.total.as_f64(), -0.06142);
+        assert!(!response.result.list[0].created_time.is_empty());
     }
 
     #[rstest]
     fn deserialize_borrow_response() {
         let json = r#"{
-            "retCode": 0,
-            "retMsg": "success",
-            "result": {
+            "code": "00000",
+            "msg": "success",
+            "requestTime": 1756197991955,
+            "data": {
                 "coin": "BTC",
                 "amount": "0.01"
-            },
-            "retExtInfo": {},
-            "time": 1756197991955
+            }
         }"#;
 
-        let response: BybitBorrowResponse = serde_json::from_str(json).unwrap();
+        let response: BitgetBorrowResponse = serde_json::from_str(json).unwrap();
 
         assert_eq!(response.ret_code, 0);
         assert_eq!(response.ret_msg, "success");
@@ -2210,274 +3042,136 @@ mod tests {
 
     #[rstest]
     fn deserialize_no_convert_repay_response() {
-        let json = r#"{
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "resultStatus": "SU"
-            },
-            "retExtInfo": {},
-            "time": 1234567890
-        }"#;
+        let json = r#"{"code":"00000","msg":"success","requestTime":1234567890,"data":"success"}"#;
 
-        let response: BybitNoConvertRepayResponse = serde_json::from_str(json).unwrap();
+        let response: BitgetNoConvertRepayResponse = serde_json::from_str(json).unwrap();
 
         assert_eq!(response.ret_code, 0);
-        assert_eq!(response.ret_msg, "OK");
-        assert_eq!(response.result.result_status, BybitRepayStatus::Success);
+        assert_eq!(response.result.result_status, BitgetRepayStatus::Success);
     }
 
     #[rstest]
     fn deserialize_repay_response() {
-        let json = r#"{
-            "retCode": 0,
-            "retMsg": "success",
-            "result": {
-                "resultStatus": "P"
-            },
-            "retExtInfo": {},
-            "time": 1756295680801
-        }"#;
+        let json = r#"{"code":"00000","msg":"success","requestTime":1756295680801,"data":null}"#;
 
-        let response: BybitRepayResponse = serde_json::from_str(json).unwrap();
+        let response: BitgetRepayResponse = serde_json::from_str(json).unwrap();
 
         assert_eq!(response.ret_code, 0);
-        assert_eq!(response.ret_msg, "success");
-        assert_eq!(response.result.result_status, BybitRepayStatus::Processing);
+        assert_eq!(response.result.result_status, BitgetRepayStatus::Success);
     }
 
     #[rstest]
     fn deserialize_position_without_conditional_fields() {
-        // Bybit v5 docs mark `isReduceOnly`, `mmrSysUpdatedTime`, `leverageSysUpdatedTime`
-        // and `seq` as conditional fields that may be absent, e.g. once a position has been
-        // closed through the UI (see issue #3836).
-        let json = r#"{
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "list": [{
-                    "positionIdx": 0,
-                    "riskId": 1,
-                    "riskLimitValue": "150",
-                    "symbol": "LTCUSDT",
-                    "side": "",
-                    "size": "0",
-                    "avgPrice": "0",
-                    "positionValue": "0",
-                    "tradeMode": 0,
-                    "positionStatus": "Normal",
-                    "autoAddMargin": 0,
-                    "adlRankIndicator": 0,
-                    "leverage": "10",
-                    "positionBalance": "0",
-                    "markPrice": "70.00",
-                    "liqPrice": "",
-                    "bustPrice": "",
-                    "positionMM": "0",
-                    "positionIM": "0",
-                    "tpslMode": "Full",
-                    "takeProfit": "0",
-                    "stopLoss": "0",
-                    "trailingStop": "0",
-                    "unrealisedPnl": "0",
-                    "curRealisedPnl": "0",
-                    "cumRealisedPnl": "0",
-                    "createdTime": "1676538056258",
-                    "updatedTime": "1697673600012"
-                }],
-                "nextPageCursor": "",
-                "category": "linear"
-            },
-            "retExtInfo": {},
-            "time": 1697673900000
-        }"#;
+        let json = load_test_json("http_get_positions.json");
 
-        let response: BybitPositionListResponse = serde_json::from_str(json)
-            .expect("Failed to parse position list with missing conditional fields");
+        let response: BitgetPositionListResponse =
+            serde_json::from_str(&json).expect("Failed to parse position list");
 
         let position = &response.result.list[0];
+        assert_eq!(position.side, BitgetPositionSide::Buy);
+        assert_eq!(position.size, "0.02");
+        assert_eq!(position.trade_mode, 0);
+        assert_eq!(position.hold_mode, "one_way_mode");
         assert!(!position.is_reduce_only);
         assert_eq!(position.seq, -1);
-        assert_eq!(position.mmr_sys_updated_time, "");
-        assert_eq!(position.leverage_sys_updated_time, "");
         assert_eq!(position.open_time, 0);
+        assert_eq!(position.position_status, BitgetPositionStatus::Normal);
     }
 
     #[rstest]
-    #[case(0_i64)]
-    #[case(1_700_000_000_123_i64)]
-    fn deserialize_position_with_open_time_integer(#[case] expected: i64) {
-        // Bybit position info added `openTime` (integer, ms; default 0) effective 2026-04-21.
-        let mut value: serde_json::Value =
-            serde_json::from_str(&load_test_json("http_get_positions_with_open_time.json"))
-                .unwrap();
-        value["result"]["list"][0]["openTime"] = serde_json::json!(expected);
+    fn deserialize_position_list_null_is_empty() {
+        let json = load_test_json("http_get_positions_empty.json");
 
-        let response: BybitPositionListResponse = serde_json::from_value(value)
-            .expect("Failed to parse position list with integer openTime");
+        let response: BitgetPositionListResponse = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(response.result.list[0].open_time, expected);
-    }
-
-    #[rstest]
-    fn deserialize_position_response_accepts_string_integer_fields() {
-        let mut json: serde_json::Value =
-            serde_json::from_str(&load_test_json("http_get_positions.json")).unwrap();
-        let position = &mut json["result"]["list"][0];
-        position["riskId"] = serde_json::Value::String("1234".to_string());
-        position["tradeMode"] = serde_json::Value::String("1".to_string());
-        position["autoAddMargin"] = serde_json::Value::String("2".to_string());
-        position["adlRankIndicator"] = serde_json::Value::String("35".to_string());
-
-        let response: BybitPositionListResponse = serde_json::from_value(json).unwrap();
-
-        let position = &response.result.list[0];
-        assert_eq!(position.risk_id, 1234);
-        assert_eq!(position.trade_mode, 1);
-        assert_eq!(position.auto_add_margin, 2);
-        assert_eq!(position.adl_rank_indicator, 35);
+        assert!(response.result.list.is_empty());
     }
 
     #[rstest]
     fn deserialize_inverse_instrument_with_symbol_type_and_id() {
         let json = load_test_json("http_get_instruments_inverse_symbol_type.json");
-        let response: BybitInstrumentInverseResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentInverseResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
 
-        assert_eq!(instrument.symbol_id, Some(11));
-        assert_eq!(instrument.symbol_type, Some(BybitSymbolType::Commodity));
+        assert_eq!(instrument.symbol_id, None);
+        assert_eq!(instrument.symbol_type, Some(BitgetSymbolType::Crypto));
+        assert_eq!(
+            instrument.contract_type(),
+            BitgetContractType::InverseFutures
+        );
+        assert_eq!(instrument.funding_interval, 0);
+        assert_eq!(instrument.settle_coin(), "BTC");
     }
 
     #[rstest]
-    fn deserialize_option_instrument_with_symbol_id() {
-        let json = load_test_json("http_get_instruments_option_symbol_id.json");
-        let response: BybitInstrumentOptionResponse = serde_json::from_str(&json).unwrap();
-        let instrument = &response.result.list[0];
+    fn deserialize_executions_response() {
+        let json = load_test_json("http_get_executions.json");
+        let response: BitgetTradeHistoryResponse = serde_json::from_str(&json).unwrap();
+        let execution = &response.result.list[0];
 
-        assert_eq!(instrument.symbol_id, Some(99));
+        assert_eq!(execution.exec_type, BitgetExecType::Trade);
+        assert!(!execution.is_maker);
+        assert_eq!(execution.exec_fee, "0.53523428");
+        assert_eq!(execution.exec_time, "1794193218321");
+        assert_eq!(execution.order_link_id, "tdcapflp93218");
     }
 
     #[rstest]
-    fn deserialize_sub_members_response() {
-        let json = load_test_json("http_get_user_sub_members.json");
-        let response: BybitSubMembersResponse =
-            serde_json::from_str(&json).expect("parse sub members");
-        assert_eq!(response.ret_code, 0);
-        assert_eq!(response.result.sub_members.len(), 2);
-        let first = &response.result.sub_members[0];
-        assert_eq!(first.uid, "106314365");
-        assert_eq!(first.username, "xxxx02");
-        assert_eq!(first.member_type, 1);
-        assert_eq!(first.status, 1);
-        assert_eq!(first.account_mode, 5);
-        assert_eq!(first.remark, "");
-        let second = &response.result.sub_members[1];
-        assert_eq!(second.uid, "106279879");
-        assert_eq!(second.account_mode, 6);
+    fn deserialize_executions_null_list_is_empty() {
+        let json = load_test_json("http_get_executions_empty.json");
+        let response: BitgetTradeHistoryResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(response.result.list.is_empty());
+        assert!(response.result.next_page_cursor.is_none());
     }
 
     #[rstest]
-    fn deserialize_sub_members_paged_response() {
-        // The final-page sentinel is `"0"`; both `"0"` and `None` collapse to
-        // `continuation_cursor() == None` through the method.
-        let json = load_test_json("http_get_user_sub_members_paged.json");
-        let response: BybitSubMembersPagedResponse =
-            serde_json::from_str(&json).expect("parse paged sub members");
-        assert_eq!(response.result.sub_members.len(), 2);
-        assert_eq!(response.result.next_cursor.as_deref(), Some("0"));
-        assert!(!response.result.has_more_pages());
-        assert_eq!(response.result.continuation_cursor(), None);
-    }
+    fn deserialize_market_data_responses() {
+        let book: BitgetOrderbookResponse =
+            serde_json::from_str(&load_test_json("http_get_orderbook.json")).unwrap();
+        assert_eq!(
+            book.result.a[0],
+            ["75228.9".to_string(), "2.6781".to_string()]
+        );
+        assert_eq!(book.result.ts, 1_794_192_836_072);
 
-    #[rstest]
-    fn deserialize_escrow_sub_members_response_uses_same_shape() {
-        // The escrow alias must decode into the same shape as the paginated
-        // sub-member list; a non-`"0"` cursor indicates more pages to fetch.
-        let json = load_test_json("http_get_user_escrow_sub_members.json");
-        let response: BybitEscrowSubMembersResponse =
-            serde_json::from_str(&json).expect("parse escrow sub members");
-        assert_eq!(response.result.sub_members.len(), 2);
-        assert_eq!(response.result.sub_members[0].member_type, 12);
-        assert_eq!(response.result.sub_members[0].remark, "earn fund");
-        assert_eq!(response.result.next_cursor.as_deref(), Some("344"));
-        assert!(response.result.has_more_pages());
-        assert_eq!(response.result.continuation_cursor(), Some("344"));
-    }
+        let klines: BitgetKlinesResponse =
+            serde_json::from_str(&load_test_json("http_get_klines_linear.json")).unwrap();
+        assert_eq!(klines.result.list.len(), 3);
+        assert_eq!(klines.result.list[0].open, "75225.3");
 
-    #[rstest]
-    fn deserialize_sub_api_keys_response() {
-        // `readOnly` arrives as a bool here; the masked `"******"` secret
-        // collapses to `None` through the `masked_secret` Serde adapter.
-        let json = load_test_json("http_get_user_sub_apikeys.json");
-        let response: BybitSubApiKeysResponse =
-            serde_json::from_str(&json).expect("parse sub apikeys");
-        assert_eq!(response.result.keys.len(), 1);
-        let key = &response.result.keys[0];
-        let debug = format!("{key:?}");
+        let trades: BitgetTradesResponse =
+            serde_json::from_str(&load_test_json("http_get_trades_recent.json")).unwrap();
+        assert_eq!(trades.result.list[0].side, BitgetOrderSide::Sell);
+        assert_eq!(trades.result.list[0].time, "1794192830666");
 
-        assert!(!key.read_only);
-        assert_eq!(key.secret, None);
-        assert_eq!(key.key_type, BybitApiKeyType::Hmac);
-        assert_eq!(key.flag, "hmac");
-        assert_eq!(key.deadline_day, Some(21));
-        assert_eq!(key.permissions.contract_trade, vec!["Order", "Position"]);
-        assert_eq!(key.permissions.spot, vec!["SpotTrade"]);
-        assert!(key.permissions.earn.is_empty());
-        assert_eq!(response.result.next_page_cursor.as_deref(), Some(""));
-        assert!(!response.result.has_more_pages());
-        assert!(debug.contains("api_key: <redacted>"));
-        assert!(debug.contains("secret: None"));
-        assert!(!debug.contains("XXXXXX"));
-    }
+        let funding: BitgetFundingResponse =
+            serde_json::from_str(&load_test_json("http_get_funding_history.json")).unwrap();
+        assert_eq!(funding.result.list.len(), 3);
 
-    #[rstest]
-    fn deserialize_update_sub_api_response() {
-        let json = load_test_json("http_post_user_update_sub_api.json");
-        let response: BybitUpdateSubApiResponse =
-            serde_json::from_str(&json).expect("parse update sub api");
-        let debug = format!("{:?}", response.result);
+        let time: BitgetServerTimeResponse =
+            serde_json::from_str(&load_test_json("http_get_server_time.json")).unwrap();
+        assert_eq!(time.result.time_second_str(), "1794192837");
 
-        assert!(!response.result.read_only);
-        assert_eq!(response.result.secret, None);
-        assert_eq!(response.result.ips, vec!["*"]);
-        assert_eq!(response.result.permissions.spot, vec!["SpotTrade"]);
-        assert_eq!(response.result.permissions.wallet, vec!["AccountTransfer"]);
-        assert!(debug.contains("api_key: <redacted>"));
-        assert!(debug.contains("secret: None"));
-        assert!(!debug.contains("xxxxxx"));
-    }
+        let fee: BitgetFeeRateResponse =
+            serde_json::from_str(&load_test_json("http_get_fee_rate.json")).unwrap();
+        assert_eq!(fee.result.list[0].taker_fee_rate, "0.0004");
 
-    #[rstest]
-    fn deserialize_update_master_api_response() {
-        // Asserts on non-empty permission buckets so the test actually verifies
-        // deserialisation (an empty `Vec` would be indistinguishable from a
-        // `#[serde(default)]` fallback). In particular, `nft` exercises the
-        // explicit `#[serde(rename = "NFT")]` attribute.
-        let json = load_test_json("http_post_user_update_master_api.json");
-        let response: BybitUpdateMasterApiResponse =
-            serde_json::from_str(&json).expect("parse update master api");
-        assert!(!response.result.read_only);
-        assert_eq!(response.result.ips, vec!["*"]);
-        let perms = &response.result.permissions;
-        assert_eq!(perms.contract_trade, vec!["Order", "Position"]);
-        assert_eq!(perms.copy_trading, vec!["CopyTrading"]);
-        assert!(perms.earn.is_empty());
-        assert_eq!(perms.nft, vec!["NFTQueryProductList"]);
+        let tickers: BitgetTickersLinearResponse =
+            serde_json::from_str(&load_test_json("http_get_tickers_linear.json")).unwrap();
+        assert_eq!(tickers.result.list[0].mark_price, "75230.7");
     }
 
     #[rstest]
     fn deserialize_permissions_renamed_buckets_preserve_values() {
-        // Regression guard for `#[serde(rename = ...)]` on permission keys
-        // whose Bybit casing (`NFT`, `FiatP2P`, `ByXPost`) differs from
-        // serde's `PascalCase` default (`Nft`, `FiatP2p`, `ByxPost`). Using
-        // non-empty values ensures a rename regression causes a failure
-        // rather than silently falling through to `serde(default)`.
+        // Regression guard for `#[serde(rename = ...)]` on permission keys of the
+        // parity-kept sub-account DTOs
         let json = r#"{
             "NFT": ["NFTQueryProductList"],
             "FiatP2P": ["P2PDeposit"],
             "ByXPost": ["PostContent"]
         }"#;
-        let perms: BybitApiKeyPermissions =
+        let perms: BitgetApiKeyPermissions =
             serde_json::from_str(json).expect("parse renamed buckets");
         assert_eq!(perms.nft, vec!["NFTQueryProductList"]);
         assert_eq!(perms.fiat_p2p, vec!["P2PDeposit"]);
@@ -2487,23 +3181,17 @@ mod tests {
     #[rstest]
     fn deserialize_account_details_response_with_current_docs_example() {
         let json = load_test_json("http_get_user_query_api.json");
-        let response: BybitAccountDetailsResponse =
+        let response: BitgetAccountDetailsResponse =
             serde_json::from_str(&json).expect("parse account details");
         let debug = format!("{:?}", response.result);
 
-        assert_eq!(
-            response.result.permissions.fiat_global_pay,
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            response.result.permissions.fiat_bit_pay,
-            vec!["FaitPayOrder"]
-        );
-        assert_eq!(response.result.permissions.bit_card, vec!["BitCard"]);
-        assert_eq!(response.result.permissions.byx_post, vec!["ByXPost"]);
-        assert_eq!(response.result.unified, Some(0));
+        assert_eq!(response.result.user_id, Some(21_967_229_145));
+        assert_eq!(response.result.inviter_id, None);
+        assert_eq!(response.result.parent_uid, "9322381550");
+        assert!(response.result.ips.is_empty());
+        assert!(response.result.permissions.is_empty());
+        assert_eq!(response.result.created_at, "1794152051000");
         assert!(debug.contains("api_key: <redacted>"));
         assert!(debug.contains("secret: <redacted>"));
-        assert!(!debug.contains("api_key: \"XXXXXXXX\""));
     }
 }

@@ -1,38 +1,37 @@
 {
-  "topic": "execution",
-  "id": "386825804_BTCUSDT_140612148849383",
-  "creationTime": 1746270400400,
+  "action": "snapshot",
+  "arg": {
+    "instType": "UTA",
+    "topic": "fill"
+  },
   "data": [
     {
-      "category": "linear",
-      "symbol": "BTCUSDT",
-      "closedSize": "0.5",
-      "execFee": "0",
-      "execId": "0ab1bdf7-4219-438b-b30a-32ec863018f8",
-      "execPrice": "95850.0",
-      "execQty": "0.5",
-      "execType": "AdlTrade",
-      "execValue": "47925.00",
-      "feeRate": "0",
-      "tradeIv": "",
-      "markIv": "",
-      "blockTradeId": "",
-      "markPrice": "95850.00",
-      "indexPrice": "",
-      "underlyingPrice": "",
-      "leavesQty": "0",
-      "orderId": "9aac161b-8ed6-450d-9cab-c5cc67c21785",
-      "orderLinkId": "",
-      "orderPrice": "0",
-      "orderQty": "0.5",
-      "orderType": "Market",
-      "stopOrderType": "UNKNOWN",
-      "side": "Sell",
-      "execTime": "1746270400398",
-      "isLeverage": "0",
-      "isMaker": false,
-      "seq": 140612148849383,
-      "feeCurrency": "USDT"
+      "orderId": "1503520323393708032",
+      "clientOid": "tdcapioc93099",
+      "execId": "1503520323400871936",
+      "category": "usdt-futures",
+      "symbol": "TSLAUSDT",
+      "orderType": "market",
+      "side": "sell",
+      "holdSide": "long",
+      "execQty": "0.02",
+      "execValue": "7.2144",
+      "execPrice": "360.72",
+      "execPnl": "0",
+      "tradeScope": "taker",
+      "feeDetail": [
+        {
+          "feeCoin": "USDT",
+          "fee": "0.00288576",
+          "grantFee": ""
+        }
+      ],
+      "execTime": "1794193099832",
+      "updatedTime": "1794193099832",
+      "tradeSide": "dte_sys_adl_sell_in_single_side_mode",
+      "execLinkId": "1503520323400871936",
+      "isRPI": "no"
     }
-  ]
+  ],
+  "ts": 1794193099835
 }

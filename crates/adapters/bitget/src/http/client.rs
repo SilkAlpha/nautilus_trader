@@ -13,9 +13,9 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Provides the HTTP client integration for the [Bybit](https://bybit.com) REST API.
+//! Provides the HTTP client integration for the [Bitget](https://bitget.com) REST API.
 //!
-//! Bybit API reference <https://bybit-exchange.github.io/docs/>.
+//! Bitget API reference <https://www.bitget.com/docs/uta/intro>.
 
 use std::{
     cmp::Reverse,
@@ -57,64 +57,67 @@ use tokio_util::sync::CancellationToken;
 use ustr::Ustr;
 
 use super::{
-    error::{BybitCancelOrderError, BybitHttpError, BybitModifyOrderError, BybitSubmitOrderError},
+    error::{
+        BitgetCancelOrderError, BitgetHttpError, BitgetModifyOrderError, BitgetSubmitOrderError,
+    },
     models::{
-        BybitAccountDetailsResponse, BybitAccountInfoResponse, BybitBorrowResponse,
-        BybitEscrowSubMembersResponse, BybitFeeRate, BybitFeeRateResponse, BybitFundingResponse,
-        BybitInstrumentInverse, BybitInstrumentInverseResponse, BybitInstrumentLinear,
-        BybitInstrumentLinearResponse, BybitInstrumentOption, BybitInstrumentOptionResponse,
-        BybitInstrumentSpot, BybitInstrumentSpotResponse, BybitKlinesResponse,
-        BybitNoConvertRepayResponse, BybitOpenOrdersResponse, BybitOrder,
-        BybitOrderHistoryResponse, BybitOrderbookResponse, BybitPlaceOrderResponse,
-        BybitPositionListResponse, BybitRepayResponse, BybitServerTimeResponse,
-        BybitSetLeverageResponse, BybitSetMarginModeResponse, BybitSetTradingStopResponse,
-        BybitSubApiKeyInfo, BybitSubApiKeysResponse, BybitSubMember, BybitSubMembersPagedResponse,
-        BybitSubMembersResponse, BybitSwitchModeResponse, BybitTickerData, BybitTickerOption,
-        BybitTickersOptionResponse, BybitTradeHistoryResponse, BybitTradesResponse,
-        BybitUpdateMasterApiResponse, BybitUpdateSubApiResponse, BybitWalletBalanceResponse,
+        BitgetAccountDetailsResponse, BitgetAccountInfoResponse, BitgetBorrowResponse,
+        BitgetEscrowSubMembersResponse, BitgetFeeRate, BitgetFeeRateResponse,
+        BitgetFundingResponse, BitgetInstrumentInverse, BitgetInstrumentInverseResponse,
+        BitgetInstrumentLinear, BitgetInstrumentLinearResponse, BitgetInstrumentOptionResponse,
+        BitgetInstrumentSpot, BitgetInstrumentSpotResponse, BitgetKlinesResponse,
+        BitgetNoConvertRepayResponse, BitgetOpenOrdersResponse, BitgetOrder,
+        BitgetOrderHistoryResponse, BitgetOrderbookResponse, BitgetPlaceOrderResponse,
+        BitgetPositionListResponse, BitgetRepayResponse, BitgetServerTimeResponse,
+        BitgetSetLeverageResponse, BitgetSetMarginModeResponse, BitgetSetTradingStopResponse,
+        BitgetSubApiKeyInfo, BitgetSubApiKeysResponse, BitgetSubMember,
+        BitgetSubMembersPagedResponse, BitgetSubMembersResponse, BitgetSwitchModeResponse,
+        BitgetTickerData, BitgetTickerOption, BitgetTradeHistoryResponse, BitgetTradesResponse,
+        BitgetUpdateMasterApiResponse, BitgetUpdateSubApiResponse, BitgetWalletBalanceResponse,
     },
     query::{
-        BybitAmendOrderParamsBuilder, BybitBatchAmendOrderEntryBuilder,
-        BybitBatchCancelOrderEntryBuilder, BybitBatchCancelOrderParamsBuilder,
-        BybitBatchPlaceOrderEntryBuilder, BybitBorrowParamsBuilder,
-        BybitCancelAllOrdersParamsBuilder, BybitCancelOrderParamsBuilder, BybitFeeRateParams,
-        BybitFundingParams, BybitFundingParamsBuilder, BybitInstrumentsInfoParams,
-        BybitKlinesParams, BybitKlinesParamsBuilder, BybitNativeTpSlParams,
-        BybitNoConvertRepayParamsBuilder, BybitOpenOrdersParamsBuilder,
-        BybitOrderHistoryParamsBuilder, BybitOrderbookParams, BybitOrderbookParamsBuilder,
-        BybitPlaceOrderParamsBuilder, BybitPositionListParams, BybitRepayParamsBuilder,
-        BybitSetLeverageParamsBuilder, BybitSetMarginModeParamsBuilder, BybitSetTradingStopParams,
-        BybitSubApiKeysParams, BybitSubMembersPageParams, BybitSwitchModeParamsBuilder,
-        BybitTickersParams, BybitTradeHistoryParams, BybitTradesParams, BybitTradesParamsBuilder,
-        BybitUpdateMasterApiParams, BybitUpdateSubApiParams, BybitWalletBalanceParams,
+        BitgetAmendOrderParamsBuilder, BitgetBatchAmendOrderEntryBuilder,
+        BitgetBatchCancelOrderEntryBuilder, BitgetBatchCancelOrderParamsBuilder,
+        BitgetBatchPlaceOrderEntryBuilder, BitgetBorrowParamsBuilder,
+        BitgetCancelAllOrdersParamsBuilder, BitgetCancelOrderParamsBuilder,
+        BitgetCancelStrategyOrderParams, BitgetFeeRateParams, BitgetFundingParams,
+        BitgetFundingParamsBuilder, BitgetInstrumentsInfoParams, BitgetKlinesParams,
+        BitgetKlinesParamsBuilder, BitgetModifyStrategyOrderParams, BitgetNativeTpSlParams,
+        BitgetNoConvertRepayParamsBuilder, BitgetOpenOrdersParams, BitgetOpenOrdersParamsBuilder,
+        BitgetOrderHistoryParams, BitgetOrderHistoryParamsBuilder, BitgetOrderbookParams,
+        BitgetOrderbookParamsBuilder, BitgetPlaceOrderParamsBuilder,
+        BitgetPlaceStrategyOrderParams, BitgetPositionListParams, BitgetRepayParamsBuilder,
+        BitgetSetLeverageParamsBuilder, BitgetSetMarginModeParamsBuilder,
+        BitgetSetTradingStopParams, BitgetSubApiKeysParams, BitgetSubMembersPageParams,
+        BitgetSwitchModeParamsBuilder, BitgetTickersParams, BitgetTradeHistoryParams,
+        BitgetTradesParams, BitgetTradesParamsBuilder, BitgetUpdateMasterApiParams,
+        BitgetUpdateSubApiParams, BitgetWalletBalanceParams,
     },
 };
 use crate::common::{
-    consts::{BYBIT_NAUTILUS_BROKER_ID, BYBIT_VENUE},
+    consts::{BITGET_DEMO_HEADER, BITGET_VENUE},
     credential::{Credential, credential_env_vars},
     enums::{
-        BybitAccountType, BybitBboSideType, BybitContractType, BybitEnvironment, BybitExecType,
-        BybitMarginMode, BybitOpenOnly, BybitOrderFilter, BybitOrderSide, BybitOrderSmpType,
-        BybitOrderType, BybitPositionIdx, BybitPositionMode, BybitProductType, BybitRepayStatus,
-        BybitTpSlMode,
+        BitgetAccountType, BitgetBboSideType, BitgetCancelType, BitgetContractType,
+        BitgetEnvironment, BitgetExecType, BitgetMarginMode, BitgetOpenOnly, BitgetOrderFilter,
+        BitgetOrderSide, BitgetOrderSmpType, BitgetOrderType, BitgetPositionIdx,
+        BitgetPositionMode, BitgetProductType, BitgetRepayStatus, BitgetTpSlMode,
     },
-    models::{BybitCursorListResponse, BybitErrorCheck, BybitResponseCheck},
+    models::{BitgetCursorListResponse, BitgetErrorCheck, BitgetResponseCheck},
     parse::{
-        bar_spec_to_bybit_interval, bybit_rejection_due_post_only, make_bybit_symbol,
-        map_time_in_force, parse_account_state, parse_fill_report, parse_funding_rate,
-        parse_inverse_instrument, parse_kline_bar, parse_linear_instrument,
-        parse_option_instrument, parse_order_status_report, parse_orderbook,
+        bar_spec_to_bitget_interval, make_bitget_symbol, map_time_in_force, parse_account_state,
+        parse_fill_report, parse_funding_rate, parse_inverse_instrument, parse_kline_bar,
+        parse_linear_instrument, parse_order_status_report, parse_orderbook,
         parse_position_status_report, parse_spot_instrument, parse_trade_tick, spot_leverage,
-        spot_market_unit, trigger_direction,
+        spot_market_unit, trigger_direction, validate_client_oid,
     },
     rate_limit::{
-        BYBIT_RATE_LIMIT_HEADER, BYBIT_RATE_LIMIT_RESET_HEADER, BYBIT_RATE_LIMIT_STATUS_HEADER,
-        BybitRateLimiter, batch_call_limit, batch_endpoint_limit, batch_send_limit, batch_weight,
-        category_from_payload,
+        BITGET_RATE_LIMIT_STATUS_HEADER, BitgetRateLimiter, batch_call_limit, batch_endpoint_limit,
+        batch_send_limit, batch_weight, category_from_payload,
     },
     retry::should_retry_http,
-    symbol::BybitSymbol,
-    urls::bybit_http_base_url,
+    symbol::BitgetSymbol,
+    urls::bitget_http_base_url,
 };
 
 const DEFAULT_RECV_WINDOW_MS: u64 = 5_000;
@@ -129,15 +132,44 @@ impl<T, E: Display> BuilderResultExt<T> for Result<T, E> {
     }
 }
 
-const BYBIT_INSTRUMENTS_INFO: &str = "/v5/market/instruments-info";
-const BYBIT_ORDER_REALTIME: &str = "/v5/order/realtime";
-const BYBIT_ORDER_HISTORY: &str = "/v5/order/history";
-const BYBIT_EXECUTION_LIST: &str = "/v5/execution/list";
-const BYBIT_POSITION_LIST: &str = "/v5/position/list";
+const BITGET_INSTRUMENTS_INFO: &str = "/api/v3/market/instruments";
+const BITGET_ORDER_REALTIME: &str = "/api/v3/trade/unfilled-orders";
+const BITGET_ORDER_HISTORY: &str = "/api/v3/trade/history-orders";
+const BITGET_EXECUTION_LIST: &str = "/api/v3/trade/fills";
+const BITGET_POSITION_LIST: &str = "/api/v3/position/current-position";
+const BITGET_ORDER_INFO: &str = "/api/v3/trade/order-info";
+const BITGET_STRATEGY_ORDER_REALTIME: &str = "/api/v3/trade/unfilled-strategy-orders";
+const BITGET_STRATEGY_ORDER_HISTORY: &str = "/api/v3/trade/history-strategy-orders";
+
+/// Bitget codes for an order that does not exist (or is no longer open).
+const BITGET_UNKNOWN_ORDER_CODES: [i32; 5] = [25204, 45057, 22001, 45055, 45134];
+
+/// Returns `true` when a Bitget `offTime` (`-1` or empty when unset) schedules a halt.
+fn is_scheduled_off(off_time: &str) -> bool {
+    off_time.parse::<i64>().is_ok_and(|ms| ms > 0)
+}
+
+/// Keeps only the orders matching the requested IDs (Bitget list endpoints take no ID filter).
+fn retain_order_ids(
+    orders: &mut Vec<BitgetOrder>,
+    order_id: Option<&str>,
+    order_link_id: Option<&str>,
+) {
+    if let Some(order_id) = order_id {
+        orders.retain(|order| order.order_id.as_str() == order_id);
+    } else if let Some(order_link_id) = order_link_id {
+        orders.retain(|order| order.order_link_id.as_str() == order_link_id);
+    }
+}
+
+/// Returns the error for an endpoint Bitget does not offer through this adapter.
+fn unsupported(feature: &str) -> BitgetHttpError {
+    BitgetHttpError::ValidationError(format!("{feature} is not supported by the Bitget adapter"))
+}
 
 /// Tracks the cursors one paginated walk has already followed.
 ///
-/// A venue can serve a page whose `nextPageCursor` addresses that same page. Requesting it
+/// A venue can serve a page whose `cursor` addresses that same page. Requesting it
 /// returns the same rows and the same cursor, so an empty cursor never arrives and the walk does
 /// not terminate. A cursor that does not advance, or that the walk has already followed, has no
 /// further page to offer.
@@ -184,52 +216,53 @@ impl CursorWalk {
     }
 }
 
-/// Legacy conservative Bybit REST quota retained for source compatibility.
-pub static BYBIT_REST_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
+/// Legacy conservative Bitget REST quota retained for source compatibility.
+pub static BITGET_REST_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
     Quota::per_second(NonZeroU32::new(10).expect("non-zero")).expect("valid constant")
 });
 
-/// Legacy Bybit repayment quota retained for source compatibility.
-pub static BYBIT_REPAY_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
+/// Legacy Bitget repayment quota retained for source compatibility.
+pub static BITGET_REPAY_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
     Quota::per_second(NonZeroU32::new(1).expect("non-zero")).expect("valid constant")
 });
 
-/// Raw HTTP client for low-level Bybit API operations.
+/// Raw HTTP client for low-level Bitget API operations.
 ///
-/// This client handles request/response operations with the Bybit API,
+/// This client handles request/response operations with the Bitget API,
 /// returning venue-specific response types. It does not parse to Nautilus domain types.
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
 #[derive(Clone)]
-pub struct BybitRawHttpClient {
+pub struct BitgetRawHttpClient {
     base_url: String,
     client: Arc<ArcSwap<HttpClient>>,
-    rate_limiter: BybitRateLimiter,
+    rate_limiter: BitgetRateLimiter,
     credential: Option<Credential>,
     recv_window_ms: u64,
+    demo_trading: Arc<AtomicBool>,
     timeout_secs: u64,
     proxy_url: Option<String>,
     session_generation: Arc<AtomicU64>,
-    retry_manager: RetryManager<BybitHttpError>,
+    retry_manager: RetryManager<BitgetHttpError>,
     cancellation_token: Arc<parking_lot::Mutex<CancellationToken>>,
 }
 
-impl Default for BybitRawHttpClient {
+impl Default for BitgetRawHttpClient {
     fn default() -> Self {
         Self::new(None, 60, 3, 1000, 10_000, DEFAULT_RECV_WINDOW_MS, None)
-            .expect("Failed to create default BybitRawHttpClient")
+            .expect("Failed to create default BitgetRawHttpClient")
     }
 }
 
-impl Debug for BybitRawHttpClient {
+impl Debug for BitgetRawHttpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct(stringify!(BybitRawHttpClient))
+        f.debug_struct(stringify!(BitgetRawHttpClient))
             .field("base_url", &self.base_url)
             .field("has_credentials", &self.credential.is_some())
             .field("recv_window_ms", &self.recv_window_ms)
@@ -237,7 +270,7 @@ impl Debug for BybitRawHttpClient {
     }
 }
 
-impl BybitRawHttpClient {
+impl BitgetRawHttpClient {
     /// Cancels all pending HTTP requests.
     pub fn cancel_all_requests(&self) {
         self.cancellation_token.lock().cancel();
@@ -255,7 +288,7 @@ impl BybitRawHttpClient {
         self.cancellation_token.lock().clone()
     }
 
-    /// Creates a new [`BybitRawHttpClient`] using the default Bybit HTTP URL.
+    /// Creates a new [`BitgetRawHttpClient`] using the default Bitget HTTP URL.
     ///
     /// # Errors
     ///
@@ -268,7 +301,7 @@ impl BybitRawHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
-    ) -> Result<Self, BybitHttpError> {
+    ) -> Result<Self, BitgetHttpError> {
         let retry_config = RetryConfig {
             max_retries,
             initial_delay_ms: retry_delay_ms,
@@ -281,9 +314,9 @@ impl BybitRawHttpClient {
         };
 
         let retry_manager = RetryManager::new(retry_config);
-        let base_url =
-            base_url.unwrap_or_else(|| bybit_http_base_url(BybitEnvironment::Mainnet).to_string());
-        let rate_limiter = BybitRateLimiter::for_http(&base_url, None, proxy_url.as_deref());
+        let base_url = base_url
+            .unwrap_or_else(|| bitget_http_base_url(BitgetEnvironment::Mainnet).to_string());
+        let rate_limiter = BitgetRateLimiter::for_http(&base_url, None, proxy_url.as_deref());
         let client = Self::build_http_client(timeout_secs, proxy_url.clone())?;
         let session_generation = rate_limiter.http_session_generation();
 
@@ -293,6 +326,7 @@ impl BybitRawHttpClient {
             rate_limiter,
             credential: None,
             recv_window_ms,
+            demo_trading: Arc::new(AtomicBool::new(false)),
             timeout_secs,
             proxy_url,
             session_generation: Arc::new(AtomicU64::new(session_generation)),
@@ -301,7 +335,7 @@ impl BybitRawHttpClient {
         })
     }
 
-    /// Creates a new [`BybitRawHttpClient`] configured with credentials.
+    /// Creates a new [`BitgetRawHttpClient`] configured with credentials.
     ///
     /// # Errors
     ///
@@ -310,6 +344,7 @@ impl BybitRawHttpClient {
     pub fn with_credentials(
         api_key: String,
         api_secret: String,
+        api_passphrase: String,
         base_url: Option<String>,
         timeout_secs: u64,
         max_retries: u32,
@@ -317,7 +352,7 @@ impl BybitRawHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
-    ) -> Result<Self, BybitHttpError> {
+    ) -> Result<Self, BitgetHttpError> {
         let retry_config = RetryConfig {
             max_retries,
             initial_delay_ms: retry_delay_ms,
@@ -330,11 +365,14 @@ impl BybitRawHttpClient {
         };
 
         let retry_manager = RetryManager::new(retry_config);
-        let base_url =
-            base_url.unwrap_or_else(|| bybit_http_base_url(BybitEnvironment::Mainnet).to_string());
-        let credential = Credential::new(api_key, api_secret);
-        let rate_limiter =
-            BybitRateLimiter::for_http(&base_url, Some(credential.api_key()), proxy_url.as_deref());
+        let base_url = base_url
+            .unwrap_or_else(|| bitget_http_base_url(BitgetEnvironment::Mainnet).to_string());
+        let credential = Credential::new(api_key, api_secret, api_passphrase);
+        let rate_limiter = BitgetRateLimiter::for_http(
+            &base_url,
+            Some(credential.api_key()),
+            proxy_url.as_deref(),
+        );
         let client = Self::build_http_client(timeout_secs, proxy_url.clone())?;
         let session_generation = rate_limiter.http_session_generation();
 
@@ -344,6 +382,7 @@ impl BybitRawHttpClient {
             rate_limiter,
             credential: Some(credential),
             recv_window_ms,
+            demo_trading: Arc::new(AtomicBool::new(false)),
             timeout_secs,
             proxy_url,
             session_generation: Arc::new(AtomicU64::new(session_generation)),
@@ -352,13 +391,15 @@ impl BybitRawHttpClient {
         })
     }
 
-    /// Creates a new [`BybitRawHttpClient`] with environment variable credential resolution.
+    /// Creates a new [`BitgetRawHttpClient`] with environment variable credential resolution.
     ///
-    /// If `api_key` or `api_secret` are not provided, they will be loaded from
+    /// If `api_key`, `api_secret` or `api_passphrase` are not provided, they will be loaded from
     /// environment variables based on the environment flags:
-    /// - Demo: `BYBIT_DEMO_API_KEY`, `BYBIT_DEMO_API_SECRET`
-    /// - Testnet: `BYBIT_TESTNET_API_KEY`, `BYBIT_TESTNET_API_SECRET`
-    /// - Mainnet: `BYBIT_API_KEY`, `BYBIT_API_SECRET`
+    /// - Demo (and testnet, which Bitget does not have): `BITGET_DEMO_API_KEY`,
+    ///   `BITGET_DEMO_API_SECRET`, `BITGET_DEMO_API_PASSPHRASE`
+    /// - Mainnet: `BITGET_API_KEY`, `BITGET_API_SECRET`, `BITGET_API_PASSPHRASE`
+    ///
+    /// Demo trading sends the `paptrading: 1` header on every request.
     ///
     /// # Errors
     ///
@@ -367,6 +408,7 @@ impl BybitRawHttpClient {
     pub fn new_with_env(
         api_key: Option<String>,
         api_secret: Option<String>,
+        api_passphrase: Option<String>,
         base_url: Option<String>,
         demo: bool,
         testnet: bool,
@@ -376,24 +418,26 @@ impl BybitRawHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
-    ) -> Result<Self, BybitHttpError> {
+    ) -> Result<Self, BitgetHttpError> {
         let environment = if demo {
-            BybitEnvironment::Demo
+            BitgetEnvironment::Demo
         } else if testnet {
-            BybitEnvironment::Testnet
+            BitgetEnvironment::Testnet
         } else {
-            BybitEnvironment::Mainnet
+            BitgetEnvironment::Mainnet
         };
         let base_url =
-            Some(base_url.unwrap_or_else(|| bybit_http_base_url(environment).to_string()));
-        let (key_var, secret_var) = credential_env_vars(environment);
+            Some(base_url.unwrap_or_else(|| bitget_http_base_url(environment).to_string()));
+        let (key_var, secret_var, passphrase_var) = credential_env_vars(environment);
         let key = get_or_env_var_opt(api_key, key_var);
         let secret = get_or_env_var_opt(api_secret, secret_var);
+        let passphrase = get_or_env_var_opt(api_passphrase, passphrase_var);
 
-        if let (Some(k), Some(s)) = (key, secret) {
+        let client = if let (Some(k), Some(s), Some(p)) = (key, secret, passphrase) {
             Self::with_credentials(
                 k,
                 s,
+                p,
                 base_url,
                 timeout_secs,
                 max_retries,
@@ -401,7 +445,7 @@ impl BybitRawHttpClient {
                 retry_delay_max_ms,
                 recv_window_ms,
                 proxy_url,
-            )
+            )?
         } else {
             Self::new(
                 base_url,
@@ -411,40 +455,50 @@ impl BybitRawHttpClient {
                 retry_delay_max_ms,
                 recv_window_ms,
                 proxy_url,
-            )
-        }
+            )?
+        };
+        client.set_demo_trading(environment != BitgetEnvironment::Mainnet);
+        Ok(client)
+    }
+
+    /// Routes requests to Bitget demo (paper) trading by sending `paptrading: 1`.
+    ///
+    /// Bitget serves demo trading from the mainnet host, selected by this header.
+    pub fn set_demo_trading(&self, demo_trading: bool) {
+        self.demo_trading.store(demo_trading, Ordering::Release);
+    }
+
+    /// Returns `true` if requests are routed to Bitget demo trading.
+    #[must_use]
+    pub fn is_demo_trading(&self) -> bool {
+        self.demo_trading.load(Ordering::Acquire)
     }
 
     fn default_headers() -> HashMap<String, String> {
         let mut headers: HashMap<String, String> =
             create_standard_nautilus_headers().into_iter().collect();
-        headers.insert(
-            "X-Referer".to_string(),
-            BYBIT_NAUTILUS_BROKER_ID.to_string(),
-        );
+        headers.insert("locale".to_string(), "en-US".to_string());
         headers
     }
 
     fn build_http_client(
         timeout_secs: u64,
         proxy_url: Option<String>,
-    ) -> Result<HttpClient, BybitHttpError> {
+    ) -> Result<HttpClient, BitgetHttpError> {
         HttpClient::builder()
             .redirect_policy(HttpRedirectPolicy::Reject)
             .headers(Self::default_headers())
-            .header_keys(vec![
-                BYBIT_RATE_LIMIT_HEADER.to_string(),
-                BYBIT_RATE_LIMIT_STATUS_HEADER.to_string(),
-                BYBIT_RATE_LIMIT_RESET_HEADER.to_string(),
-            ])
+            .header_keys(vec![BITGET_RATE_LIMIT_STATUS_HEADER.to_string()])
             .timeout_secs(timeout_secs)
             .maybe_proxy_url(proxy_url)
             .rate_limiters(Vec::new())
             .build()
-            .map_err(|e| BybitHttpError::NetworkError(format!("Failed to create HTTP client: {e}")))
+            .map_err(|e| {
+                BitgetHttpError::NetworkError(format!("Failed to create HTTP client: {e}"))
+            })
     }
 
-    fn refresh_http_session(&self, generation: u64) -> Result<(), BybitHttpError> {
+    fn refresh_http_session(&self, generation: u64) -> Result<(), BitgetHttpError> {
         let current = self.session_generation.load(Ordering::Acquire);
         if current == generation {
             return Ok(());
@@ -459,12 +513,13 @@ impl BybitRawHttpClient {
     fn request_rate_limit(
         endpoint: &str,
         payload: Option<&str>,
-    ) -> (Option<BybitProductType>, u32) {
+    ) -> (Option<BitgetProductType>, u32) {
         let category = category_from_payload(payload);
-        let weight = if endpoint.ends_with("-batch") {
+        let weight = if endpoint.contains("batch") {
+            // Bitget batch bodies are bare JSON arrays of entries
             let order_count = payload
                 .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-                .and_then(|value| value.get("request")?.as_array().map(Vec::len))
+                .and_then(|value| value.as_array().map(Vec::len))
                 .unwrap_or(1);
             category.map_or(1, |category| batch_weight(category, order_count))
         } else {
@@ -476,67 +531,60 @@ impl BybitRawHttpClient {
     fn observe_rate_limit_headers(
         &self,
         endpoint: &str,
-        category: Option<BybitProductType>,
+        category: Option<BitgetProductType>,
         headers: &HashMap<String, String>,
     ) {
-        let Some(limit) = headers
-            .get(BYBIT_RATE_LIMIT_HEADER)
-            .and_then(|value| value.parse::<u32>().ok())
-        else {
-            return;
-        };
+        // Bitget reports only the remaining quota of the endpoint
         let Some(remaining) = headers
-            .get(BYBIT_RATE_LIMIT_STATUS_HEADER)
+            .get(BITGET_RATE_LIMIT_STATUS_HEADER)
             .and_then(|value| value.parse::<u32>().ok())
         else {
             return;
         };
-        let reset_timestamp_ms = headers
-            .get(BYBIT_RATE_LIMIT_RESET_HEADER)
-            .and_then(|value| value.parse::<i64>().ok());
         self.rate_limiter
-            .observe_account(endpoint, category, limit, remaining, reset_timestamp_ms);
+            .observe_remaining(endpoint, category, remaining);
     }
 
+    // Bitget answers an exceeded quota with HTTP 429
     fn is_rate_limit_403(status: u16, body: &str) -> bool {
-        status == 403 && body.to_ascii_lowercase().contains("access too frequent")
+        let _ = body;
+        status == 429
     }
 
     fn sign_request(
         &self,
         timestamp: &str,
-        params: Option<&str>,
-    ) -> Result<HashMap<String, String>, BybitHttpError> {
+        method: &str,
+        request_path: &str,
+        body: Option<&str>,
+    ) -> Result<HashMap<String, String>, BitgetHttpError> {
         let credential = self
             .credential
             .as_ref()
-            .ok_or(BybitHttpError::MissingCredentials)?;
+            .ok_or(BitgetHttpError::MissingCredentials)?;
 
-        let signature = credential.sign_with_payload(timestamp, self.recv_window_ms, params);
+        let signature = credential.sign_with_payload(timestamp, method, request_path, body);
 
         let mut headers = HashMap::new();
+        headers.insert("ACCESS-KEY".to_string(), credential.api_key().to_string());
+        headers.insert("ACCESS-SIGN".to_string(), signature);
+        headers.insert("ACCESS-TIMESTAMP".to_string(), timestamp.to_string());
         headers.insert(
-            "X-BAPI-API-KEY".to_string(),
-            credential.api_key().to_string(),
-        );
-        headers.insert("X-BAPI-TIMESTAMP".to_string(), timestamp.to_string());
-        headers.insert("X-BAPI-SIGN".to_string(), signature);
-        headers.insert(
-            "X-BAPI-RECV-WINDOW".to_string(),
-            self.recv_window_ms.to_string(),
+            "ACCESS-PASSPHRASE".to_string(),
+            credential.api_passphrase().to_string(),
         );
 
         Ok(headers)
     }
 
-    async fn send_request<T: DeserializeOwned + BybitResponseCheck, P: Serialize>(
+    async fn send_request<T: DeserializeOwned + BitgetResponseCheck, P: Serialize>(
         &self,
         method: Method,
         endpoint: &str,
         params: Option<&P>,
         body: Option<Vec<u8>>,
         authenticate: bool,
-    ) -> Result<T, BybitHttpError> {
+    ) -> Result<T, BitgetHttpError> {
         let endpoint = endpoint.to_string();
         let url = format!("{}{endpoint}", self.base_url);
         let method_clone = method.clone();
@@ -548,7 +596,7 @@ impl BybitRawHttpClient {
                 .map(serde_urlencoded::to_string)
                 .transpose()
                 .map_err(|e| {
-                    BybitHttpError::JsonError(format!("Failed to serialize params: {e}"))
+                    BitgetHttpError::JsonError(format!("Failed to serialize params: {e}"))
                 })?
         } else {
             None
@@ -578,6 +626,15 @@ impl BybitRawHttpClient {
                     body.as_ref()
                         .and_then(|body| std::str::from_utf8(body).ok())
                 };
+                let request_path = match params_str.as_deref() {
+                    Some(query) if !query.is_empty() => format!("{endpoint}?{query}"),
+                    _ => endpoint.clone(),
+                };
+                let sign_body = if method == Method::GET {
+                    None
+                } else {
+                    sign_payload
+                };
                 let (category, weight) = Self::request_rate_limit(&endpoint, sign_payload);
 
                 let generation = self.rate_limiter.http_session_generation();
@@ -585,7 +642,7 @@ impl BybitRawHttpClient {
                 self.rate_limiter
                     .acquire_http(&endpoint, category, weight, authenticate)
                     .await
-                    .map_err(BybitHttpError::ValidationError)?;
+                    .map_err(BitgetHttpError::ValidationError)?;
                 let generation = self.rate_limiter.http_session_generation();
                 self.refresh_http_session(generation)?;
 
@@ -593,8 +650,13 @@ impl BybitRawHttpClient {
 
                 if authenticate {
                     let timestamp = get_atomic_clock_realtime().get_time_ms().to_string();
-                    let auth_headers = self.sign_request(&timestamp, sign_payload)?;
+                    let auth_headers =
+                        self.sign_request(&timestamp, method.as_str(), &request_path, sign_body)?;
                     headers.extend(auth_headers);
+                }
+
+                if self.is_demo_trading() {
+                    headers.insert(BITGET_DEMO_HEADER.to_string(), "1".to_string());
                 }
 
                 if method == Method::POST || method == Method::PUT {
@@ -615,7 +677,20 @@ impl BybitRawHttpClient {
                         let generation = self.rate_limiter.reset_http_sessions();
                         self.refresh_http_session(generation)?;
                     }
-                    return Err(BybitHttpError::UnexpectedStatus {
+
+                    // Bitget reports business errors (e.g. 25204 unknown order) with HTTP 400 and
+                    // the regular `{code, msg}` envelope
+                    if response.status.as_u16() != 429
+                        && let Ok(error_check) =
+                            serde_json::from_slice::<BitgetErrorCheck>(&response.body)
+                        && error_check.ret_code != 0
+                    {
+                        return Err(BitgetHttpError::BitgetError {
+                            error_code: error_check.ret_code as i32,
+                            message: error_check.ret_msg,
+                        });
+                    }
+                    return Err(BitgetHttpError::UnexpectedStatus {
                         status: response.status.as_u16(),
                         body,
                     });
@@ -626,7 +701,7 @@ impl BybitRawHttpClient {
                     Ok(result) => {
                         // Check for API-level errors
                         if result.ret_code() != 0 {
-                            return Err(BybitHttpError::BybitError {
+                            return Err(BitgetHttpError::BitgetError {
                                 error_code: result.ret_code() as i32,
                                 message: result.ret_msg().to_string(),
                             });
@@ -634,30 +709,30 @@ impl BybitRawHttpClient {
                         Ok(result)
                     }
                     Err(json_err) => {
-                        // Deserialization failed - check if it's a Bybit error response
+                        // Deserialization failed - check if it's a Bitget error response
                         // (error responses often have result: null which fails typed deserialization)
                         if let Ok(error_check) =
-                            serde_json::from_slice::<BybitErrorCheck>(&response.body)
+                            serde_json::from_slice::<BitgetErrorCheck>(&response.body)
                             && error_check.ret_code != 0
                         {
-                            return Err(BybitHttpError::BybitError {
+                            return Err(BitgetHttpError::BitgetError {
                                 error_code: error_check.ret_code as i32,
                                 message: error_check.ret_msg,
                             });
                         }
-                        // Not a Bybit error, propagate the JSON parse error
+                        // Not a Bitget error, propagate the JSON parse error
                         Err(json_err.into())
                     }
                 }
             }
         };
 
-        let create_error = |error: RetryError| -> BybitHttpError {
+        let create_error = |error: RetryError| -> BitgetHttpError {
             match error {
                 RetryError::Canceled => {
-                    BybitHttpError::Canceled("Adapter disconnecting or shutting down".to_string())
+                    BitgetHttpError::Canceled("Adapter disconnecting or shutting down".to_string())
                 }
-                error => BybitHttpError::NetworkError(error.to_string()),
+                error => BitgetHttpError::NetworkError(error.to_string()),
             }
         };
 
@@ -676,9 +751,9 @@ impl BybitRawHttpClient {
     }
 
     #[cfg(test)]
-    fn build_path<S: Serialize>(base: &str, params: &S) -> Result<String, BybitHttpError> {
+    fn build_path<S: Serialize>(base: &str, params: &S) -> Result<String, BitgetHttpError> {
         let query = serde_urlencoded::to_string(params)
-            .map_err(|e| BybitHttpError::JsonError(e.to_string()))?;
+            .map_err(|e| BitgetHttpError::JsonError(e.to_string()))?;
 
         if query.is_empty() {
             Ok(base.to_owned())
@@ -687,7 +762,7 @@ impl BybitRawHttpClient {
         }
     }
 
-    /// Fetches the current server time from Bybit.
+    /// Fetches the current server time from Bitget.
     ///
     /// # Errors
     ///
@@ -695,13 +770,13 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/time>
-    pub async fn get_server_time(&self) -> Result<BybitServerTimeResponse, BybitHttpError> {
-        self.send_request::<_, ()>(Method::GET, "/v5/market/time", None, None, false)
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
+    pub async fn get_server_time(&self) -> Result<BitgetServerTimeResponse, BitgetHttpError> {
+        self.send_request::<_, ()>(Method::GET, "/api/v3/market/time", None, None, false)
             .await
     }
 
-    /// Fetches instrument information from Bybit for a given product category.
+    /// Fetches instrument information from Bitget for a given product category.
     ///
     /// # Errors
     ///
@@ -709,14 +784,14 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
-    pub async fn get_instruments<T: DeserializeOwned + BybitResponseCheck>(
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
+    pub async fn get_instruments<T: DeserializeOwned + BitgetResponseCheck>(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<T, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<T, BitgetHttpError> {
         self.send_request(
             Method::GET,
-            BYBIT_INSTRUMENTS_INFO,
+            BITGET_INSTRUMENTS_INFO,
             Some(params),
             None,
             false,
@@ -724,7 +799,7 @@ impl BybitRawHttpClient {
         .await
     }
 
-    /// Fetches spot instrument information from Bybit.
+    /// Fetches spot instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -732,15 +807,15 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_spot(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentSpotResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentSpotResponse, BitgetHttpError> {
         self.get_instruments(params).await
     }
 
-    /// Fetches linear instrument information from Bybit.
+    /// Fetches linear instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -748,15 +823,15 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_linear(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentLinearResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentLinearResponse, BitgetHttpError> {
         self.get_instruments(params).await
     }
 
-    /// Fetches inverse instrument information from Bybit.
+    /// Fetches inverse instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -764,15 +839,15 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_inverse(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentInverseResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentInverseResponse, BitgetHttpError> {
         self.get_instruments(params).await
     }
 
-    /// Fetches option instrument information from Bybit.
+    /// Fetches option instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -780,15 +855,15 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_option(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentOptionResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentOptionResponse, BitgetHttpError> {
         self.get_instruments(params).await
     }
 
-    /// Fetches kline/candlestick data from Bybit.
+    /// Fetches kline/candlestick data from Bitget.
     ///
     /// # Errors
     ///
@@ -796,16 +871,22 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/kline>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_klines(
         &self,
-        params: &BybitKlinesParams,
-    ) -> Result<BybitKlinesResponse, BybitHttpError> {
-        self.send_request(Method::GET, "/v5/market/kline", Some(params), None, false)
-            .await
+        params: &BitgetKlinesParams,
+    ) -> Result<BitgetKlinesResponse, BitgetHttpError> {
+        self.send_request(
+            Method::GET,
+            "/api/v3/market/candles",
+            Some(params),
+            None,
+            false,
+        )
+        .await
     }
 
-    /// Fetches recent trades from Bybit.
+    /// Fetches recent trades from Bitget.
     ///
     /// # Errors
     ///
@@ -813,14 +894,14 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/recent-trade>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_recent_trades(
         &self,
-        params: &BybitTradesParams,
-    ) -> Result<BybitTradesResponse, BybitHttpError> {
+        params: &BitgetTradesParams,
+    ) -> Result<BitgetTradesResponse, BitgetHttpError> {
         self.send_request(
             Method::GET,
-            "/v5/market/recent-trade",
+            "/api/v3/market/fills",
             Some(params),
             None,
             false,
@@ -828,7 +909,7 @@ impl BybitRawHttpClient {
         .await
     }
 
-    /// Fetches funding data from Bybit.
+    /// Fetches funding data from Bitget.
     ///
     /// # Errors
     ///
@@ -836,14 +917,14 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/history-fund-rate>
+    /// - <https://www.bitget.com/docs/catalog/market/derivatives>
     pub async fn get_funding_history(
         &self,
-        params: &BybitFundingParams,
-    ) -> Result<BybitFundingResponse, BybitHttpError> {
+        params: &BitgetFundingParams,
+    ) -> Result<BitgetFundingResponse, BitgetHttpError> {
         self.send_request(
             Method::GET,
-            "/v5/market/funding/history",
+            "/api/v3/market/history-fund-rate",
             Some(params),
             None,
             false,
@@ -851,7 +932,7 @@ impl BybitRawHttpClient {
         .await
     }
 
-    /// Fetches orderbook from Bybit.
+    /// Fetches orderbook from Bitget.
     ///
     /// # Errors
     ///
@@ -859,14 +940,14 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/orderbook>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_orderbook(
         &self,
-        params: &BybitOrderbookParams,
-    ) -> Result<BybitOrderbookResponse, BybitHttpError> {
+        params: &BitgetOrderbookParams,
+    ) -> Result<BitgetOrderbookResponse, BitgetHttpError> {
         self.send_request(
             Method::GET,
-            "/v5/market/orderbook",
+            "/api/v3/market/orderbook",
             Some(params),
             None,
             false,
@@ -886,22 +967,22 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/order/open-order>
+    /// - <https://www.bitget.com/docs/catalog/trading/order-management>
     #[expect(clippy::too_many_arguments)]
     pub async fn get_open_orders(
         &self,
-        category: BybitProductType,
+        category: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<String>,
         settle_coin: Option<String>,
         order_id: Option<String>,
         order_link_id: Option<String>,
-        open_only: Option<BybitOpenOnly>,
-        order_filter: Option<BybitOrderFilter>,
+        open_only: Option<BitgetOpenOnly>,
+        order_filter: Option<BitgetOrderFilter>,
         limit: Option<u32>,
         cursor: Option<String>,
-    ) -> Result<BybitOpenOrdersResponse, BybitHttpError> {
-        let mut builder = BybitOpenOrdersParamsBuilder::default();
+    ) -> Result<BitgetOpenOrdersResponse, BitgetHttpError> {
+        let mut builder = BitgetOpenOrdersParamsBuilder::default();
         builder.category(category);
 
         if let Some(s) = symbol {
@@ -942,10 +1023,144 @@ impl BybitRawHttpClient {
 
         let params = builder
             .build()
-            .expect("Failed to build BybitOpenOrdersParams");
+            .expect("Failed to build BitgetOpenOrdersParams");
 
-        self.send_request(Method::GET, BYBIT_ORDER_REALTIME, Some(&params), None, true)
-            .await
+        self.get_open_orders_with(&params).await
+    }
+
+    /// Fetches open (or recently closed) orders for prepared parameters.
+    ///
+    /// Bitget has no combined open-order query: a single order comes from `order-info`,
+    /// recent closed orders from the history endpoints and conditional orders from the
+    /// strategy-order endpoints (which take no order ID filter, so it is applied here).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn get_open_orders_with(
+        &self,
+        params: &BitgetOpenOrdersParams,
+    ) -> Result<BitgetOpenOrdersResponse, BitgetHttpError> {
+        let is_strategy = params
+            .order_filter
+            .is_some_and(|filter| filter != BitgetOrderFilter::Order);
+
+        if !is_strategy && (params.order_id.is_some() || params.order_link_id.is_some()) {
+            return self
+                .get_order_info(
+                    params.category,
+                    params.order_id.clone(),
+                    params.order_link_id.clone(),
+                )
+                .await;
+        }
+
+        let endpoint = match (params.open_only, is_strategy) {
+            (Some(BitgetOpenOnly::ClosedRecent), false) => BITGET_ORDER_HISTORY,
+            (Some(BitgetOpenOnly::ClosedRecent), true) => BITGET_STRATEGY_ORDER_HISTORY,
+            (_, false) => BITGET_ORDER_REALTIME,
+            (_, true) => BITGET_STRATEGY_ORDER_REALTIME,
+        };
+
+        let mut response: BitgetOpenOrdersResponse = self
+            .send_request(Method::GET, endpoint, Some(params), None, true)
+            .await?;
+        retain_order_ids(
+            &mut response.result.list,
+            params.order_id.as_deref(),
+            params.order_link_id.as_deref(),
+        );
+        Ok(response)
+    }
+
+    /// Fetches closed orders for prepared parameters (strategy history for conditional orders).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn get_order_history_with(
+        &self,
+        params: &BitgetOrderHistoryParams,
+    ) -> Result<BitgetOrderHistoryResponse, BitgetHttpError> {
+        let is_strategy = params
+            .order_filter
+            .is_some_and(|filter| filter != BitgetOrderFilter::Order);
+        let endpoint = if is_strategy {
+            BITGET_STRATEGY_ORDER_HISTORY
+        } else {
+            BITGET_ORDER_HISTORY
+        };
+
+        let mut response: BitgetOrderHistoryResponse = self
+            .send_request(Method::GET, endpoint, Some(params), None, true)
+            .await?;
+        retain_order_ids(
+            &mut response.result.list,
+            params.order_id.as_deref(),
+            params.order_link_id.as_deref(),
+        );
+        Ok(response)
+    }
+
+    /// Fetches one order by venue or client order ID (`GET /api/v3/trade/order-info`),
+    /// returned as a one-element page (empty when Bitget no longer knows the order).
+    ///
+    /// Bitget keeps cancelled API orders for only two hours.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn get_order_info(
+        &self,
+        category: BitgetProductType,
+        order_id: Option<String>,
+        order_link_id: Option<String>,
+    ) -> Result<BitgetOpenOrdersResponse, BitgetHttpError> {
+        let mut params: Vec<(&str, String)> = Vec::with_capacity(1);
+        if let Some(order_id) = order_id {
+            params.push(("orderId", order_id));
+        } else if let Some(order_link_id) = order_link_id {
+            params.push(("clientOid", order_link_id));
+        }
+
+        let result = self
+            .send_request::<crate::common::models::BitgetResponse<BitgetOrder>, _>(
+                Method::GET,
+                BITGET_ORDER_INFO,
+                Some(&params),
+                None,
+                true,
+            )
+            .await;
+
+        let (order, ret_code, ret_msg, time) = match result {
+            Ok(response) => (
+                Some(response.result),
+                response.ret_code,
+                response.ret_msg,
+                response.time,
+            ),
+            Err(BitgetHttpError::BitgetError {
+                error_code,
+                message,
+            }) if BITGET_UNKNOWN_ORDER_CODES.contains(&error_code) => {
+                log::debug!("Order not found on Bitget: {error_code} {message}");
+                (None, 0, message, None)
+            }
+            Err(e) => return Err(e),
+        };
+
+        Ok(crate::common::models::BitgetResponse {
+            ret_code,
+            ret_msg,
+            result: crate::common::models::BitgetCursorList {
+                list: order.into_iter().collect(),
+                next_page_cursor: None,
+                category: Some(category),
+            },
+            ret_ext_info: None,
+            time,
+        })
     }
 
     /// Places a new order (requires authentication).
@@ -956,14 +1171,80 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/order/create-order>
+    /// - <https://www.bitget.com/docs/catalog/trading/order-management>
     pub async fn place_order(
         &self,
         request: &serde_json::Value,
-    ) -> Result<BybitPlaceOrderResponse, BybitHttpError> {
+    ) -> Result<BitgetPlaceOrderResponse, BitgetHttpError> {
         let body = serde_json::to_vec(request)?;
-        self.send_request::<_, ()>(Method::POST, "/v5/order/create", None, Some(body), true)
-            .await
+        self.send_request::<_, ()>(
+            Method::POST,
+            "/api/v3/trade/place-order",
+            None,
+            Some(body),
+            true,
+        )
+        .await
+    }
+
+    /// Places a conditional (strategy) order (requires authentication).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn place_strategy_order(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<BitgetPlaceOrderResponse, BitgetHttpError> {
+        let body = serde_json::to_vec(request)?;
+        self.send_request::<_, ()>(
+            Method::POST,
+            "/api/v3/trade/place-strategy-order",
+            None,
+            Some(body),
+            true,
+        )
+        .await
+    }
+
+    /// Cancels a conditional (strategy) order (requires authentication).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn cancel_strategy_order(
+        &self,
+        params: &BitgetCancelStrategyOrderParams,
+    ) -> Result<BitgetPlaceOrderResponse, BitgetHttpError> {
+        let body = serde_json::to_vec(params)?;
+        self.send_request::<_, ()>(
+            Method::POST,
+            "/api/v3/trade/cancel-strategy-order",
+            None,
+            Some(body),
+            true,
+        )
+        .await
+    }
+
+    /// Modifies a conditional (strategy) order (requires authentication).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn modify_strategy_order(
+        &self,
+        params: &BitgetModifyStrategyOrderParams,
+    ) -> Result<BitgetPlaceOrderResponse, BitgetHttpError> {
+        let body = serde_json::to_vec(params)?;
+        self.send_request::<_, ()>(
+            Method::POST,
+            "/api/v3/trade/modify-strategy-order",
+            None,
+            Some(body),
+            true,
+        )
+        .await
     }
 
     /// Fetches wallet balance (requires authentication).
@@ -974,14 +1255,14 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/wallet-balance>
+    /// - <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn get_wallet_balance(
         &self,
-        params: &BybitWalletBalanceParams,
-    ) -> Result<BybitWalletBalanceResponse, BybitHttpError> {
+        params: &BitgetWalletBalanceParams,
+    ) -> Result<BitgetWalletBalanceResponse, BitgetHttpError> {
         self.send_request(
             Method::GET,
-            "/v5/account/wallet-balance",
+            "/api/v3/account/assets",
             Some(params),
             None,
             true,
@@ -997,9 +1278,9 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/account-info>
-    pub async fn get_account_info(&self) -> Result<BybitAccountInfoResponse, BybitHttpError> {
-        self.send_request::<_, ()>(Method::GET, "/v5/account/info", None, None, true)
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
+    pub async fn get_account_info(&self) -> Result<BitgetAccountInfoResponse, BitgetHttpError> {
+        self.send_request::<_, ()>(Method::GET, "/api/v3/account/settings", None, None, true)
             .await
     }
 
@@ -1008,12 +1289,10 @@ impl BybitRawHttpClient {
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/apikey-info>
-    pub async fn get_account_details(&self) -> Result<BybitAccountDetailsResponse, BybitHttpError> {
-        self.send_request::<_, ()>(Method::GET, "/v5/user/query-api", None, None, true)
+    pub async fn get_account_details(
+        &self,
+    ) -> Result<BitgetAccountDetailsResponse, BitgetHttpError> {
+        self.send_request::<_, ()>(Method::GET, "/api/v3/account/info", None, None, true)
             .await
     }
 
@@ -1022,23 +1301,13 @@ impl BybitRawHttpClient {
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/modify-sub-apikey>
     pub async fn update_sub_api_key(
         &self,
-        params: &BybitUpdateSubApiParams,
-    ) -> Result<BybitUpdateSubApiResponse, BybitHttpError> {
-        let body = serde_json::to_vec(params)?;
-        self.send_request::<_, ()>(
-            Method::POST,
-            "/v5/user/update-sub-api",
-            None,
-            Some(body),
-            true,
-        )
-        .await
+        params: &BitgetUpdateSubApiParams,
+    ) -> Result<BitgetUpdateSubApiResponse, BitgetHttpError> {
+        // `/api/v3/user/update-sub-api` needs a master key and its schema is unverified
+        let _ = params;
+        Err(unsupported("Sub-account API key update"))
     }
 
     /// Modifies the master API key that issued the request (requires authentication).
@@ -1046,17 +1315,13 @@ impl BybitRawHttpClient {
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/modify-master-apikey>
     pub async fn update_master_api_key(
         &self,
-        params: &BybitUpdateMasterApiParams,
-    ) -> Result<BybitUpdateMasterApiResponse, BybitHttpError> {
-        let body = serde_json::to_vec(params)?;
-        self.send_request::<_, ()>(Method::POST, "/v5/user/update-api", None, Some(body), true)
-            .await
+        params: &BitgetUpdateMasterApiParams,
+    ) -> Result<BitgetUpdateMasterApiResponse, BitgetHttpError> {
+        // Bitget has no endpoint to modify the calling master API key
+        let _ = params;
+        Err(unsupported("Master API key update"))
     }
 
     /// Fetches the sub-account list (up to 1000 rows, non-paginated).
@@ -1064,53 +1329,37 @@ impl BybitRawHttpClient {
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/subuid-list>
-    pub async fn get_sub_members(&self) -> Result<BybitSubMembersResponse, BybitHttpError> {
-        self.send_request::<_, ()>(Method::GET, "/v5/user/query-sub-members", None, None, true)
-            .await
+    pub async fn get_sub_members(&self) -> Result<BitgetSubMembersResponse, BitgetHttpError> {
+        // `/api/v3/user/sub-list` needs a master key and its schema is unverified
+        Err(unsupported("Sub-account listing"))
     }
 
-    /// Fetches a cursor-paginated sub-account list (`/v5/user/submembers`).
+    /// Fetches a cursor-paginated sub-account list (`/api/v3/user/sub-list`).
     ///
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/page-subuid>
     pub async fn get_sub_members_paged(
         &self,
-        params: &BybitSubMembersPageParams,
-    ) -> Result<BybitSubMembersPagedResponse, BybitHttpError> {
-        self.send_request(Method::GET, "/v5/user/submembers", Some(params), None, true)
-            .await
+        params: &BitgetSubMembersPageParams,
+    ) -> Result<BitgetSubMembersPagedResponse, BitgetHttpError> {
+        // `/api/v3/user/sub-list` needs a master key and its schema is unverified
+        let _ = params;
+        Err(unsupported("Sub-account listing"))
     }
 
-    /// Fetches fund-custodial sub-accounts (`/v5/user/escrow_sub_members`).
+    /// Fetches fund-custodial sub-accounts (`/api/v3/user/sub-list`).
     ///
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/fund-subuid-list>
     pub async fn get_escrow_sub_members(
         &self,
-        params: &BybitSubMembersPageParams,
-    ) -> Result<BybitEscrowSubMembersResponse, BybitHttpError> {
-        self.send_request(
-            Method::GET,
-            "/v5/user/escrow_sub_members",
-            Some(params),
-            None,
-            true,
-        )
-        .await
+        params: &BitgetSubMembersPageParams,
+    ) -> Result<BitgetEscrowSubMembersResponse, BitgetHttpError> {
+        // Bitget has no fund-custodial (escrow) sub-account listing
+        let _ = params;
+        Err(unsupported("Escrow sub-account listing"))
     }
 
     /// Fetches all API keys belonging to a given sub-account.
@@ -1118,26 +1367,17 @@ impl BybitRawHttpClient {
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/list-sub-apikeys>
     pub async fn get_sub_api_keys(
         &self,
-        params: &BybitSubApiKeysParams,
-    ) -> Result<BybitSubApiKeysResponse, BybitHttpError> {
-        self.send_request(
-            Method::GET,
-            "/v5/user/sub-apikeys",
-            Some(params),
-            None,
-            true,
-        )
-        .await
+        params: &BitgetSubApiKeysParams,
+    ) -> Result<BitgetSubApiKeysResponse, BitgetHttpError> {
+        // `/api/v3/user/sub-api-list` needs a master key and its schema is unverified
+        let _ = params;
+        Err(unsupported("Sub-account API key listing"))
     }
 
-    /// Fetches every sub-account page via `/v5/user/submembers` and returns the
-    /// flattened list. Walks the cursor until Bybit signals end-of-pages.
+    /// Fetches every sub-account page via `/api/v3/user/sub-list` and returns the
+    /// flattened list. Walks the cursor until Bitget signals end-of-pages.
     ///
     /// # Errors
     ///
@@ -1145,12 +1385,12 @@ impl BybitRawHttpClient {
     pub async fn fetch_all_sub_members_paged(
         &self,
         page_size: Option<u32>,
-    ) -> Result<Vec<BybitSubMember>, BybitHttpError> {
+    ) -> Result<Vec<BitgetSubMember>, BitgetHttpError> {
         let mut members = Vec::new();
         let mut cursor: Option<String> = None;
 
         loop {
-            let params = BybitSubMembersPageParams {
+            let params = BitgetSubMembersPageParams {
                 page_size,
                 next_cursor: cursor.take(),
             };
@@ -1167,8 +1407,8 @@ impl BybitRawHttpClient {
         Ok(members)
     }
 
-    /// Fetches every fund-custodial page via `/v5/user/escrow_sub_members` and
-    /// returns the flattened list. Walks the cursor until Bybit signals
+    /// Fetches every fund-custodial page via `/api/v3/user/sub-list` and
+    /// returns the flattened list. Walks the cursor until Bitget signals
     /// end-of-pages.
     ///
     /// # Errors
@@ -1177,12 +1417,12 @@ impl BybitRawHttpClient {
     pub async fn fetch_all_escrow_sub_members(
         &self,
         page_size: Option<u32>,
-    ) -> Result<Vec<BybitSubMember>, BybitHttpError> {
+    ) -> Result<Vec<BitgetSubMember>, BitgetHttpError> {
         let mut members = Vec::new();
         let mut cursor: Option<String> = None;
 
         loop {
-            let params = BybitSubMembersPageParams {
+            let params = BitgetSubMembersPageParams {
                 page_size,
                 next_cursor: cursor.take(),
             };
@@ -1200,7 +1440,7 @@ impl BybitRawHttpClient {
     }
 
     /// Fetches every page of sub-account API keys for `sub_member_id` and
-    /// returns the flattened list. Walks the cursor until Bybit signals
+    /// returns the flattened list. Walks the cursor until Bitget signals
     /// end-of-pages.
     ///
     /// # Errors
@@ -1210,13 +1450,13 @@ impl BybitRawHttpClient {
         &self,
         sub_member_id: impl Into<String>,
         limit: Option<u32>,
-    ) -> Result<Vec<BybitSubApiKeyInfo>, BybitHttpError> {
+    ) -> Result<Vec<BitgetSubApiKeyInfo>, BitgetHttpError> {
         let sub_member_id = sub_member_id.into();
         let mut keys = Vec::new();
         let mut cursor: Option<String> = None;
 
         loop {
-            let params = BybitSubApiKeysParams {
+            let params = BitgetSubApiKeysParams {
                 sub_member_id: sub_member_id.clone(),
                 limit,
                 cursor: cursor.take(),
@@ -1242,14 +1482,14 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/fee-rate>
+    /// - <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn get_fee_rate(
         &self,
-        params: &BybitFeeRateParams,
-    ) -> Result<BybitFeeRateResponse, BybitHttpError> {
+        params: &BitgetFeeRateParams,
+    ) -> Result<BitgetFeeRateResponse, BitgetHttpError> {
         self.send_request(
             Method::GET,
-            "/v5/account/fee-rate",
+            "/api/v3/account/all-fee-rate",
             Some(params),
             None,
             true,
@@ -1272,20 +1512,20 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/set-margin-mode>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     pub async fn set_margin_mode(
         &self,
-        margin_mode: BybitMarginMode,
-    ) -> Result<BybitSetMarginModeResponse, BybitHttpError> {
-        let params = BybitSetMarginModeParamsBuilder::default()
+        margin_mode: BitgetMarginMode,
+    ) -> Result<BitgetSetMarginModeResponse, BitgetHttpError> {
+        let params = BitgetSetMarginModeParamsBuilder::default()
             .set_margin_mode(margin_mode)
             .build()
-            .expect("Failed to build BybitSetMarginModeParams");
+            .expect("Failed to build BitgetSetMarginModeParams");
 
         let body = serde_json::to_vec(&params)?;
         self.send_request::<_, ()>(
             Method::POST,
-            "/v5/account/set-margin-mode",
+            "/api/v3/account/adjust-account-mode",
             None,
             Some(body),
             true,
@@ -1308,26 +1548,26 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/leverage>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     pub async fn set_leverage(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: &str,
         buy_leverage: &str,
         sell_leverage: &str,
-    ) -> Result<BybitSetLeverageResponse, BybitHttpError> {
-        let params = BybitSetLeverageParamsBuilder::default()
+    ) -> Result<BitgetSetLeverageResponse, BitgetHttpError> {
+        let params = BitgetSetLeverageParamsBuilder::default()
             .category(product_type)
             .symbol(symbol.to_string())
             .buy_leverage(buy_leverage.to_string())
             .sell_leverage(sell_leverage.to_string())
             .build()
-            .expect("Failed to build BybitSetLeverageParams");
+            .expect("Failed to build BitgetSetLeverageParams");
 
         let body = serde_json::to_vec(&params)?;
         self.send_request::<_, ()>(
             Method::POST,
-            "/v5/position/set-leverage",
+            "/api/v3/account/set-leverage",
             None,
             Some(body),
             true,
@@ -1350,15 +1590,15 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/position-mode>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     pub async fn switch_mode(
         &self,
-        product_type: BybitProductType,
-        mode: BybitPositionMode,
+        product_type: BitgetProductType,
+        mode: BitgetPositionMode,
         symbol: Option<String>,
         coin: Option<String>,
-    ) -> Result<BybitSwitchModeResponse, BybitHttpError> {
-        let mut builder = BybitSwitchModeParamsBuilder::default();
+    ) -> Result<BitgetSwitchModeResponse, BitgetHttpError> {
+        let mut builder = BitgetSwitchModeParamsBuilder::default();
         builder.category(product_type);
         builder.mode(mode);
 
@@ -1372,12 +1612,12 @@ impl BybitRawHttpClient {
 
         let params = builder
             .build()
-            .expect("Failed to build BybitSwitchModeParams");
+            .expect("Failed to build BitgetSwitchModeParams");
 
         let body = serde_json::to_vec(&params)?;
         self.send_request::<_, ()>(
             Method::POST,
-            "/v5/position/switch-mode",
+            "/api/v3/account/set-hold-mode",
             None,
             Some(body),
             true,
@@ -1396,15 +1636,20 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/trading-stop>
+    /// - <https://www.bitget.com/docs/catalog/trading/position-management>
     pub async fn set_trading_stop(
         &self,
-        params: &BybitSetTradingStopParams,
-    ) -> Result<BybitSetTradingStopResponse, BybitHttpError> {
-        let body = serde_json::to_vec(params)?;
+        params: &BitgetSetTradingStopParams,
+    ) -> Result<BitgetSetTradingStopResponse, BitgetHttpError> {
+        // Bitget sets position TP/SL as a `tpsl` strategy order
+        let mut value = serde_json::to_value(params)?;
+        if let Some(map) = value.as_object_mut() {
+            map.insert("type".to_string(), serde_json::Value::from("tpsl"));
+        }
+        let body = serde_json::to_vec(&value)?;
         self.send_request::<_, ()>(
             Method::POST,
-            "/v5/position/trading-stop",
+            "/api/v3/trade/place-strategy-order",
             None,
             Some(body),
             true,
@@ -1427,21 +1672,27 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/borrow>
+    /// - <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn borrow(
         &self,
         coin: &str,
         amount: &str,
-    ) -> Result<BybitBorrowResponse, BybitHttpError> {
-        let params = BybitBorrowParamsBuilder::default()
+    ) -> Result<BitgetBorrowResponse, BitgetHttpError> {
+        let params = BitgetBorrowParamsBuilder::default()
             .coin(coin.to_string())
             .amount(amount.to_string())
             .build()
-            .expect("Failed to build BybitBorrowParams");
+            .expect("Failed to build BitgetBorrowParams");
 
         let body = serde_json::to_vec(&params)?;
-        self.send_request::<_, ()>(Method::POST, "/v5/account/borrow", None, Some(body), true)
-            .await
+        self.send_request::<_, ()>(
+            Method::POST,
+            "/api/v3/account/borrow",
+            None,
+            Some(body),
+            true,
+        )
+        .await
     }
 
     /// Manually repays borrowed coins without asset conversion.
@@ -1460,13 +1711,13 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/no-convert-repay>
+    /// - <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn no_convert_repay(
         &self,
         coin: &str,
         amount: Option<&str>,
-    ) -> Result<BybitNoConvertRepayResponse, BybitHttpError> {
-        let mut builder = BybitNoConvertRepayParamsBuilder::default();
+    ) -> Result<BitgetNoConvertRepayResponse, BitgetHttpError> {
+        let mut builder = BitgetNoConvertRepayParamsBuilder::default();
         builder.coin(coin.to_string());
 
         if let Some(amt) = amount {
@@ -1475,7 +1726,7 @@ impl BybitRawHttpClient {
 
         let params = builder
             .build()
-            .expect("Failed to build BybitNoConvertRepayParams");
+            .expect("Failed to build BitgetNoConvertRepayParams");
 
         if let Ok(params_json) = serde_json::to_string(&params) {
             log::debug!("Repay request params: {params_json}");
@@ -1485,7 +1736,7 @@ impl BybitRawHttpClient {
         let result = self
             .send_request::<_, ()>(
                 Method::POST,
-                "/v5/account/no-convert-repay",
+                "/api/v3/account/repay",
                 None,
                 Some(body),
                 true,
@@ -1517,13 +1768,13 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/repay>
+    /// - <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn repay(
         &self,
         coin: Option<&str>,
         amount: Option<&str>,
-    ) -> Result<BybitRepayResponse, BybitHttpError> {
-        let mut builder = BybitRepayParamsBuilder::default();
+    ) -> Result<BitgetRepayResponse, BitgetHttpError> {
+        let mut builder = BitgetRepayParamsBuilder::default();
 
         if let Some(coin) = coin {
             builder.coin(coin.to_string());
@@ -1533,7 +1784,7 @@ impl BybitRawHttpClient {
             builder.amount(amt.to_string());
         }
 
-        let params = builder.build().expect("Failed to build BybitRepayParams");
+        let params = builder.build().expect("Failed to build BitgetRepayParams");
 
         if let Ok(params_json) = serde_json::to_string(&params) {
             log::debug!("Repay request params: {params_json}");
@@ -1541,7 +1792,13 @@ impl BybitRawHttpClient {
 
         let body = serde_json::to_vec(&params)?;
         let result = self
-            .send_request::<_, ()>(Method::POST, "/v5/account/repay", None, Some(body), true)
+            .send_request::<_, ()>(
+                Method::POST,
+                "/api/v3/account/repay",
+                None,
+                Some(body),
+                true,
+            )
             .await;
 
         if let Err(ref e) = result
@@ -1561,13 +1818,19 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
-    pub async fn get_tickers<T: DeserializeOwned + BybitResponseCheck>(
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
+    pub async fn get_tickers<T: DeserializeOwned + BitgetResponseCheck>(
         &self,
-        params: &BybitTickersParams,
-    ) -> Result<T, BybitHttpError> {
-        self.send_request(Method::GET, "/v5/market/tickers", Some(params), None, false)
-            .await
+        params: &BitgetTickersParams,
+    ) -> Result<T, BitgetHttpError> {
+        self.send_request(
+            Method::GET,
+            "/api/v3/market/tickers",
+            Some(params),
+            None,
+            false,
+        )
+        .await
     }
 
     /// Fetches trade execution history (requires authentication).
@@ -1578,12 +1841,12 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/order/execution>
+    /// - <https://www.bitget.com/docs/catalog/trading/order-management>
     pub async fn get_trade_history(
         &self,
-        params: &BybitTradeHistoryParams,
-    ) -> Result<BybitTradeHistoryResponse, BybitHttpError> {
-        self.send_request(Method::GET, BYBIT_EXECUTION_LIST, Some(params), None, true)
+        params: &BitgetTradeHistoryParams,
+    ) -> Result<BitgetTradeHistoryResponse, BitgetHttpError> {
+        self.send_request(Method::GET, BITGET_EXECUTION_LIST, Some(params), None, true)
             .await
     }
 
@@ -1598,12 +1861,12 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position>
+    /// - <https://www.bitget.com/docs/catalog/trading/position-management>
     pub async fn get_positions(
         &self,
-        params: &BybitPositionListParams,
-    ) -> Result<BybitPositionListResponse, BybitHttpError> {
-        self.send_request(Method::GET, BYBIT_POSITION_LIST, Some(params), None, true)
+        params: &BitgetPositionListParams,
+    ) -> Result<BitgetPositionListResponse, BitgetHttpError> {
+        self.send_request(Method::GET, BITGET_POSITION_LIST, Some(params), None, true)
             .await
     }
 
@@ -1626,28 +1889,28 @@ impl BybitRawHttpClient {
     }
 }
 
-/// Provides a HTTP client for connecting to the [Bybit](https://bybit.com) REST API.
+/// Provides a HTTP client for connecting to the [Bitget](https://bitget.com) REST API.
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
 /// High-level HTTP client that wraps the raw client and provides Nautilus domain types.
 ///
 /// This client maintains an instrument cache and uses it to parse venue responses
 /// into Nautilus domain objects.
-pub struct BybitHttpClient {
-    pub(crate) inner: Arc<BybitRawHttpClient>,
+pub struct BitgetHttpClient {
+    pub(crate) inner: Arc<BitgetRawHttpClient>,
     pub(crate) instruments_cache: Arc<AtomicMap<Ustr, InstrumentAny>>,
     clock: &'static AtomicTime,
     cache_initialized: Arc<AtomicBool>,
     use_spot_position_reports: Arc<AtomicBool>,
 }
 
-impl Clone for BybitHttpClient {
+impl Clone for BitgetHttpClient {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -1659,23 +1922,23 @@ impl Clone for BybitHttpClient {
     }
 }
 
-impl Default for BybitHttpClient {
+impl Default for BitgetHttpClient {
     fn default() -> Self {
         Self::new(None, 60, 3, 1000, 10_000, DEFAULT_RECV_WINDOW_MS, None)
-            .expect("Failed to create default BybitHttpClient")
+            .expect("Failed to create default BitgetHttpClient")
     }
 }
 
-impl Debug for BybitHttpClient {
+impl Debug for BitgetHttpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct(stringify!(BybitHttpClient))
+        f.debug_struct(stringify!(BitgetHttpClient))
             .field("inner", &self.inner)
             .finish()
     }
 }
 
-impl BybitHttpClient {
-    /// Creates a new [`BybitHttpClient`] using the default Bybit HTTP URL.
+impl BitgetHttpClient {
+    /// Creates a new [`BitgetHttpClient`] using the default Bitget HTTP URL.
     ///
     /// # Errors
     ///
@@ -1688,9 +1951,9 @@ impl BybitHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
-    ) -> Result<Self, BybitHttpError> {
+    ) -> Result<Self, BitgetHttpError> {
         Ok(Self {
-            inner: Arc::new(BybitRawHttpClient::new(
+            inner: Arc::new(BitgetRawHttpClient::new(
                 base_url,
                 timeout_secs,
                 max_retries,
@@ -1706,7 +1969,7 @@ impl BybitHttpClient {
         })
     }
 
-    /// Creates a new [`BybitHttpClient`] configured with credentials.
+    /// Creates a new [`BitgetHttpClient`] configured with credentials.
     ///
     /// # Errors
     ///
@@ -1715,6 +1978,7 @@ impl BybitHttpClient {
     pub fn with_credentials(
         api_key: String,
         api_secret: String,
+        api_passphrase: String,
         base_url: Option<String>,
         timeout_secs: u64,
         max_retries: u32,
@@ -1722,11 +1986,12 @@ impl BybitHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
-    ) -> Result<Self, BybitHttpError> {
+    ) -> Result<Self, BitgetHttpError> {
         Ok(Self {
-            inner: Arc::new(BybitRawHttpClient::with_credentials(
+            inner: Arc::new(BitgetRawHttpClient::with_credentials(
                 api_key,
                 api_secret,
+                api_passphrase,
                 base_url,
                 timeout_secs,
                 max_retries,
@@ -1742,14 +2007,14 @@ impl BybitHttpClient {
         })
     }
 
-    /// Creates a new [`BybitHttpClient`] with optional credentials resolved from environment variables.
+    /// Creates a new [`BitgetHttpClient`] with optional credentials resolved from environment variables.
     ///
     /// Credentials are resolved in the following order:
-    /// 1. Use provided `api_key`/`api_secret` if `Some`
+    /// 1. Use provided `api_key`/`api_secret`/`api_passphrase` if `Some`
     /// 2. Fall back to environment variables based on environment:
-    ///    - Demo: `BYBIT_DEMO_API_KEY`, `BYBIT_DEMO_API_SECRET`
-    ///    - Testnet: `BYBIT_TESTNET_API_KEY`, `BYBIT_TESTNET_API_SECRET`
-    ///    - Mainnet: `BYBIT_API_KEY`, `BYBIT_API_SECRET`
+    ///    - Demo (and testnet, which Bitget does not have): `BITGET_DEMO_API_KEY`,
+    ///      `BITGET_DEMO_API_SECRET`, `BITGET_DEMO_API_PASSPHRASE`
+    ///    - Mainnet: `BITGET_API_KEY`, `BITGET_API_SECRET`, `BITGET_API_PASSPHRASE`
     ///
     /// # Errors
     ///
@@ -1758,6 +2023,7 @@ impl BybitHttpClient {
     pub fn new_with_env(
         api_key: Option<String>,
         api_secret: Option<String>,
+        api_passphrase: Option<String>,
         base_url: Option<String>,
         demo: bool,
         testnet: bool,
@@ -1767,11 +2033,12 @@ impl BybitHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
-    ) -> Result<Self, BybitHttpError> {
+    ) -> Result<Self, BitgetHttpError> {
         Ok(Self {
-            inner: Arc::new(BybitRawHttpClient::new_with_env(
+            inner: Arc::new(BitgetRawHttpClient::new_with_env(
                 api_key,
                 api_secret,
+                api_passphrase,
                 base_url,
                 demo,
                 testnet,
@@ -1802,6 +2069,11 @@ impl BybitHttpClient {
     #[must_use]
     pub fn credential(&self) -> Option<&Credential> {
         self.inner.credential()
+    }
+
+    /// Routes requests to Bitget demo (paper) trading (`paptrading: 1` header).
+    pub fn set_demo_trading(&self, demo_trading: bool) {
+        self.inner.set_demo_trading(demo_trading);
     }
 
     pub fn set_use_spot_position_reports(&self, use_spot_position_reports: bool) {
@@ -1855,7 +2127,7 @@ impl BybitHttpClient {
         self.clock.get_time_ns()
     }
 
-    /// Fetches the current server time from Bybit.
+    /// Fetches the current server time from Bitget.
     ///
     /// # Errors
     ///
@@ -1865,12 +2137,12 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/time>
-    pub async fn get_server_time(&self) -> Result<BybitServerTimeResponse, BybitHttpError> {
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
+    pub async fn get_server_time(&self) -> Result<BitgetServerTimeResponse, BitgetHttpError> {
         self.inner.get_server_time().await
     }
 
-    /// Fetches instrument information from Bybit for a given product category.
+    /// Fetches instrument information from Bitget for a given product category.
     ///
     /// # Errors
     ///
@@ -1880,15 +2152,15 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
-    pub async fn get_instruments<T: DeserializeOwned + BybitResponseCheck>(
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
+    pub async fn get_instruments<T: DeserializeOwned + BitgetResponseCheck>(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<T, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<T, BitgetHttpError> {
         self.inner.get_instruments(params).await
     }
 
-    /// Fetches spot instrument information from Bybit.
+    /// Fetches spot instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -1898,15 +2170,15 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_spot(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentSpotResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentSpotResponse, BitgetHttpError> {
         self.inner.get_instruments_spot(params).await
     }
 
-    /// Fetches linear instrument information from Bybit.
+    /// Fetches linear instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -1916,15 +2188,15 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_linear(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentLinearResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentLinearResponse, BitgetHttpError> {
         self.inner.get_instruments_linear(params).await
     }
 
-    /// Fetches inverse instrument information from Bybit.
+    /// Fetches inverse instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -1934,15 +2206,15 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_inverse(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentInverseResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentInverseResponse, BitgetHttpError> {
         self.inner.get_instruments_inverse(params).await
     }
 
-    /// Fetches option instrument information from Bybit.
+    /// Fetches option instrument information from Bitget.
     ///
     /// # Errors
     ///
@@ -1952,15 +2224,15 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/instrument>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_instruments_option(
         &self,
-        params: &BybitInstrumentsInfoParams,
-    ) -> Result<BybitInstrumentOptionResponse, BybitHttpError> {
+        params: &BitgetInstrumentsInfoParams,
+    ) -> Result<BitgetInstrumentOptionResponse, BitgetHttpError> {
         self.inner.get_instruments_option(params).await
     }
 
-    /// Fetches kline/candlestick data from Bybit.
+    /// Fetches kline/candlestick data from Bitget.
     ///
     /// # Errors
     ///
@@ -1970,15 +2242,15 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/kline>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_klines(
         &self,
-        params: &BybitKlinesParams,
-    ) -> Result<BybitKlinesResponse, BybitHttpError> {
+        params: &BitgetKlinesParams,
+    ) -> Result<BitgetKlinesResponse, BitgetHttpError> {
         self.inner.get_klines(params).await
     }
 
-    /// Fetches recent trades from Bybit.
+    /// Fetches recent trades from Bitget.
     ///
     /// # Errors
     ///
@@ -1988,11 +2260,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/recent-trade>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn get_recent_trades(
         &self,
-        params: &BybitTradesParams,
-    ) -> Result<BybitTradesResponse, BybitHttpError> {
+        params: &BitgetTradesParams,
+    ) -> Result<BitgetTradesResponse, BitgetHttpError> {
         self.inner.get_recent_trades(params).await
     }
 
@@ -2006,21 +2278,21 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/order/open-order>
+    /// - <https://www.bitget.com/docs/catalog/trading/order-management>
     #[expect(clippy::too_many_arguments)]
     pub async fn get_open_orders(
         &self,
-        category: BybitProductType,
+        category: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<String>,
         settle_coin: Option<String>,
         order_id: Option<String>,
         order_link_id: Option<String>,
-        open_only: Option<BybitOpenOnly>,
-        order_filter: Option<BybitOrderFilter>,
+        open_only: Option<BitgetOpenOnly>,
+        order_filter: Option<BitgetOrderFilter>,
         limit: Option<u32>,
         cursor: Option<String>,
-    ) -> Result<BybitOpenOrdersResponse, BybitHttpError> {
+    ) -> Result<BitgetOpenOrdersResponse, BitgetHttpError> {
         self.inner
             .get_open_orders(
                 category,
@@ -2047,11 +2319,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/order/create-order>
+    /// - <https://www.bitget.com/docs/catalog/trading/order-management>
     pub async fn place_order(
         &self,
         request: &serde_json::Value,
-    ) -> Result<BybitPlaceOrderResponse, BybitHttpError> {
+    ) -> Result<BitgetPlaceOrderResponse, BitgetHttpError> {
         self.inner.place_order(request).await
     }
 
@@ -2065,11 +2337,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/wallet-balance>
+    /// - <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn get_wallet_balance(
         &self,
-        params: &BybitWalletBalanceParams,
-    ) -> Result<BybitWalletBalanceResponse, BybitHttpError> {
+        params: &BitgetWalletBalanceParams,
+    ) -> Result<BitgetWalletBalanceResponse, BitgetHttpError> {
         self.inner.get_wallet_balance(params).await
     }
 
@@ -2083,8 +2355,8 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/account-info>
-    pub async fn get_account_info(&self) -> Result<BybitAccountInfoResponse, BybitHttpError> {
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
+    pub async fn get_account_info(&self) -> Result<BitgetAccountInfoResponse, BitgetHttpError> {
         self.inner.get_account_info().await
     }
 
@@ -2095,11 +2367,9 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/apikey-info>
-    pub async fn get_account_details(&self) -> Result<BybitAccountDetailsResponse, BybitHttpError> {
+    pub async fn get_account_details(
+        &self,
+    ) -> Result<BitgetAccountDetailsResponse, BitgetHttpError> {
         self.inner.get_account_details().await
     }
 
@@ -2110,14 +2380,10 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/modify-sub-apikey>
     pub async fn update_sub_api_key(
         &self,
-        params: &BybitUpdateSubApiParams,
-    ) -> Result<BybitUpdateSubApiResponse, BybitHttpError> {
+        params: &BitgetUpdateSubApiParams,
+    ) -> Result<BitgetUpdateSubApiResponse, BitgetHttpError> {
         self.inner.update_sub_api_key(params).await
     }
 
@@ -2128,14 +2394,10 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/modify-master-apikey>
     pub async fn update_master_api_key(
         &self,
-        params: &BybitUpdateMasterApiParams,
-    ) -> Result<BybitUpdateMasterApiResponse, BybitHttpError> {
+        params: &BitgetUpdateMasterApiParams,
+    ) -> Result<BitgetUpdateMasterApiResponse, BitgetHttpError> {
         self.inner.update_master_api_key(params).await
     }
 
@@ -2146,11 +2408,7 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/subuid-list>
-    pub async fn get_sub_members(&self) -> Result<BybitSubMembersResponse, BybitHttpError> {
+    pub async fn get_sub_members(&self) -> Result<BitgetSubMembersResponse, BitgetHttpError> {
         self.inner.get_sub_members().await
     }
 
@@ -2161,14 +2419,10 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/page-subuid>
     pub async fn get_sub_members_paged(
         &self,
-        params: &BybitSubMembersPageParams,
-    ) -> Result<BybitSubMembersPagedResponse, BybitHttpError> {
+        params: &BitgetSubMembersPageParams,
+    ) -> Result<BitgetSubMembersPagedResponse, BitgetHttpError> {
         self.inner.get_sub_members_paged(params).await
     }
 
@@ -2179,14 +2433,10 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/fund-subuid-list>
     pub async fn get_escrow_sub_members(
         &self,
-        params: &BybitSubMembersPageParams,
-    ) -> Result<BybitEscrowSubMembersResponse, BybitHttpError> {
+        params: &BitgetSubMembersPageParams,
+    ) -> Result<BitgetEscrowSubMembersResponse, BitgetHttpError> {
         self.inner.get_escrow_sub_members(params).await
     }
 
@@ -2197,14 +2447,10 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/list-sub-apikeys>
     pub async fn get_sub_api_keys(
         &self,
-        params: &BybitSubApiKeysParams,
-    ) -> Result<BybitSubApiKeysResponse, BybitHttpError> {
+        params: &BitgetSubApiKeysParams,
+    ) -> Result<BitgetSubApiKeysResponse, BitgetHttpError> {
         self.inner.get_sub_api_keys(params).await
     }
 
@@ -2219,11 +2465,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position>
+    /// - <https://www.bitget.com/docs/catalog/trading/position-management>
     pub async fn get_positions(
         &self,
-        params: &BybitPositionListParams,
-    ) -> Result<BybitPositionListResponse, BybitHttpError> {
+        params: &BitgetPositionListParams,
+    ) -> Result<BitgetPositionListResponse, BitgetHttpError> {
         self.inner.get_positions(params).await
     }
 
@@ -2238,11 +2484,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/fee-rate>
+    /// - <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn get_fee_rate(
         &self,
-        params: &BybitFeeRateParams,
-    ) -> Result<BybitFeeRateResponse, BybitHttpError> {
+        params: &BitgetFeeRateParams,
+    ) -> Result<BitgetFeeRateResponse, BitgetHttpError> {
         self.inner.get_fee_rate(params).await
     }
 
@@ -2257,11 +2503,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/set-margin-mode>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     pub async fn set_margin_mode(
         &self,
-        margin_mode: BybitMarginMode,
-    ) -> Result<BybitSetMarginModeResponse, BybitHttpError> {
+        margin_mode: BitgetMarginMode,
+    ) -> Result<BitgetSetMarginModeResponse, BitgetHttpError> {
         self.inner.set_margin_mode(margin_mode).await
     }
 
@@ -2276,14 +2522,14 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/leverage>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     pub async fn set_leverage(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: &str,
         buy_leverage: &str,
         sell_leverage: &str,
-    ) -> Result<BybitSetLeverageResponse, BybitHttpError> {
+    ) -> Result<BitgetSetLeverageResponse, BitgetHttpError> {
         self.inner
             .set_leverage(product_type, symbol, buy_leverage, sell_leverage)
             .await
@@ -2300,14 +2546,14 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/position-mode>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     pub async fn switch_mode(
         &self,
-        product_type: BybitProductType,
-        mode: BybitPositionMode,
+        product_type: BitgetProductType,
+        mode: BitgetPositionMode,
         symbol: Option<String>,
         coin: Option<String>,
-    ) -> Result<BybitSwitchModeResponse, BybitHttpError> {
+    ) -> Result<BitgetSwitchModeResponse, BitgetHttpError> {
         self.inner
             .switch_mode(product_type, mode, symbol, coin)
             .await
@@ -2324,11 +2570,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/trading-stop>
+    /// - <https://www.bitget.com/docs/catalog/trading/position-management>
     pub async fn set_trading_stop(
         &self,
-        params: &BybitSetTradingStopParams,
-    ) -> Result<BybitSetTradingStopResponse, BybitHttpError> {
+        params: &BitgetSetTradingStopParams,
+    ) -> Result<BitgetSetTradingStopResponse, BitgetHttpError> {
         self.inner.set_trading_stop(params).await
     }
 
@@ -2347,19 +2593,25 @@ impl BybitHttpClient {
     /// - The request fails.
     /// - The coin is not found in the wallet.
     pub async fn get_spot_borrow_amount(&self, coin: &str) -> anyhow::Result<Decimal> {
-        let params = BybitWalletBalanceParams {
-            account_type: BybitAccountType::Unified,
+        let params = BitgetWalletBalanceParams {
+            account_type: BitgetAccountType::Unified,
             coin: Some(coin.to_string()),
         };
 
         let response = self.inner.get_wallet_balance(&params).await?;
 
+        // Bitget reports borrowed coins as the unified account `debt`
         let borrow_amount = response
             .result
-            .list
-            .first()
-            .and_then(|wallet| wallet.coin.iter().find(|c| c.coin == coin))
-            .map_or(Decimal::ZERO, |balance| balance.spot_borrow);
+            .coin
+            .iter()
+            .find(|c| c.coin == coin)
+            .map(|balance| balance.borrow_amount.as_str())
+            .filter(|debt| !debt.is_empty())
+            .map_or(Ok(Decimal::ZERO), |debt| {
+                debt.parse::<Decimal>()
+                    .with_context(|| format!("invalid debt '{debt}' for {coin}"))
+            })?;
 
         Ok(borrow_amount)
     }
@@ -2383,7 +2635,7 @@ impl BybitHttpClient {
         &self,
         coin: &str,
         amount: Quantity,
-    ) -> anyhow::Result<BybitBorrowResponse> {
+    ) -> anyhow::Result<BitgetBorrowResponse> {
         let amount_str = amount.to_string();
         self.inner
             .borrow(coin, &amount_str)
@@ -2411,7 +2663,7 @@ impl BybitHttpClient {
         &self,
         coin: &str,
         amount: Option<Quantity>,
-    ) -> anyhow::Result<BybitNoConvertRepayResponse> {
+    ) -> anyhow::Result<BitgetNoConvertRepayResponse> {
         let amount_str = amount.as_ref().map(|q| q.to_string());
         let response = self
             .inner
@@ -2443,7 +2695,7 @@ impl BybitHttpClient {
         &self,
         coin: &str,
         amount: Option<Quantity>,
-    ) -> anyhow::Result<BybitRepayResponse> {
+    ) -> anyhow::Result<BitgetRepayResponse> {
         let amount_str = amount.as_ref().map(|q| q.to_string());
         let response = self
             .inner
@@ -2456,10 +2708,10 @@ impl BybitHttpClient {
         Ok(response)
     }
 
-    fn ensure_repay_accepted(coin: &str, status: BybitRepayStatus) -> anyhow::Result<()> {
+    fn ensure_repay_accepted(coin: &str, status: BitgetRepayStatus) -> anyhow::Result<()> {
         anyhow::ensure!(
-            status != BybitRepayStatus::Failed,
-            "Bybit repay for {coin} returned result status {status}"
+            status != BitgetRepayStatus::Failed,
+            "Bitget repay for {coin} returned result status {status}"
         );
         Ok(())
     }
@@ -2476,8 +2728,8 @@ impl BybitHttpClient {
         account_id: AccountId,
         instrument_id: InstrumentId,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        let params = BybitWalletBalanceParams {
-            account_type: BybitAccountType::Unified,
+        let params = BitgetWalletBalanceParams {
+            account_type: BitgetAccountType::Unified,
             coin: None,
         };
 
@@ -2486,13 +2738,16 @@ impl BybitHttpClient {
 
         let mut wallet_by_coin: HashMap<Ustr, Decimal> = HashMap::new();
 
-        for wallet in &response.result.list {
-            for coin_balance in &wallet.coin {
-                let balance = coin_balance.wallet_balance - coin_balance.spot_borrow;
-                *wallet_by_coin
-                    .entry(coin_balance.coin)
-                    .or_insert(Decimal::ZERO) += balance;
-            }
+        for coin_balance in &response.result.coin {
+            // Bitget reports borrowed coins as `debt`
+            let debt = coin_balance
+                .borrow_amount
+                .parse::<Decimal>()
+                .unwrap_or(Decimal::ZERO);
+            let balance = coin_balance.wallet_balance - debt;
+            *wallet_by_coin
+                .entry(coin_balance.coin)
+                .or_insert(Decimal::ZERO) += balance;
         }
 
         let mut reports = Vec::new();
@@ -2550,7 +2805,7 @@ impl BybitHttpClient {
     pub async fn submit_order(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: ClientOrderId,
         order_side: OrderSide,
@@ -2563,40 +2818,49 @@ impl BybitHttpClient {
         reduce_only: bool,
         is_quote_quantity: bool,
         is_leverage: bool,
-        position_idx: Option<BybitPositionIdx>,
-        bbo_side_type: Option<BybitBboSideType>,
+        position_idx: Option<BitgetPositionIdx>,
+        bbo_side_type: Option<BitgetBboSideType>,
         bbo_level: Option<String>,
-        smp_type: Option<BybitOrderSmpType>,
-        native_tp_sl: Option<&BybitNativeTpSlParams>,
+        smp_type: Option<BitgetOrderSmpType>,
+        native_tp_sl: Option<&BitgetNativeTpSlParams>,
     ) -> anyhow::Result<OrderStatusReport> {
         let instrument = self.instrument_from_cache(&instrument_id.symbol)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
+        validate_client_oid(client_order_id.as_str())?;
 
-        let bybit_side = match order_side {
-            OrderSide::Buy => BybitOrderSide::Buy,
-            OrderSide::Sell => BybitOrderSide::Sell,
+        let bitget_side = match order_side {
+            OrderSide::Buy => BitgetOrderSide::Buy,
+            OrderSide::Sell => BitgetOrderSide::Sell,
         };
 
-        // For stop/conditional orders, Bybit uses Market/Limit with trigger parameters
-        let (bybit_order_type, is_stop_order) = match order_type {
-            OrderType::Market => (BybitOrderType::Market, false),
-            OrderType::Limit => (BybitOrderType::Limit, false),
-            OrderType::StopMarket | OrderType::MarketIfTouched => (BybitOrderType::Market, true),
-            OrderType::StopLimit | OrderType::LimitIfTouched => (BybitOrderType::Limit, true),
+        // For stop/conditional orders, Bitget uses Market/Limit with trigger parameters
+        let (bitget_order_type, is_stop_order) = match order_type {
+            OrderType::Market => (BitgetOrderType::Market, false),
+            OrderType::Limit => (BitgetOrderType::Limit, false),
+            OrderType::StopMarket | OrderType::MarketIfTouched => (BitgetOrderType::Market, true),
+            OrderType::StopLimit | OrderType::LimitIfTouched => (BitgetOrderType::Limit, true),
             _ => anyhow::bail!("Unsupported order type: {order_type:?}"),
         };
 
-        let bybit_tif = map_time_in_force(bybit_order_type, time_in_force, post_only)
+        let bitget_tif = map_time_in_force(bitget_order_type, time_in_force, post_only)
             .map_err(|tif| anyhow::anyhow!("Unsupported time in force: {tif:?}"))?;
-        let market_unit = spot_market_unit(product_type, bybit_order_type, is_quote_quantity);
+        // Bitget spot market buys are sized in the quote coin only (no `marketUnit`)
+        anyhow::ensure!(
+            !(product_type == BitgetProductType::Spot
+                && bitget_order_type == BitgetOrderType::Market
+                && order_side == OrderSide::Buy
+                && !is_quote_quantity),
+            "Bitget spot market buy orders require a quote quantity"
+        );
+        let market_unit = spot_market_unit(product_type, bitget_order_type, is_quote_quantity);
         let trigger_dir = trigger_direction(order_type, order_side, is_stop_order);
 
-        let mut order_entry = BybitBatchPlaceOrderEntryBuilder::default();
-        order_entry.symbol(bybit_symbol.raw_symbol().to_string());
-        order_entry.side(bybit_side);
-        order_entry.order_type(bybit_order_type);
+        let mut order_entry = BitgetBatchPlaceOrderEntryBuilder::default();
+        order_entry.symbol(bitget_symbol.raw_symbol().to_string());
+        order_entry.side(bitget_side);
+        order_entry.order_type(bitget_order_type);
         order_entry.qty(quantity.to_string());
-        order_entry.time_in_force(bybit_tif);
+        order_entry.time_in_force(bitget_tif);
         order_entry.order_link_id(client_order_id.to_string());
         order_entry.market_unit(market_unit);
         order_entry.trigger_direction(trigger_dir);
@@ -2621,6 +2885,14 @@ impl BybitHttpClient {
             order_entry.position_idx(Some(idx));
         }
 
+        // Bitget takes one `bboLevel` value: the side type followed by the level (e.g. `queue1`)
+        let bbo_level = bbo_side_type.zip(bbo_level).map(|(side_type, level)| {
+            let side_type = match side_type {
+                BitgetBboSideType::Queue => "queue",
+                BitgetBboSideType::Counterparty => "counterparty",
+            };
+            format!("{side_type}{level}")
+        });
         order_entry.bbo_side_type(bbo_side_type);
         order_entry.bbo_level(bbo_level);
         order_entry.smp_type(smp_type);
@@ -2659,10 +2931,10 @@ impl BybitHttpClient {
             }
 
             // Default to `Full` when TP or SL is set without an explicit mode, mirroring the WS
-            // path, so Bybit accepts the field instead of rejecting it.
+            // path, so Bitget accepts the field instead of rejecting it.
             let mode = tp_sl.tpsl_mode.or_else(|| {
                 (tp_sl.take_profit.is_some() || tp_sl.stop_loss.is_some())
-                    .then_some(BybitTpSlMode::Full)
+                    .then_some(BitgetTpSlMode::Full)
             });
 
             if let Some(m) = mode {
@@ -2684,42 +2956,55 @@ impl BybitHttpClient {
 
         let order_entry = order_entry.build().build_anyhow()?;
 
-        let mut params = BybitPlaceOrderParamsBuilder::default();
+        let mut params = BitgetPlaceOrderParamsBuilder::default();
         params.category(product_type);
         params.order(order_entry);
 
         let params = params.build().build_anyhow()?;
 
-        let body = serde_json::to_value(&params)?;
-        let response = self.inner.place_order(&body).await?;
+        // Bitget places conditional orders through the strategy-order endpoint
+        let (response, lookup_endpoint) = if is_stop_order {
+            let strategy = BitgetPlaceStrategyOrderParams::trigger_from(&params);
+            let body = serde_json::to_value(&strategy)?;
+            (
+                self.inner.place_strategy_order(&body).await?,
+                BITGET_STRATEGY_ORDER_REALTIME,
+            )
+        } else {
+            let body = serde_json::to_value(&params)?;
+            (self.inner.place_order(&body).await?, BITGET_ORDER_REALTIME)
+        };
 
         let order_id = response
             .result
             .order_id
-            .ok_or(BybitSubmitOrderError::MissingOrderId)?;
+            .ok_or(BitgetSubmitOrderError::MissingOrderId)?;
 
         let order = self
             .query_order_by_id(
                 product_type,
                 order_id.as_str(),
-                BYBIT_ORDER_REALTIME,
+                lookup_endpoint,
                 "after submission",
             )
             .await
-            .map_err(|source| BybitSubmitOrderError::PostSubmitLookup { source })?;
+            .map_err(|source| BitgetSubmitOrderError::PostSubmitLookup { source })?;
 
         // Only bail on rejection if there are no fills
         // If the order has fills (cum_exec_qty > 0), let the parser remap Rejected -> Canceled.
         // A post-only order that would take liquidity is reported as Cancelled with
-        // rejectReason=EC_PostOnlyWillTakeLiquidity (not Rejected), so treat that as a rejection too.
-        let is_rejection = order.order_status == crate::common::enums::BybitOrderStatus::Rejected
-            || (order.order_status == crate::common::enums::BybitOrderStatus::Canceled
-                && bybit_rejection_due_post_only(order.reject_reason.as_str()));
+        // cancelReason=post_only_fill_cancel (not Rejected), so treat that as a rejection too.
+        let is_post_only_cancel = order.cancel_type == BitgetCancelType::CancelByPostOnly;
+        let is_rejection = order.order_status == crate::common::enums::BitgetOrderStatus::Rejected
+            || (order.order_status == crate::common::enums::BitgetOrderStatus::Canceled
+                && is_post_only_cancel);
         if is_rejection && (order.cum_exec_qty.as_str() == "0" || order.cum_exec_qty.is_empty()) {
-            return Err(BybitSubmitOrderError::Rejected {
-                reason: order.reject_reason.to_string(),
-            }
-            .into());
+            let reason = if is_post_only_cancel {
+                "post_only_fill_cancel".to_string()
+            } else {
+                order.reject_reason.to_string()
+            };
+            return Err(BitgetSubmitOrderError::Rejected { reason }.into());
         }
 
         let ts_init = self.generate_ts_init();
@@ -2739,16 +3024,16 @@ impl BybitHttpClient {
     pub async fn cancel_order(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
     ) -> anyhow::Result<OrderStatusReport> {
         let instrument = self.instrument_from_cache(&instrument_id.symbol)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-        let mut cancel_entry = BybitBatchCancelOrderEntryBuilder::default();
-        cancel_entry.symbol(bybit_symbol.raw_symbol().to_string());
+        let mut cancel_entry = BitgetBatchCancelOrderEntryBuilder::default();
+        cancel_entry.symbol(bitget_symbol.raw_symbol().to_string());
 
         if let Some(venue_order_id) = venue_order_id {
             cancel_entry.order_id(venue_order_id.to_string());
@@ -2760,36 +3045,103 @@ impl BybitHttpClient {
 
         let cancel_entry = cancel_entry.build().build_anyhow()?;
 
-        let mut params = BybitCancelOrderParamsBuilder::default();
+        let mut params = BitgetCancelOrderParamsBuilder::default();
         params.category(product_type);
         params.order(cancel_entry);
 
         let params = params.build().build_anyhow()?;
         let body = serde_json::to_vec(&params)?;
 
-        let response: BybitPlaceOrderResponse = self
+        let response: BitgetPlaceOrderResponse = self
             .inner
-            .send_request::<_, ()>(Method::POST, "/v5/order/cancel", None, Some(body), true)
+            .send_request::<_, ()>(
+                Method::POST,
+                "/api/v3/trade/cancel-order",
+                None,
+                Some(body),
+                true,
+            )
             .await?;
 
         let order_id = response
             .result
             .order_id
-            .ok_or(BybitCancelOrderError::MissingOrderId)?;
+            .ok_or(BitgetCancelOrderError::MissingOrderId)?;
 
         let order = self
             .query_order_by_id(
                 product_type,
                 order_id.as_str(),
-                BYBIT_ORDER_HISTORY,
+                BITGET_ORDER_HISTORY,
                 "after cancellation",
             )
             .await
-            .map_err(|source| BybitCancelOrderError::PostCancelLookup { source })?;
+            .map_err(|source| BitgetCancelOrderError::PostCancelLookup { source })?;
 
         let ts_init = self.generate_ts_init();
 
         parse_order_status_report(&order, &instrument, account_id, ts_init)
+    }
+
+    /// Cancels a conditional (strategy) order; Bitget keeps these apart from plain orders.
+    ///
+    /// The outcome arrives on the `strategy-order` WebSocket topic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if neither identifier is provided or the request fails.
+    pub async fn cancel_strategy_order(
+        &self,
+        product_type: BitgetProductType,
+        instrument_id: InstrumentId,
+        client_order_id: Option<ClientOrderId>,
+        venue_order_id: Option<VenueOrderId>,
+    ) -> anyhow::Result<()> {
+        self.instrument_from_cache(&instrument_id.symbol)?;
+        anyhow::ensure!(
+            client_order_id.is_some() || venue_order_id.is_some(),
+            "Either client_order_id or venue_order_id must be provided"
+        );
+        let params = BitgetCancelStrategyOrderParams {
+            category: product_type,
+            order_id: venue_order_id.map(|id| id.to_string()),
+            order_link_id: client_order_id.map(|id| id.to_string()),
+        };
+        self.inner.cancel_strategy_order(&params).await?;
+        Ok(())
+    }
+
+    /// Modifies a conditional (strategy) order; Bitget keeps these apart from plain orders.
+    ///
+    /// The venue requires the full quantity on every modify. The outcome arrives on the
+    /// `strategy-order` WebSocket topic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if neither identifier is provided or the request fails.
+    pub async fn modify_strategy_order(
+        &self,
+        instrument_id: InstrumentId,
+        client_order_id: Option<ClientOrderId>,
+        venue_order_id: Option<VenueOrderId>,
+        quantity: Quantity,
+        price: Option<Price>,
+        trigger_price: Option<Price>,
+    ) -> anyhow::Result<()> {
+        self.instrument_from_cache(&instrument_id.symbol)?;
+        anyhow::ensure!(
+            client_order_id.is_some() || venue_order_id.is_some(),
+            "Either client_order_id or venue_order_id must be provided"
+        );
+        let params = BitgetModifyStrategyOrderParams {
+            order_id: venue_order_id.map(|id| id.to_string()),
+            order_link_id: client_order_id.map(|id| id.to_string()),
+            qty: quantity.to_string(),
+            trigger_price: trigger_price.map(|p| p.to_string()),
+            trigger_order_price: price.map(|p| p.to_string()),
+        };
+        self.inner.modify_strategy_order(&params).await?;
+        Ok(())
     }
 
     /// Batch cancel multiple orders.
@@ -2804,7 +3156,7 @@ impl BybitHttpClient {
     pub async fn batch_cancel_orders(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_ids: Vec<InstrumentId>,
         client_order_ids: Vec<Option<ClientOrderId>>,
         venue_order_ids: Vec<Option<VenueOrderId>>,
@@ -2836,9 +3188,9 @@ impl BybitHttpClient {
             .zip(client_order_ids.iter())
             .zip(venue_order_ids.iter())
         {
-            let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
-            let mut cancel_entry = BybitBatchCancelOrderEntryBuilder::default();
-            cancel_entry.symbol(bybit_symbol.raw_symbol().to_string());
+            let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
+            let mut cancel_entry = BitgetBatchCancelOrderEntryBuilder::default();
+            cancel_entry.symbol(bitget_symbol.raw_symbol().to_string());
 
             if let Some(venue_order_id) = venue_order_id {
                 cancel_entry.order_id(venue_order_id.to_string());
@@ -2855,18 +3207,19 @@ impl BybitHttpClient {
 
         let chunk_limit = batch_endpoint_limit(product_type).min(batch_send_limit(product_type));
         for chunk in cancel_entries.chunks(chunk_limit) {
-            let mut params = BybitBatchCancelOrderParamsBuilder::default();
+            let mut params = BitgetBatchCancelOrderParamsBuilder::default();
             params.category(product_type);
             params.request(chunk.to_vec());
 
             let params = params.build().build_anyhow()?;
             let body = serde_json::to_vec(&params)?;
 
-            let _response: BybitPlaceOrderResponse = self
+            // Bitget answers with one `{orderId, clientOid, code, msg}` entry per order
+            let _response: crate::common::models::BitgetListResponse<serde_json::Value> = self
                 .inner
                 .send_request::<_, ()>(
                     Method::POST,
-                    "/v5/order/cancel-batch",
+                    "/api/v3/trade/cancel-batch",
                     None,
                     Some(body),
                     true,
@@ -2889,11 +3242,11 @@ impl BybitHttpClient {
                 continue;
             };
 
-            let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+            let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-            let mut query_params = BybitOpenOrdersParamsBuilder::default();
+            let mut query_params = BitgetOpenOrdersParamsBuilder::default();
             query_params.category(product_type);
-            query_params.symbol(bybit_symbol.raw_symbol().to_string());
+            query_params.symbol(bitget_symbol.raw_symbol().to_string());
 
             if let Some(venue_order_id) = venue_order_id {
                 query_params.order_id(venue_order_id.to_string());
@@ -2902,16 +3255,8 @@ impl BybitHttpClient {
             }
 
             let query_params = query_params.build().build_anyhow()?;
-            let order_response: BybitOrderHistoryResponse = self
-                .inner
-                .send_request(
-                    Method::GET,
-                    BYBIT_ORDER_HISTORY,
-                    Some(&query_params),
-                    None,
-                    true,
-                )
-                .await?;
+            let order_response: BitgetOpenOrdersResponse =
+                self.inner.get_open_orders_with(&query_params).await?;
 
             if let Some(order) = order_response.result.list.into_iter().next() {
                 let ts_init = self.generate_ts_init();
@@ -2934,41 +3279,39 @@ impl BybitHttpClient {
     pub async fn cancel_all_orders(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
         let instrument = self.instrument_from_cache(&instrument_id.symbol)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-        let mut params = BybitCancelAllOrdersParamsBuilder::default();
+        let mut params = BitgetCancelAllOrdersParamsBuilder::default();
         params.category(product_type);
-        params.symbol(bybit_symbol.raw_symbol().to_string());
+        params.symbol(bitget_symbol.raw_symbol().to_string());
 
         let params = params.build().build_anyhow()?;
         let body = serde_json::to_vec(&params)?;
 
-        let _response: crate::common::models::BybitListResponse<serde_json::Value> = self
+        let _response: crate::common::models::BitgetListResponse<serde_json::Value> = self
             .inner
-            .send_request::<_, ()>(Method::POST, "/v5/order/cancel-all", None, Some(body), true)
-            .await?;
-
-        // Query the order history to get all canceled orders
-        let mut query_params = BybitOrderHistoryParamsBuilder::default();
-        query_params.category(product_type);
-        query_params.symbol(bybit_symbol.raw_symbol().to_string());
-        query_params.limit(50u32);
-
-        let query_params = query_params.build().build_anyhow()?;
-        let order_response: BybitOrderHistoryResponse = self
-            .inner
-            .send_request(
-                Method::GET,
-                BYBIT_ORDER_HISTORY,
-                Some(&query_params),
+            .send_request::<_, ()>(
+                Method::POST,
+                "/api/v3/trade/cancel-symbol-order",
                 None,
+                Some(body),
                 true,
             )
             .await?;
+
+        // Query the order history to get all canceled orders
+        let mut query_params = BitgetOrderHistoryParamsBuilder::default();
+        query_params.category(product_type);
+        query_params.symbol(bitget_symbol.raw_symbol().to_string());
+        query_params.limit(50u32);
+
+        let query_params = query_params.build().build_anyhow()?;
+        let order_response: BitgetOrderHistoryResponse =
+            self.inner.get_order_history_with(&query_params).await?;
 
         let ts_init = self.generate_ts_init();
 
@@ -2998,7 +3341,7 @@ impl BybitHttpClient {
     pub async fn modify_order(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
@@ -3006,10 +3349,10 @@ impl BybitHttpClient {
         price: Option<Price>,
     ) -> anyhow::Result<OrderStatusReport> {
         let instrument = self.instrument_from_cache(&instrument_id.symbol)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-        let mut amend_entry = BybitBatchAmendOrderEntryBuilder::default();
-        amend_entry.symbol(bybit_symbol.raw_symbol().to_string());
+        let mut amend_entry = BitgetBatchAmendOrderEntryBuilder::default();
+        amend_entry.symbol(bitget_symbol.raw_symbol().to_string());
 
         if let Some(venue_order_id) = venue_order_id {
             amend_entry.order_id(venue_order_id.to_string());
@@ -3029,32 +3372,38 @@ impl BybitHttpClient {
 
         let amend_entry = amend_entry.build().build_anyhow()?;
 
-        let mut params = BybitAmendOrderParamsBuilder::default();
+        let mut params = BitgetAmendOrderParamsBuilder::default();
         params.category(product_type);
         params.order(amend_entry);
 
         let params = params.build().build_anyhow()?;
         let body = serde_json::to_vec(&params)?;
 
-        let response: BybitPlaceOrderResponse = self
+        let response: BitgetPlaceOrderResponse = self
             .inner
-            .send_request::<_, ()>(Method::POST, "/v5/order/amend", None, Some(body), true)
+            .send_request::<_, ()>(
+                Method::POST,
+                "/api/v3/trade/modify-order",
+                None,
+                Some(body),
+                true,
+            )
             .await?;
 
         let order_id = response
             .result
             .order_id
-            .ok_or(BybitModifyOrderError::MissingOrderId)?;
+            .ok_or(BitgetModifyOrderError::MissingOrderId)?;
 
         let order = self
             .query_order_by_id(
                 product_type,
                 order_id.as_str(),
-                BYBIT_ORDER_REALTIME,
+                BITGET_ORDER_REALTIME,
                 "after amendment",
             )
             .await
-            .map_err(|source| BybitModifyOrderError::PostModifyLookup { source })?;
+            .map_err(|source| BitgetModifyOrderError::PostModifyLookup { source })?;
 
         let ts_init = self.generate_ts_init();
 
@@ -3072,7 +3421,7 @@ impl BybitHttpClient {
     pub async fn query_order(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
@@ -3081,12 +3430,12 @@ impl BybitHttpClient {
             "query_order: instrument_id={instrument_id}, client_order_id={client_order_id:?}, venue_order_id={venue_order_id:?}"
         );
 
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-        let mut params = BybitOpenOrdersParamsBuilder::default();
+        let mut params = BitgetOpenOrdersParamsBuilder::default();
         params.category(product_type);
-        // Use the raw Bybit symbol (e.g., "ETHUSDT") not the full instrument symbol
-        params.symbol(bybit_symbol.raw_symbol().to_string());
+        // Use the raw Bitget symbol (e.g., "ETHUSDT") not the full instrument symbol
+        params.symbol(bitget_symbol.raw_symbol().to_string());
 
         if let Some(venue_order_id) = venue_order_id {
             params.order_id(venue_order_id.to_string());
@@ -3097,19 +3446,17 @@ impl BybitHttpClient {
         }
 
         let params = params.build().build_anyhow()?;
-        let mut response: BybitOpenOrdersResponse = self
-            .inner
-            .send_request(Method::GET, BYBIT_ORDER_REALTIME, Some(&params), None, true)
-            .await?;
+        let mut response: BitgetOpenOrdersResponse =
+            self.inner.get_open_orders_with(&params).await?;
 
         // Options do not support the StopOrder filter
-        if response.result.list.is_empty() && product_type != BybitProductType::Option {
+        if response.result.list.is_empty() && product_type != BitgetProductType::Option {
             log::debug!("Order not found in open orders, trying with StopOrder filter");
 
-            let mut stop_params = BybitOpenOrdersParamsBuilder::default();
+            let mut stop_params = BitgetOpenOrdersParamsBuilder::default();
             stop_params.category(product_type);
-            stop_params.symbol(bybit_symbol.raw_symbol().to_string());
-            stop_params.order_filter(BybitOrderFilter::StopOrder);
+            stop_params.symbol(bitget_symbol.raw_symbol().to_string());
+            stop_params.order_filter(BitgetOrderFilter::StopOrder);
 
             if let Some(venue_order_id) = venue_order_id {
                 stop_params.order_id(venue_order_id.to_string());
@@ -3118,25 +3465,16 @@ impl BybitHttpClient {
             }
 
             let stop_params = stop_params.build().build_anyhow()?;
-            response = self
-                .inner
-                .send_request(
-                    Method::GET,
-                    BYBIT_ORDER_REALTIME,
-                    Some(&stop_params),
-                    None,
-                    true,
-                )
-                .await?;
+            response = self.inner.get_open_orders_with(&stop_params).await?;
         }
 
         // If not found in open orders, check order history
         if response.result.list.is_empty() {
             log::debug!("Order not found in open orders, checking order history");
 
-            let mut history_params = BybitOrderHistoryParamsBuilder::default();
+            let mut history_params = BitgetOrderHistoryParamsBuilder::default();
             history_params.category(product_type);
-            history_params.symbol(bybit_symbol.raw_symbol().to_string());
+            history_params.symbol(bitget_symbol.raw_symbol().to_string());
 
             if let Some(venue_order_id) = venue_order_id {
                 history_params.order_id(venue_order_id.to_string());
@@ -3146,30 +3484,24 @@ impl BybitHttpClient {
 
             let history_params = history_params.build().build_anyhow()?;
 
-            let mut history_response: BybitOrderHistoryResponse = self
-                .inner
-                .send_request(
-                    Method::GET,
-                    BYBIT_ORDER_HISTORY,
-                    Some(&history_params),
-                    None,
-                    true,
-                )
-                .await?;
+            let mut history_response: BitgetOrderHistoryResponse =
+                self.inner.get_order_history_with(&history_params).await?;
 
-            if history_response.result.list.is_empty() && product_type == BybitProductType::Option {
+            if history_response.result.list.is_empty() && product_type == BitgetProductType::Option
+            {
                 log::debug!("Option order not found in order history");
                 return Ok(None);
             }
 
             // Options do not support the StopOrder filter
-            if history_response.result.list.is_empty() && product_type != BybitProductType::Option {
+            if history_response.result.list.is_empty() && product_type != BitgetProductType::Option
+            {
                 log::debug!("Order not found in order history, trying with StopOrder filter");
 
-                let mut stop_history_params = BybitOrderHistoryParamsBuilder::default();
+                let mut stop_history_params = BitgetOrderHistoryParamsBuilder::default();
                 stop_history_params.category(product_type);
-                stop_history_params.symbol(bybit_symbol.raw_symbol().to_string());
-                stop_history_params.order_filter(BybitOrderFilter::StopOrder);
+                stop_history_params.symbol(bitget_symbol.raw_symbol().to_string());
+                stop_history_params.order_filter(BitgetOrderFilter::StopOrder);
 
                 if let Some(venue_order_id) = venue_order_id {
                     stop_history_params.order_id(venue_order_id.to_string());
@@ -3183,13 +3515,7 @@ impl BybitHttpClient {
 
                 history_response = self
                     .inner
-                    .send_request(
-                        Method::GET,
-                        BYBIT_ORDER_HISTORY,
-                        Some(&stop_history_params),
-                        None,
-                        true,
-                    )
+                    .get_order_history_with(&stop_history_params)
                     .await?;
 
                 if history_response.result.list.is_empty() {
@@ -3248,14 +3574,14 @@ impl BybitHttpClient {
 
     async fn paginate_instruments<D, F>(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: &Option<String>,
         base_coin: Option<Ustr>,
         mut parse: F,
     ) -> anyhow::Result<Vec<InstrumentAny>>
     where
         D: DeserializeOwned,
-        BybitCursorListResponse<D>: BybitResponseCheck,
+        BitgetCursorListResponse<D>: BitgetResponseCheck,
         F: FnMut(&D) -> Option<InstrumentAny>,
     {
         let mut instruments = Vec::new();
@@ -3263,7 +3589,7 @@ impl BybitHttpClient {
         let mut cursor_walk = CursorWalk::default();
 
         loop {
-            let params = BybitInstrumentsInfoParams {
+            let params = BitgetInstrumentsInfoParams {
                 category: product_type,
                 symbol: symbol.clone(),
                 status: None,
@@ -3272,7 +3598,7 @@ impl BybitHttpClient {
                 cursor: cursor.clone(),
             };
 
-            let response: BybitCursorListResponse<D> = self.inner.get_instruments(&params).await?;
+            let response: BitgetCursorListResponse<D> = self.inner.get_instruments(&params).await?;
 
             for definition in &response.result.list {
                 if let Some(instrument) = parse(definition) {
@@ -3284,7 +3610,7 @@ impl BybitHttpClient {
             // order on a missing instrument by name, while a short reconciliation history is
             // silent, so the other walks return this error and this one keeps what it has.
             cursor = match cursor_walk
-                .advance(BYBIT_INSTRUMENTS_INFO, response.result.next_page_cursor)
+                .advance(BITGET_INSTRUMENTS_INFO, response.result.next_page_cursor)
             {
                 Ok(cursor) => cursor,
                 Err(e) => {
@@ -3315,14 +3641,14 @@ impl BybitHttpClient {
     /// Returns an error if the request fails.
     pub async fn request_instrument_statuses(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
     ) -> anyhow::Result<AHashMap<InstrumentId, MarketStatusAction>> {
         let mut statuses = AHashMap::new();
         let mut cursor: Option<String> = None;
         let mut cursor_walk = CursorWalk::default();
 
         loop {
-            let params = BybitInstrumentsInfoParams {
+            let params = BitgetInstrumentsInfoParams {
                 category: product_type,
                 symbol: None,
                 status: None,
@@ -3332,28 +3658,28 @@ impl BybitHttpClient {
             };
 
             match product_type {
-                BybitProductType::Spot => {
-                    let response: BybitCursorListResponse<BybitInstrumentSpot> =
+                BitgetProductType::Spot => {
+                    let response: BitgetCursorListResponse<BitgetInstrumentSpot> =
                         self.inner.get_instruments(&params).await?;
 
                     for def in &response.result.list {
-                        let symbol = make_bybit_symbol(def.symbol, product_type);
-                        let id = InstrumentId::new(Symbol::from(symbol), *BYBIT_VENUE);
+                        let symbol = make_bitget_symbol(def.symbol, product_type);
+                        let id = InstrumentId::new(Symbol::from(symbol), *BITGET_VENUE);
                         statuses.insert(id, MarketStatusAction::from(def.status));
                     }
                     cursor = response.result.next_page_cursor;
                 }
-                BybitProductType::Linear => {
-                    let response: BybitCursorListResponse<BybitInstrumentLinear> =
+                BitgetProductType::Linear => {
+                    let response: BitgetCursorListResponse<BitgetInstrumentLinear> =
                         self.inner.get_instruments(&params).await?;
 
                     for def in &response.result.list {
-                        let symbol = make_bybit_symbol(def.symbol, product_type);
-                        let id = InstrumentId::new(Symbol::from(symbol), *BYBIT_VENUE);
+                        let symbol = make_bitget_symbol(def.symbol, product_type);
+                        let id = InstrumentId::new(Symbol::from(symbol), *BITGET_VENUE);
                         let status = MarketStatusAction::from(def.status);
                         if status == MarketStatusAction::Trading
-                            && def.contract_type == BybitContractType::LinearPerpetual
-                            && def.delivery_time != "0"
+                            && def.contract_type() == BitgetContractType::LinearPerpetual
+                            && is_scheduled_off(&def.off_time)
                         {
                             statuses.insert(id, MarketStatusAction::PreClose);
                         } else {
@@ -3362,17 +3688,17 @@ impl BybitHttpClient {
                     }
                     cursor = response.result.next_page_cursor;
                 }
-                BybitProductType::Inverse => {
-                    let response: BybitCursorListResponse<BybitInstrumentInverse> =
+                BitgetProductType::Inverse => {
+                    let response: BitgetCursorListResponse<BitgetInstrumentInverse> =
                         self.inner.get_instruments(&params).await?;
 
                     for def in &response.result.list {
-                        let symbol = make_bybit_symbol(def.symbol, product_type);
-                        let id = InstrumentId::new(Symbol::from(symbol), *BYBIT_VENUE);
+                        let symbol = make_bitget_symbol(def.symbol, product_type);
+                        let id = InstrumentId::new(Symbol::from(symbol), *BITGET_VENUE);
                         let status = MarketStatusAction::from(def.status);
                         if status == MarketStatusAction::Trading
-                            && def.contract_type == BybitContractType::InversePerpetual
-                            && def.delivery_time != "0"
+                            && def.contract_type() == BitgetContractType::InversePerpetual
+                            && is_scheduled_off(&def.off_time)
                         {
                             statuses.insert(id, MarketStatusAction::PreClose);
                         } else {
@@ -3381,20 +3707,12 @@ impl BybitHttpClient {
                     }
                     cursor = response.result.next_page_cursor;
                 }
-                BybitProductType::Option => {
-                    let response: BybitCursorListResponse<BybitInstrumentOption> =
-                        self.inner.get_instruments(&params).await?;
-
-                    for def in &response.result.list {
-                        let symbol = make_bybit_symbol(def.symbol, product_type);
-                        let id = InstrumentId::new(Symbol::from(symbol), *BYBIT_VENUE);
-                        statuses.insert(id, MarketStatusAction::from(def.status));
-                    }
-                    cursor = response.result.next_page_cursor;
+                BitgetProductType::Option => {
+                    anyhow::bail!("Option instruments are not supported by Bitget")
                 }
             }
 
-            cursor = cursor_walk.advance(BYBIT_INSTRUMENTS_INFO, cursor)?;
+            cursor = cursor_walk.advance(BITGET_INSTRUMENTS_INFO, cursor)?;
             if cursor.is_none() {
                 break;
             }
@@ -3406,7 +3724,7 @@ impl BybitHttpClient {
     /// Request instruments for a given product type.
     ///
     /// When `base_coin` is provided, the request is narrowed to that base coin.
-    /// This is required for `Option`: Bybit's API returns only `BTC` options when
+    /// This is required for `Option`: Bitget's API returns only `BTC` options when
     /// `baseCoin` is omitted.
     ///
     /// # Errors
@@ -3414,15 +3732,15 @@ impl BybitHttpClient {
     /// Returns an error if the request fails or parsing fails.
     pub async fn request_instruments(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<Ustr>,
     ) -> anyhow::Result<Vec<InstrumentAny>> {
         let ts_init = self.generate_ts_init();
 
         let instruments = match product_type {
-            BybitProductType::Spot => {
-                self.paginate_instruments::<BybitInstrumentSpot, _>(
+            BitgetProductType::Spot => {
+                self.paginate_instruments::<BitgetInstrumentSpot, _>(
                     product_type,
                     &symbol,
                     base_coin,
@@ -3430,8 +3748,8 @@ impl BybitHttpClient {
                 )
                 .await?
             }
-            BybitProductType::Linear => {
-                self.paginate_instruments::<BybitInstrumentLinear, _>(
+            BitgetProductType::Linear => {
+                self.paginate_instruments::<BitgetInstrumentLinear, _>(
                     product_type,
                     &symbol,
                     base_coin,
@@ -3439,8 +3757,8 @@ impl BybitHttpClient {
                 )
                 .await?
             }
-            BybitProductType::Inverse => {
-                self.paginate_instruments::<BybitInstrumentInverse, _>(
+            BitgetProductType::Inverse => {
+                self.paginate_instruments::<BitgetInstrumentInverse, _>(
                     product_type,
                     &symbol,
                     base_coin,
@@ -3448,14 +3766,9 @@ impl BybitHttpClient {
                 )
                 .await?
             }
-            BybitProductType::Option => {
-                self.paginate_instruments::<BybitInstrumentOption, _>(
-                    product_type,
-                    &symbol,
-                    base_coin,
-                    |def| parse_option_instrument(def, ts_init, ts_init).ok(),
-                )
-                .await?
+            BitgetProductType::Option => {
+                // Bitget lists no options; the parse path is kept for API parity
+                anyhow::bail!("Option instruments are not supported by Bitget")
             }
         };
 
@@ -3466,7 +3779,7 @@ impl BybitHttpClient {
 
     /// Requests full instrument definitions and their market statuses in a single endpoint pass.
     ///
-    /// Both are parsed from the same `/v5/market/instruments-info` response, avoiding a second
+    /// Both are parsed from the same `/api/v3/market/instruments` response, avoiding a second
     /// round-trip when a caller needs definitions and statuses together (e.g. the polling loop
     /// serving both instrument and status subscriptions).
     ///
@@ -3475,7 +3788,7 @@ impl BybitHttpClient {
     /// Returns an error if the request fails or parsing fails.
     pub async fn request_instruments_with_statuses(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
     ) -> anyhow::Result<(
         Vec<InstrumentAny>,
         AHashMap<InstrumentId, MarketStatusAction>,
@@ -3483,7 +3796,7 @@ impl BybitHttpClient {
         let ts_init = self.generate_ts_init();
         let mut statuses = AHashMap::new();
 
-        // A perp with a non-zero delivery time is scheduled for delisting.
+        // A perp with an `offTime` is scheduled for a trading halt or delisting.
         let perp_status = |status: MarketStatusAction, is_scheduled_perp: bool| {
             if status == MarketStatusAction::Trading && is_scheduled_perp {
                 MarketStatusAction::PreClose
@@ -3493,15 +3806,15 @@ impl BybitHttpClient {
         };
 
         let instruments = match product_type {
-            BybitProductType::Spot => {
-                self.paginate_instruments::<BybitInstrumentSpot, _>(
+            BitgetProductType::Spot => {
+                self.paginate_instruments::<BitgetInstrumentSpot, _>(
                     product_type,
                     &None::<String>,
                     None,
                     |def| {
                         let id = InstrumentId::new(
-                            Symbol::from(make_bybit_symbol(def.symbol, product_type)),
-                            *BYBIT_VENUE,
+                            Symbol::from(make_bitget_symbol(def.symbol, product_type)),
+                            *BITGET_VENUE,
                         );
                         statuses.insert(id, MarketStatusAction::from(def.status));
                         parse_spot_instrument(def, ts_init, ts_init).ok()
@@ -3509,57 +3822,44 @@ impl BybitHttpClient {
                 )
                 .await?
             }
-            BybitProductType::Linear => {
-                self.paginate_instruments::<BybitInstrumentLinear, _>(
+            BitgetProductType::Linear => {
+                self.paginate_instruments::<BitgetInstrumentLinear, _>(
                     product_type,
                     &None::<String>,
                     None,
                     |def| {
                         let id = InstrumentId::new(
-                            Symbol::from(make_bybit_symbol(def.symbol, product_type)),
-                            *BYBIT_VENUE,
+                            Symbol::from(make_bitget_symbol(def.symbol, product_type)),
+                            *BITGET_VENUE,
                         );
-                        let scheduled = def.contract_type == BybitContractType::LinearPerpetual
-                            && def.delivery_time != "0";
+                        let scheduled = def.contract_type() == BitgetContractType::LinearPerpetual
+                            && is_scheduled_off(&def.off_time);
                         statuses.insert(id, perp_status(def.status.into(), scheduled));
                         parse_linear_instrument(def, ts_init, ts_init).ok()
                     },
                 )
                 .await?
             }
-            BybitProductType::Inverse => {
-                self.paginate_instruments::<BybitInstrumentInverse, _>(
+            BitgetProductType::Inverse => {
+                self.paginate_instruments::<BitgetInstrumentInverse, _>(
                     product_type,
                     &None::<String>,
                     None,
                     |def| {
                         let id = InstrumentId::new(
-                            Symbol::from(make_bybit_symbol(def.symbol, product_type)),
-                            *BYBIT_VENUE,
+                            Symbol::from(make_bitget_symbol(def.symbol, product_type)),
+                            *BITGET_VENUE,
                         );
-                        let scheduled = def.contract_type == BybitContractType::InversePerpetual
-                            && def.delivery_time != "0";
+                        let scheduled = def.contract_type() == BitgetContractType::InversePerpetual
+                            && is_scheduled_off(&def.off_time);
                         statuses.insert(id, perp_status(def.status.into(), scheduled));
                         parse_inverse_instrument(def, ts_init, ts_init).ok()
                     },
                 )
                 .await?
             }
-            BybitProductType::Option => {
-                self.paginate_instruments::<BybitInstrumentOption, _>(
-                    product_type,
-                    &None::<String>,
-                    None,
-                    |def| {
-                        let id = InstrumentId::new(
-                            Symbol::from(make_bybit_symbol(def.symbol, product_type)),
-                            *BYBIT_VENUE,
-                        );
-                        statuses.insert(id, MarketStatusAction::from(def.status));
-                        parse_option_instrument(def, ts_init, ts_init).ok()
-                    },
-                )
-                .await?
+            BitgetProductType::Option => {
+                anyhow::bail!("Option instruments are not supported by Bitget")
             }
         };
 
@@ -3570,8 +3870,8 @@ impl BybitHttpClient {
 
     /// Request ticker information for market data.
     ///
-    /// Fetches ticker data from Bybit's `/v5/market/tickers` endpoint and returns
-    /// a unified `BybitTickerData` structure compatible with all product types.
+    /// Fetches ticker data from Bitget's `/api/v3/market/tickers` endpoint and returns
+    /// a unified `BitgetTickerData` structure compatible with all product types.
     ///
     /// # Errors
     ///
@@ -3579,34 +3879,31 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/tickers>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn request_tickers(
         &self,
-        params: &BybitTickersParams,
-    ) -> anyhow::Result<Vec<BybitTickerData>> {
-        use super::models::{
-            BybitTickersLinearResponse, BybitTickersOptionResponse, BybitTickersSpotResponse,
-        };
+        params: &BitgetTickersParams,
+    ) -> anyhow::Result<Vec<BitgetTickerData>> {
+        use super::models::{BitgetTickersLinearResponse, BitgetTickersSpotResponse};
 
         match params.category {
-            BybitProductType::Spot => {
-                let response: BybitTickersSpotResponse = self.inner.get_tickers(params).await?;
+            BitgetProductType::Spot => {
+                let response: BitgetTickersSpotResponse = self.inner.get_tickers(params).await?;
                 Ok(response.result.list.into_iter().map(Into::into).collect())
             }
-            BybitProductType::Linear | BybitProductType::Inverse => {
-                let response: BybitTickersLinearResponse = self.inner.get_tickers(params).await?;
+            BitgetProductType::Linear | BitgetProductType::Inverse => {
+                let response: BitgetTickersLinearResponse = self.inner.get_tickers(params).await?;
                 Ok(response.result.list.into_iter().map(Into::into).collect())
             }
-            BybitProductType::Option => {
-                let response: BybitTickersOptionResponse = self.inner.get_tickers(params).await?;
-                Ok(response.result.list.into_iter().map(Into::into).collect())
+            BitgetProductType::Option => {
+                anyhow::bail!("Option tickers are not supported by Bitget")
             }
         }
     }
 
     /// Requests raw option tickers for a given base coin.
     ///
-    /// Returns `Vec<BybitTickerOption>` with the raw fields including `underlying_price`.
+    /// Returns `Vec<BitgetTickerOption>` with the raw fields including `underlying_price`.
     ///
     /// # Errors
     ///
@@ -3614,15 +3911,9 @@ impl BybitHttpClient {
     pub async fn request_option_tickers_raw(
         &self,
         base_coin: &str,
-    ) -> anyhow::Result<Vec<BybitTickerOption>> {
-        let params = BybitTickersParams {
-            category: BybitProductType::Option,
-            symbol: None,
-            base_coin: Some(base_coin.to_string()),
-            exp_date: None,
-        };
-        let response: BybitTickersOptionResponse = self.inner.get_tickers(&params).await?;
-        Ok(response.result.list)
+    ) -> anyhow::Result<Vec<BitgetTickerOption>> {
+        // Bitget lists no options
+        anyhow::bail!("Option tickers for {base_coin} are not supported by Bitget")
     }
 
     /// Request raw option tickers with custom params.
@@ -3635,20 +3926,23 @@ impl BybitHttpClient {
     /// Returns an error if the request fails.
     pub async fn request_option_tickers_raw_with_params(
         &self,
-        params: &BybitTickersParams,
-    ) -> anyhow::Result<Vec<BybitTickerOption>> {
-        let response: BybitTickersOptionResponse = self.inner.get_tickers(params).await?;
-        Ok(response.result.list)
+        params: &BitgetTickersParams,
+    ) -> anyhow::Result<Vec<BitgetTickerOption>> {
+        // Bitget lists no options
+        anyhow::bail!(
+            "Option tickers are not supported by Bitget (category {:?})",
+            params.category
+        )
     }
 
     /// Request recent trade tick history for a given symbol.
     ///
-    /// Returns the most recent public trades from Bybit's `/v5/market/recent-trade` endpoint.
+    /// Returns the most recent public trades from Bitget's `/api/v3/market/fills` endpoint.
     /// This endpoint only provides recent trades (up to 1000 most recent), typically covering
     /// only the last few minutes for active markets.
     ///
     /// **Note**: For historical trade data with time ranges, use the klines endpoint instead.
-    /// The Bybit public API does not support fetching historical trades by time range.
+    /// The Bitget public API does not support fetching historical trades by time range.
     ///
     /// # Errors
     ///
@@ -3659,19 +3953,19 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/recent-trade>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn request_trades(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         limit: Option<u32>,
     ) -> anyhow::Result<Vec<TradeTick>> {
         let instrument = self.instrument_from_cache_by_id(instrument_id)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-        let mut params_builder = BybitTradesParamsBuilder::default();
+        let mut params_builder = BitgetTradesParamsBuilder::default();
         params_builder.category(product_type);
-        params_builder.symbol(bybit_symbol.raw_symbol().to_string());
+        params_builder.symbol(bitget_symbol.raw_symbol().to_string());
 
         if let Some(limit_val) = limit {
             params_builder.limit(limit_val);
@@ -3702,42 +3996,34 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/history-fund-rate>
+    /// <https://www.bitget.com/docs/catalog/market/derivatives>
     pub async fn request_funding_rates(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         start: Option<Timestamp>,
         end: Option<Timestamp>,
         limit: Option<u32>,
     ) -> anyhow::Result<Vec<FundingRateUpdate>> {
         let instrument = self.instrument_from_cache_by_id(instrument_id)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
         let start_ms = start.map(|dt| dt.as_millisecond());
+        let end_ms = end.map(|dt| dt.as_millisecond());
         let mut seen_timestamps: AHashSet<i64> = AHashSet::new();
 
         let mut raw_funding_rates = Vec::new();
 
-        // Bybit requires endTime when startTime is provided
-        let mut current_end_ms = match (start, end) {
-            (Some(_), None) => Some(Timestamp::now().as_millisecond()),
-            _ => end.map(|dt| dt.as_millisecond()),
-        };
+        // Bitget pages funding history by page number (`cursor`, 1..=100, newest first) and
+        // takes no time range, so the window is applied to each page
+        let mut page = 1u32;
 
         loop {
-            let mut params_builder = BybitFundingParamsBuilder::default();
+            let mut params_builder = BitgetFundingParamsBuilder::default();
             params_builder.category(product_type);
-            params_builder.symbol(bybit_symbol.raw_symbol().to_string());
-            params_builder.limit(limit.unwrap_or(200).clamp(0, 200)); // 200 is the maximum for the Bybit API
-
-            if let Some(start_val) = start_ms {
-                params_builder.start_time(start_val);
-            }
-
-            if let Some(end_val) = current_end_ms {
-                params_builder.end_time(end_val);
-            }
+            params_builder.symbol(bitget_symbol.raw_symbol().to_string());
+            params_builder.limit(limit.unwrap_or(100).clamp(1, 100)); // 100 is the maximum for the Bitget API
+            params_builder.cursor(page);
 
             let params = params_builder.build().build_anyhow()?;
             let response = self.inner.get_funding_history(&params).await?;
@@ -3762,7 +4048,12 @@ impl BybitHttpClient {
                 None => break,
             };
 
-            let new_funding_rates = new_funding_rates_with_ts.into_iter().map(|(_, f)| f);
+            let new_funding_rates = new_funding_rates_with_ts
+                .into_iter()
+                .filter(|(ts, _)| {
+                    end_ms.is_none_or(|end| *ts <= end) && start_ms.is_none_or(|start| *ts >= start)
+                })
+                .map(|(_, f)| f);
             raw_funding_rates.extend(new_funding_rates);
 
             // Check if we've reached the requested limit
@@ -3778,8 +4069,12 @@ impl BybitHttpClient {
                 break;
             }
 
-            // Move end time backwards to get earlier data
-            current_end_ms = Some(earliest_funding_time - 1);
+            if page >= 100 {
+                break;
+            }
+
+            // Move to the next (older) page
+            page += 1;
         }
 
         if let Some(limit_val) = limit {
@@ -3816,10 +4111,8 @@ impl BybitHttpClient {
 
     /// Request an orderbook snapshot for a given symbol.
     ///
-    /// Bybit limits the amount of levels (depth) for each product type to:
-    /// - Spot: `1..=200` (default: `1`)
-    /// - Linear & Inverse: `1..=500` (default: `25`)
-    /// - Options: `1..=25` (default: `1`)
+    /// Bitget limits the amount of levels (depth) to `1..=1000` (default: `5`) for every
+    /// product type.
     ///
     /// # Errors
     ///
@@ -3830,30 +4123,31 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/orderbook>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn request_orderbook_snapshot(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         limit: Option<u32>,
     ) -> anyhow::Result<OrderBookDeltas> {
         let instrument = self.instrument_from_cache_by_id(instrument_id)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-        let mut params_builder = BybitOrderbookParamsBuilder::default();
+        let mut params_builder = BitgetOrderbookParamsBuilder::default();
         params_builder.category(product_type);
-        params_builder.symbol(bybit_symbol.raw_symbol().to_string());
+        params_builder.symbol(bitget_symbol.raw_symbol().to_string());
 
         if let Some(limit) = limit {
             let max_limit = match product_type {
-                BybitProductType::Spot => 200,
-                BybitProductType::Option => 25,
-                BybitProductType::Linear | BybitProductType::Inverse => 500,
+                BitgetProductType::Option => 25,
+                BitgetProductType::Spot
+                | BitgetProductType::Linear
+                | BitgetProductType::Inverse => 1000,
             };
             let clamped_limit = limit.min(max_limit);
             if limit > max_limit {
                 log::warn!(
-                    "Bybit orderbook snapshot request depth limit exceeds venue maximum; clamping: limit={limit}, clamped_limit={clamped_limit}",
+                    "Bitget orderbook snapshot request depth limit exceeds venue maximum; clamping: limit={limit}, clamped_limit={clamped_limit}",
                 );
             }
             params_builder.limit(clamped_limit);
@@ -3878,10 +4172,10 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/kline>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     pub async fn request_bars(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         bar_type: BarType,
         start: Option<Timestamp>,
         end: Option<Timestamp>,
@@ -3890,10 +4184,10 @@ impl BybitHttpClient {
     ) -> anyhow::Result<Vec<Bar>> {
         let instrument_id = bar_type.instrument_id();
         let instrument = self.instrument_from_cache_by_id(instrument_id)?;
-        let bybit_symbol = BybitSymbol::new(instrument_id.symbol.as_str())?;
+        let bitget_symbol = BitgetSymbol::new(instrument_id.symbol.as_str())?;
 
-        // Convert Nautilus BarSpec to Bybit interval
-        let interval = bar_spec_to_bybit_interval(
+        // Convert Nautilus BarSpec to Bitget interval
+        let interval = bar_spec_to_bitget_interval(
             bar_type.spec().aggregation,
             bar_type.spec().step.get() as u64,
         )?;
@@ -3919,11 +4213,11 @@ impl BybitHttpClient {
         loop {
             page_count += 1;
 
-            let mut params_builder = BybitKlinesParamsBuilder::default();
+            let mut params_builder = BitgetKlinesParamsBuilder::default();
             params_builder.category(product_type);
-            params_builder.symbol(bybit_symbol.raw_symbol().to_string());
+            params_builder.symbol(bitget_symbol.raw_symbol().to_string());
             params_builder.interval(interval);
-            params_builder.limit(1000u32); // Limit for data size per page (maximum for the Bybit API)
+            params_builder.limit(1000u32); // Limit for data size per page (maximum for the Bitget API)
 
             if let Some(start_val) = start_ms {
                 params_builder.start(start_val);
@@ -4050,14 +4344,14 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/account/fee-rate>
+    /// <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn request_fee_rates(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<String>,
-    ) -> anyhow::Result<Vec<BybitFeeRate>> {
-        let params = BybitFeeRateParams {
+    ) -> anyhow::Result<Vec<BitgetFeeRate>> {
+        let params = BitgetFeeRateParams {
             category: product_type,
             symbol,
             base_coin,
@@ -4077,13 +4371,13 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/account/wallet-balance>
+    /// <https://www.bitget.com/docs/catalog/account/assets-balance>
     pub async fn request_account_state(
         &self,
-        account_type: BybitAccountType,
+        account_type: BitgetAccountType,
         account_id: AccountId,
     ) -> anyhow::Result<AccountState> {
-        let params = BybitWalletBalanceParams {
+        let params = BitgetWalletBalanceParams {
             account_type,
             coin: None,
         };
@@ -4092,13 +4386,8 @@ impl BybitHttpClient {
         let ts_init = self.generate_ts_init();
 
         // Take the first wallet balance from the list
-        let wallet_balance = response
-            .result
-            .list
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No wallet balance found in response"))?;
-
-        parse_account_state(wallet_balance, account_id, ts_init)
+        // Bitget returns the single unified account object
+        parse_account_state(&response.result, account_id, ts_init)
     }
 
     /// Request multiple order status reports.
@@ -4120,7 +4409,7 @@ impl BybitHttpClient {
     pub async fn request_order_status_reports(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: Option<InstrumentId>,
         open_only: bool,
         start: Option<Timestamp>,
@@ -4133,23 +4422,14 @@ impl BybitHttpClient {
             if symbol_str.is_empty() {
                 None
             } else {
-                Some(BybitSymbol::new(symbol_str)?.raw_symbol().to_string())
+                Some(BitgetSymbol::new(symbol_str)?.raw_symbol().to_string())
             }
         } else {
             None
         };
 
-        // For LINEAR without symbol, query all settle coins to avoid filtering
-        // For INVERSE, never use settle_coin parameter
-        let settle_coins_to_query: Vec<Option<String>> =
-            if product_type == BybitProductType::Linear && symbol_param.is_none() {
-                vec![Some("USDT".to_string()), Some("USDC".to_string())]
-            } else {
-                match product_type {
-                    BybitProductType::Inverse => vec![None],
-                    _ => vec![None],
-                }
-            };
+        // Bitget filters by category only (USDC-margined contracts are a separate category)
+        let settle_coins_to_query: Vec<Option<String>> = vec![None];
 
         let mut all_collected_orders = Vec::new();
         let mut total_collected_across_coins = 0;
@@ -4171,14 +4451,14 @@ impl BybitHttpClient {
 
                 // Query regular orders then conditional (stop/MIT) orders.
                 // Options do not support the StopOrder filter.
-                let order_filters: Vec<Option<BybitOrderFilter>> =
-                    if product_type == BybitProductType::Option {
+                let order_filters: Vec<Option<BitgetOrderFilter>> =
+                    if product_type == BitgetProductType::Option {
                         vec![None]
                     } else {
-                        vec![None, Some(BybitOrderFilter::StopOrder)]
+                        vec![None, Some(BitgetOrderFilter::StopOrder)]
                     };
 
-                let open_only_modes = [None, Some(BybitOpenOnly::ClosedRecent)];
+                let open_only_modes = [None, Some(BitgetOpenOnly::ClosedRecent)];
 
                 for oo in open_only_modes {
                     for order_filter in &order_filters {
@@ -4196,10 +4476,10 @@ impl BybitHttpClient {
                                 break;
                             }
 
-                            // Max 50 per Bybit API
+                            // Max 50 per Bitget API
                             let page_limit = std::cmp::min(remaining, 50);
 
-                            let mut p = BybitOpenOrdersParamsBuilder::default();
+                            let mut p = BitgetOpenOrdersParamsBuilder::default();
                             p.category(product_type);
 
                             if let Some(symbol) = symbol_param.clone() {
@@ -4223,16 +4503,8 @@ impl BybitHttpClient {
                                 p.cursor(c);
                             }
                             let params = p.build().build_anyhow()?;
-                            let response: BybitOpenOrdersResponse = self
-                                .inner
-                                .send_request(
-                                    Method::GET,
-                                    BYBIT_ORDER_REALTIME,
-                                    Some(&params),
-                                    None,
-                                    true,
-                                )
-                                .await?;
+                            let response: BitgetOpenOrdersResponse =
+                                self.inner.get_open_orders_with(&params).await?;
 
                             for order in response.result.list {
                                 if seen_ids.insert(order.order_id) {
@@ -4246,7 +4518,7 @@ impl BybitHttpClient {
                             }
 
                             cursor = cursor_walk
-                                .advance(BYBIT_ORDER_REALTIME, response.result.next_page_cursor)?;
+                                .advance(BITGET_ORDER_REALTIME, response.result.next_page_cursor)?;
 
                             if cursor.is_none() {
                                 break;
@@ -4265,11 +4537,11 @@ impl BybitHttpClient {
 
                 // Query regular orders then conditional (stop/MIT) orders.
                 // Options do not support the StopOrder filter.
-                let order_filters: Vec<Option<BybitOrderFilter>> =
-                    if product_type == BybitProductType::Option {
+                let order_filters: Vec<Option<BitgetOrderFilter>> =
+                    if product_type == BitgetProductType::Option {
                         vec![None]
                     } else {
-                        vec![None, Some(BybitOrderFilter::StopOrder)]
+                        vec![None, Some(BitgetOrderFilter::StopOrder)]
                     };
 
                 for order_filter in &order_filters {
@@ -4287,10 +4559,10 @@ impl BybitHttpClient {
                             break;
                         }
 
-                        // Max 50 per Bybit API
+                        // Max 50 per Bitget API
                         let page_limit = std::cmp::min(remaining, 50);
 
-                        let mut open_params = BybitOpenOrdersParamsBuilder::default();
+                        let mut open_params = BitgetOpenOrdersParamsBuilder::default();
                         open_params.category(product_type);
 
                         if let Some(symbol) = symbol_param.clone() {
@@ -4310,16 +4582,8 @@ impl BybitHttpClient {
                             open_params.cursor(c);
                         }
                         let open_params = open_params.build().build_anyhow()?;
-                        let open_response: BybitOpenOrdersResponse = self
-                            .inner
-                            .send_request(
-                                Method::GET,
-                                BYBIT_ORDER_REALTIME,
-                                Some(&open_params),
-                                None,
-                                true,
-                            )
-                            .await?;
+                        let open_response: BitgetOpenOrdersResponse =
+                            self.inner.get_open_orders_with(&open_params).await?;
 
                         for order in open_response.result.list {
                             if !seen_open_ids.contains(&order.order_id) {
@@ -4328,8 +4592,10 @@ impl BybitHttpClient {
                             }
                         }
 
-                        cursor = cursor_walk
-                            .advance(BYBIT_ORDER_REALTIME, open_response.result.next_page_cursor)?;
+                        cursor = cursor_walk.advance(
+                            BITGET_ORDER_REALTIME,
+                            open_response.result.next_page_cursor,
+                        )?;
 
                         if cursor.is_none() {
                             break;
@@ -4360,10 +4626,10 @@ impl BybitHttpClient {
                             break;
                         }
 
-                        // Max 50 per Bybit API
+                        // Max 50 per Bitget API
                         let page_limit = std::cmp::min(remaining, 50);
 
-                        let mut history_params = BybitOrderHistoryParamsBuilder::default();
+                        let mut history_params = BitgetOrderHistoryParamsBuilder::default();
                         history_params.category(product_type);
 
                         if let Some(symbol) = symbol_param.clone() {
@@ -4391,16 +4657,8 @@ impl BybitHttpClient {
                             history_params.cursor(c);
                         }
                         let history_params = history_params.build().build_anyhow()?;
-                        let history_response: BybitOrderHistoryResponse = self
-                            .inner
-                            .send_request(
-                                Method::GET,
-                                BYBIT_ORDER_HISTORY,
-                                Some(&history_params),
-                                None,
-                                true,
-                            )
-                            .await?;
+                        let history_response: BitgetOrderHistoryResponse =
+                            self.inner.get_order_history_with(&history_params).await?;
 
                         // Open orders might appear in both realtime and history
                         for order in history_response.result.list {
@@ -4411,7 +4669,7 @@ impl BybitHttpClient {
                         }
 
                         cursor = cursor_walk.advance(
-                            BYBIT_ORDER_HISTORY,
+                            BITGET_ORDER_HISTORY,
                             history_response.result.next_page_cursor,
                         )?;
 
@@ -4442,11 +4700,11 @@ impl BybitHttpClient {
                     reports.push(report);
                 }
             } else {
-                // Bybit returns raw symbol (e.g. "ETHUSDT"), need to add product suffix for cache lookup
+                // Bitget returns raw symbol (e.g. "ETHUSDT"), need to add product suffix for cache lookup
                 // Note: instruments are stored in cache by symbol only (without venue)
                 if !order.symbol.is_empty() {
                     let symbol_with_product =
-                        Symbol::from_ustr_unchecked(make_bybit_symbol(order.symbol, product_type));
+                        Symbol::from_ustr_unchecked(make_bitget_symbol(order.symbol, product_type));
 
                     let Ok(instrument) = self.instrument_from_cache(&symbol_with_product) else {
                         log::debug!(
@@ -4480,11 +4738,11 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/order/execution>
+    /// <https://www.bitget.com/docs/catalog/trading/order-management>
     pub async fn request_fill_reports(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: Option<InstrumentId>,
         start: Option<i64>,
         end: Option<i64>,
@@ -4492,8 +4750,8 @@ impl BybitHttpClient {
     ) -> anyhow::Result<Vec<FillReport>> {
         // Build query parameters
         let symbol = if let Some(id) = instrument_id {
-            let bybit_symbol = BybitSymbol::new(id.symbol.as_str())?;
-            Some(bybit_symbol.raw_symbol().to_string())
+            let bitget_symbol = BitgetSymbol::new(id.symbol.as_str())?;
+            Some(bitget_symbol.raw_symbol().to_string())
         } else {
             None
         };
@@ -4517,10 +4775,10 @@ impl BybitHttpClient {
                 break;
             }
 
-            // Size the page request to respect caller's limit (max 100 per Bybit API)
+            // Size the page request to respect caller's limit (max 100 per Bitget API)
             let page_limit = std::cmp::min(remaining, 100);
 
-            let params = BybitTradeHistoryParams {
+            let params = BitgetTradeHistoryParams {
                 category: product_type,
                 symbol: symbol.clone(),
                 base_coin: None,
@@ -4535,7 +4793,15 @@ impl BybitHttpClient {
 
             let response = self.inner.get_trade_history(&params).await?;
             for execution in response.result.list {
-                if execution.exec_type == BybitExecType::Funding {
+                // `/api/v3/trade/fills` takes no symbol filter
+                if symbol
+                    .as_deref()
+                    .is_some_and(|symbol| execution.symbol.as_str() != symbol)
+                {
+                    continue;
+                }
+
+                if execution.exec_type == BitgetExecType::Funding {
                     log::debug!(
                         "Skipping funding execution: symbol={}, order_id={}, exec_id={}",
                         execution.symbol,
@@ -4549,7 +4815,8 @@ impl BybitHttpClient {
                 total_executions += 1;
             }
 
-            cursor = cursor_walk.advance(BYBIT_EXECUTION_LIST, response.result.next_page_cursor)?;
+            cursor =
+                cursor_walk.advance(BITGET_EXECUTION_LIST, response.result.next_page_cursor)?;
             if cursor.is_none() {
                 break;
             }
@@ -4560,9 +4827,9 @@ impl BybitHttpClient {
 
         for execution in all_executions {
             // Get instrument for this execution
-            // Bybit returns raw symbol (e.g. "ETHUSDT"), need to add product suffix for cache lookup
+            // Bitget returns raw symbol (e.g. "ETHUSDT"), need to add product suffix for cache lookup
             let symbol_with_product =
-                Symbol::from_ustr_unchecked(make_bybit_symbol(execution.symbol, product_type));
+                Symbol::from_ustr_unchecked(make_bitget_symbol(execution.symbol, product_type));
 
             let Ok(instrument) = self.instrument_from_cache(&symbol_with_product) else {
                 log::debug!(
@@ -4603,15 +4870,15 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/position>
+    /// <https://www.bitget.com/docs/catalog/trading/position-management>
     pub async fn request_position_status_reports(
         &self,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: Option<InstrumentId>,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
         // Handle SPOT position reports via wallet balances if flag is enabled
-        if product_type == BybitProductType::Spot {
+        if product_type == BitgetProductType::Spot {
             if self.use_spot_position_reports.load(Ordering::Relaxed) {
                 let Some(instrument_id) = instrument_id else {
                     anyhow::bail!(
@@ -4636,22 +4903,17 @@ impl BybitHttpClient {
             if symbol_str.is_empty() {
                 anyhow::bail!("InstrumentId symbol is empty");
             }
-            let bybit_symbol = BybitSymbol::new(symbol_str)?;
-            Some(bybit_symbol.raw_symbol().to_string())
+            let bitget_symbol = BitgetSymbol::new(symbol_str)?;
+            Some(bitget_symbol.raw_symbol().to_string())
         } else {
             None
         };
 
-        // For LINEAR category, the API requires either symbol OR settleCoin
-        let settle_coins: &[Option<&str>] =
-            if product_type == BybitProductType::Linear && symbol.is_none() {
-                &[Some("USDT"), Some("USDC")]
-            } else {
-                &[None]
-            };
+        // Bitget filters positions by category only
+        let settle_coins: &[Option<&str>] = &[None];
 
         for settle_coin in settle_coins {
-            let params = BybitPositionListParams {
+            let params = BitgetPositionListParams {
                 category: product_type,
                 symbol: symbol.clone(),
                 base_coin: None,
@@ -4670,7 +4932,7 @@ impl BybitHttpClient {
     async fn request_position_pages(
         &self,
         account_id: AccountId,
-        mut params: BybitPositionListParams,
+        mut params: BitgetPositionListParams,
         ts_init: UnixNanos,
         reports: &mut Vec<PositionStatusReport>,
     ) -> anyhow::Result<()> {
@@ -4702,7 +4964,7 @@ impl BybitHttpClient {
             }
 
             params.cursor =
-                cursor_walk.advance(BYBIT_POSITION_LIST, response.result.next_page_cursor)?;
+                cursor_walk.advance(BITGET_POSITION_LIST, response.result.next_page_cursor)?;
 
             if params.cursor.is_none() {
                 break;
@@ -4714,20 +4976,24 @@ impl BybitHttpClient {
 
     async fn query_order_by_id(
         &self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         order_id: &str,
         endpoint: &str,
         context: &str,
-    ) -> anyhow::Result<BybitOrder> {
-        let mut query_params = BybitOpenOrdersParamsBuilder::default();
+    ) -> anyhow::Result<BitgetOrder> {
+        let mut query_params = BitgetOpenOrdersParamsBuilder::default();
         query_params.category(product_type);
         query_params.order_id(order_id.to_string());
 
+        // Bitget serves single orders from `order-info`; conditional orders only from the
+        // strategy-order lists
+        if endpoint == BITGET_STRATEGY_ORDER_REALTIME {
+            query_params.order_filter(BitgetOrderFilter::StopOrder);
+        }
+
         let query_params = query_params.build().build_anyhow()?;
-        let order_response: BybitOpenOrdersResponse = self
-            .inner
-            .send_request(Method::GET, endpoint, Some(&query_params), None, true)
-            .await?;
+        let order_response: BitgetOpenOrdersResponse =
+            self.inner.get_open_orders_with(&query_params).await?;
 
         order_response
             .result
@@ -4747,7 +5013,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticated_client_rejects_redirects() {
-        let client = BybitRawHttpClient::build_http_client(3, None).unwrap();
+        let client = BitgetRawHttpClient::build_http_client(3, None).unwrap();
         assert_http_redirect_rejected(|url| async move {
             client
                 .get(url, None, None, Some(3), None)
@@ -4761,20 +5027,21 @@ mod tests {
 
     #[rstest]
     fn test_client_creation() {
-        let client = BybitHttpClient::new(None, 60, 3, 1000, 10_000, 5_000, None);
+        let client = BitgetHttpClient::new(None, 60, 3, 1000, 10_000, 5_000, None);
         assert!(client.is_ok());
 
         let client = client.unwrap();
-        assert!(client.base_url().contains("bybit.com"));
+        assert!(client.base_url().contains("bitget.com"));
         assert!(client.credential().is_none());
     }
 
     #[rstest]
     fn test_client_with_credentials() {
-        let client = BybitHttpClient::with_credentials(
+        let client = BitgetHttpClient::with_credentials(
             "test_key".to_string(),
             "test_secret".to_string(),
-            Some("https://api-testnet.bybit.com".to_string()),
+            "test_passphrase".to_string(),
+            Some("https://api.bitget.com".to_string()),
             60,
             3,
             1000,
@@ -4786,6 +5053,32 @@ mod tests {
 
         let client = client.unwrap();
         assert!(client.credential().is_some());
+        assert_eq!(
+            client.credential().unwrap().api_passphrase(),
+            "test_passphrase"
+        );
+    }
+
+    #[rstest]
+    fn test_new_with_env_demo_routes_to_demo_trading() {
+        let client = BitgetRawHttpClient::new_with_env(
+            Some("k".to_string()),
+            Some("s".to_string()),
+            Some("p".to_string()),
+            None,
+            true,
+            false,
+            60,
+            3,
+            1000,
+            10_000,
+            5_000,
+            None,
+        )
+        .unwrap();
+
+        assert!(client.is_demo_trading());
+        assert_eq!(client.base_url(), "https://api.bitget.com");
     }
 
     #[rstest]
@@ -4797,21 +5090,21 @@ mod tests {
         }
 
         let params = TestParams {
-            category: "linear".to_string(),
+            category: "USDT-FUTURES".to_string(),
             symbol: "BTCUSDT".to_string(),
         };
 
-        let path = BybitRawHttpClient::build_path("/v5/market/test", &params);
+        let path = BitgetRawHttpClient::build_path("/api/v3/market/test", &params);
         assert!(path.is_ok());
-        assert!(path.unwrap().contains("category=linear"));
+        assert!(path.unwrap().contains("category=USDT-FUTURES"));
     }
 
     #[rstest]
     fn test_build_path_without_params() {
         let params = ();
-        let path = BybitRawHttpClient::build_path("/v5/market/time", &params);
+        let path = BitgetRawHttpClient::build_path("/api/v3/market/time", &params);
         assert!(path.is_ok());
-        assert_eq!(path.unwrap(), "/v5/market/time");
+        assert_eq!(path.unwrap(), "/api/v3/market/time");
     }
 
     #[rstest]
@@ -4829,7 +5122,7 @@ mod tests {
         };
 
         // Old way: build_path serialized params
-        let old_path = BybitRawHttpClient::build_path(BYBIT_ORDER_REALTIME, &params).unwrap();
+        let old_path = BitgetRawHttpClient::build_path(BITGET_ORDER_REALTIME, &params).unwrap();
         let old_query = old_path.split('?').nth(1).unwrap_or("");
 
         // New way: direct serialization
@@ -4870,16 +5163,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case(403, "Access too frequent", true)]
-    #[case(403, "Forbidden", false)]
-    #[case(429, "Access too frequent", false)]
+    #[case(429, "Too Many Requests", true)]
+    #[case(403, "Access too frequent", false)]
+    #[case(400, "Too Many Requests", false)]
     fn test_rate_limit_403_detection(
         #[case] status: u16,
         #[case] body: &str,
         #[case] expected: bool,
     ) {
         assert_eq!(
-            BybitRawHttpClient::is_rate_limit_403(status, body),
+            BitgetRawHttpClient::is_rate_limit_403(status, body),
             expected
         );
     }

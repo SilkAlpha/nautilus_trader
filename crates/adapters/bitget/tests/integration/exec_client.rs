@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Integration tests for `BybitExecutionClient`.
+//! Integration tests for `BitgetExecutionClient`.
 //!
 //! These tests verify execution client operations including connection,
 //! order submission, cancellation, and event handling.
@@ -41,16 +41,16 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::{
-        consts::{BYBIT_CLIENT_ID, BYBIT_VENUE},
+        consts::{BITGET_CLIENT_ID, BITGET_VENUE},
         enums::{
-            BybitEnvironment, BybitMarginMode, BybitOrderSmpType, BybitPositionMode,
-            BybitProductType,
+            BitgetEnvironment, BitgetMarginMode, BitgetOrderSmpType, BitgetPositionMode,
+            BitgetProductType,
         },
     },
-    config::BybitExecutionClientConfig,
-    execution::BybitExecutionClient,
+    config::BitgetExecutionClientConfig,
+    execution::BitgetExecutionClient,
 };
 use nautilus_common::{
     cache::Cache,
@@ -79,8 +79,8 @@ use nautilus_model::{
         VenueOrderId,
     },
     orders::{
-        LimitIfTouchedOrder, MarketIfTouchedOrder, MarketOrder, Order, OrderAny, StopLimitOrder,
-        StopMarketOrder, TrailingStopMarketOrder,
+        LimitIfTouchedOrder, LimitOrder, MarketIfTouchedOrder, MarketOrder, Order, OrderAny,
+        StopLimitOrder, StopMarketOrder, TrailingStopMarketOrder,
     },
     types::{AccountBalance, Money, Price, Quantity},
 };
@@ -99,7 +99,11 @@ struct TestServerState {
     trade_order_payloads: Arc<tokio::sync::Mutex<Vec<Value>>>,
     trade_order_req_id_present: Arc<AtomicBool>,
     authenticated: Arc<AtomicBool>,
+    login_count: Arc<AtomicUsize>,
+    withhold_login: Arc<AtomicBool>,
     subscriptions: Arc<tokio::sync::Mutex<Vec<String>>>,
+    private_pushes: Arc<tokio::sync::Mutex<Vec<Value>>>,
+    ack_order_id: Arc<tokio::sync::Mutex<Option<String>>>,
     disconnect_trigger: Arc<AtomicBool>,
     reject_trade_websocket: Arc<AtomicBool>,
     empty_orders_realtime: Arc<AtomicBool>,
@@ -108,6 +112,8 @@ struct TestServerState {
     cancel_order_ret_code: Arc<AtomicUsize>,
     cancel_order_requests: Arc<AtomicUsize>,
     cancel_all_requests: Arc<AtomicUsize>,
+    modify_order_status: Arc<AtomicUsize>,
+    modify_order_payloads: Arc<tokio::sync::Mutex<Vec<Value>>>,
     position_requests: Arc<AtomicUsize>,
     wallet_balance_requests: Arc<AtomicUsize>,
     ping_count: Arc<AtomicUsize>,
@@ -127,7 +133,11 @@ impl Default for TestServerState {
             trade_order_payloads: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             trade_order_req_id_present: Arc::new(AtomicBool::new(false)),
             authenticated: Arc::new(AtomicBool::new(false)),
+            login_count: Arc::new(AtomicUsize::new(0)),
+            withhold_login: Arc::new(AtomicBool::new(false)),
             subscriptions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            private_pushes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            ack_order_id: Arc::new(tokio::sync::Mutex::new(None)),
             disconnect_trigger: Arc::new(AtomicBool::new(false)),
             reject_trade_websocket: Arc::new(AtomicBool::new(false)),
             empty_orders_realtime: Arc::new(AtomicBool::new(false)),
@@ -136,6 +146,8 @@ impl Default for TestServerState {
             cancel_order_ret_code: Arc::new(AtomicUsize::new(0)),
             cancel_order_requests: Arc::new(AtomicUsize::new(0)),
             cancel_all_requests: Arc::new(AtomicUsize::new(0)),
+            modify_order_status: Arc::new(AtomicUsize::new(0)),
+            modify_order_payloads: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             position_requests: Arc::new(AtomicUsize::new(0)),
             wallet_balance_requests: Arc::new(AtomicUsize::new(0)),
             ping_count: Arc::new(AtomicUsize::new(0)),
@@ -153,39 +165,65 @@ fn load_test_data(filename: &str) -> Value {
 }
 
 fn has_auth_headers(headers: &HeaderMap) -> bool {
-    headers.contains_key("x-bapi-api-key")
-        && headers.contains_key("x-bapi-sign")
-        && headers.contains_key("x-bapi-timestamp")
+    headers.contains_key("access-key")
+        && headers.contains_key("access-sign")
+        && headers.contains_key("access-timestamp")
+        && headers.contains_key("access-passphrase")
+}
+
+fn bitget_error(status: StatusCode, code: &str, msg: &str) -> Response {
+    (
+        status,
+        Json(json!({
+            "code": code,
+            "msg": msg,
+            "requestTime": 1794193099412_i64,
+            "data": null
+        })),
+    )
+        .into_response()
+}
+
+fn unauthorized() -> Response {
+    bitget_error(StatusCode::BAD_REQUEST, "40037", "Apikey does not exist")
+}
+
+fn bitget_ok(data: Value) -> Response {
+    let mut envelope = json!({
+        "code": "00000",
+        "msg": "success",
+        "requestTime": 1794193099412_i64,
+    });
+    envelope["data"] = data;
+    Json(envelope).into_response()
 }
 
 async fn handle_get_instruments(query: Query<HashMap<String, String>>) -> impl IntoResponse {
     let category = query.get("category").map(String::as_str);
     let filename = match category {
-        Some("linear") => "http_get_instruments_linear.json",
-        Some("spot") => "http_get_instruments_spot.json",
-        Some("inverse") => "http_get_instruments_inverse.json",
-        Some("option") => "http_get_instruments_option.json",
+        Some("USDT-FUTURES") => "http_get_instruments_linear.json",
+        Some("SPOT") => "http_get_instruments_spot.json",
+        Some("COIN-FUTURES") => "http_get_instruments_inverse.json",
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "retCode": 10001,
-                    "retMsg": "Invalid category",
-                    "result": {},
-                    "time": 1704470400123i64
-                })),
-            )
-                .into_response();
+            return bitget_error(StatusCode::BAD_REQUEST, "40034", "Parameter category error");
         }
     };
 
     let mut instruments = load_test_data(filename);
-    if category == Some("linear") {
-        let list = instruments["result"]["list"].as_array_mut().unwrap();
-        let mut sol = list[1].clone();
-        sol["symbol"] = json!("SOLUSDT");
-        sol["baseCoin"] = json!("SOL");
-        list.push(sol);
+    if category == Some("USDT-FUTURES") {
+        // The order fixtures were captured on AMZNUSDT/COINUSDT, which share TSLAUSDT's rules
+        let list = instruments["data"].as_array_mut().unwrap();
+        let tsla = list
+            .iter()
+            .find(|row| row["symbol"] == "TSLAUSDT")
+            .unwrap()
+            .clone();
+        for (symbol, base) in [("AMZNUSDT", "AMZN"), ("COINUSDT", "COIN")] {
+            let mut row = tsla.clone();
+            row["symbol"] = json!(symbol);
+            row["baseCoin"] = json!(base);
+            list.push(row);
+        }
     }
 
     Json(instruments).into_response()
@@ -193,16 +231,7 @@ async fn handle_get_instruments(query: Query<HashMap<String, String>>) -> impl I
 
 async fn handle_get_fee_rate(headers: HeaderMap) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
     let fee_rate = load_test_data("http_get_fee_rate.json");
     Json(fee_rate).into_response()
@@ -213,16 +242,7 @@ async fn handle_get_wallet_balance(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
     state
         .wallet_balance_requests
@@ -231,153 +251,128 @@ async fn handle_get_wallet_balance(
     Json(wallet).into_response()
 }
 
+async fn handle_get_account_settings(headers: HeaderMap) -> impl IntoResponse {
+    if !has_auth_headers(&headers) {
+        return unauthorized();
+    }
+    Json(load_test_data("http_get_account_info.json")).into_response()
+}
+
 async fn handle_get_positions(
     State(state): State<TestServerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
     state.position_requests.fetch_add(1, Ordering::Relaxed);
     let positions = load_test_data("http_get_positions.json");
     Json(positions).into_response()
 }
 
+// Bitget returns `"list": null` for empty report pages
 async fn handle_get_empty_report_list(headers: HeaderMap) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "list": [],
-            "nextPageCursor": ""
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    Json(load_test_data("http_get_executions_empty.json")).into_response()
+}
+
+async fn handle_get_strategy_orders(
+    State(state): State<TestServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !has_auth_headers(&headers) {
+        return unauthorized();
+    }
+    state
+        .orders_realtime_requests
+        .fetch_add(1, Ordering::Relaxed);
+    Json(load_test_data("http_get_executions_empty.json")).into_response()
+}
+
+// A post-only order that would take liquidity is cancelled with `post_only_fill_cancel`
+fn post_only_cancelled_order() -> Value {
+    let mut order = load_test_data("http_get_order_info.json");
+    order["data"]["orderId"] = json!("test-order-id-12345");
+    order["data"]["timeInForce"] = json!("post_only");
+    order["data"]["orderStatus"] = json!("cancelled");
+    order["data"]["cancelReason"] = json!("post_only_fill_cancel");
+    order["data"]["cumExecQty"] = json!("0");
+    order["data"]["cumExecValue"] = json!("0");
+    order["data"]["avgPrice"] = json!("0");
+    order["data"]["feeDetail"] = json!([]);
+    order
 }
 
 async fn handle_get_orders_realtime(
     State(state): State<TestServerState>,
     headers: HeaderMap,
+    query: Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
 
-    if state.empty_orders_realtime.load(Ordering::Relaxed) {
-        state
-            .orders_realtime_requests
-            .fetch_add(1, Ordering::Relaxed);
-        return Json(json!({
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {
-                "category": "linear",
-                "list": [],
-                "nextPageCursor": ""
-            },
-            "retExtInfo": {},
-            "time": 1704470400123i64
-        }))
-        .into_response();
-    }
-
-    if state.rejected_orders_realtime.load(Ordering::Relaxed) {
-        let mut orders = load_test_data("http_get_orders_realtime.json");
-        let order = orders
-            .get_mut("result")
-            .and_then(|result| result.get_mut("list"))
-            .and_then(Value::as_array_mut)
-            .and_then(|list| list.first_mut())
-            .expect("orders realtime fixture has first order");
-        order["orderId"] = json!("test-order-id-12345");
-        order["orderStatus"] = json!("Cancelled");
-        order["cumExecQty"] = json!("0");
-        order["rejectReason"] = json!("EC_PostOnlyWillTakeLiquidity");
-
-        state
-            .orders_realtime_requests
-            .fetch_add(1, Ordering::Relaxed);
-        return Json(orders).into_response();
-    }
-
-    let orders = load_test_data("http_get_orders_realtime.json");
     state
         .orders_realtime_requests
         .fetch_add(1, Ordering::Relaxed);
+
+    // The fixture is the only page: following its cursor yields the venue's empty page
+    if state.empty_orders_realtime.load(Ordering::Relaxed) || query.contains_key("cursor") {
+        return Json(load_test_data("http_get_positions_empty.json")).into_response();
+    }
+
+    let mut orders = load_test_data("http_get_orders_realtime.json");
+
+    if state.rejected_orders_realtime.load(Ordering::Relaxed) {
+        let list = orders["data"]["list"].as_array_mut().unwrap();
+        list[0]["orderId"] = json!("test-order-id-12345");
+        list[0]["orderStatus"] = json!("cancelled");
+        list[0]["cancelReason"] = json!("post_only_fill_cancel");
+        list[1]["symbol"] = list[0]["symbol"].clone();
+    }
+
     Json(orders).into_response()
+}
+
+async fn handle_get_order_info(
+    State(state): State<TestServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !has_auth_headers(&headers) {
+        return unauthorized();
+    }
+
+    state
+        .orders_realtime_requests
+        .fetch_add(1, Ordering::Relaxed);
+
+    if state.empty_orders_realtime.load(Ordering::Relaxed) {
+        return bitget_error(StatusCode::BAD_REQUEST, "25204", "Order does not exist");
+    }
+
+    if state.rejected_orders_realtime.load(Ordering::Relaxed) {
+        return Json(post_only_cancelled_order()).into_response();
+    }
+
+    Json(load_test_data("http_get_order_info.json")).into_response()
 }
 
 async fn handle_post_order(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
 
     let Ok(order_req): Result<Value, _> = serde_json::from_slice(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "retCode": 10001,
-                "retMsg": "Invalid JSON body",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return bitget_error(StatusCode::BAD_REQUEST, "40019", "Parameter body error");
     };
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "orderId": "test-order-id-12345",
-            "orderLinkId": order_req.get("orderLinkId").and_then(|v| v.as_str()).unwrap_or("")
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
+    bitget_ok(json!({
+        "orderId": "test-order-id-12345",
+        "clientOid": order_req.get("clientOid").and_then(|v| v.as_str()).unwrap_or("")
     }))
-    .into_response()
 }
 
 async fn handle_cancel_order(
@@ -386,16 +381,7 @@ async fn handle_cancel_order(
     _body: Bytes,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
 
     state.cancel_order_requests.fetch_add(1, Ordering::Relaxed);
@@ -403,26 +389,49 @@ async fn handle_cancel_order(
     let ret_code = state.cancel_order_ret_code.load(Ordering::Relaxed);
 
     if ret_code != 0 {
-        return Json(json!({
-            "retCode": ret_code,
-            "retMsg": format!("Test venue rejection {ret_code}"),
-            "result": {},
-            "time": 1704470400123i64
-        }))
-        .into_response();
+        return bitget_error(
+            StatusCode::BAD_REQUEST,
+            &ret_code.to_string(),
+            &format!("Test venue rejection {ret_code}"),
+        );
     }
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "orderId": "test-order-id-12345",
-            "orderLinkId": "test-order"
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
+    bitget_ok(json!({
+        "orderId": "test-order-id-12345",
+        "clientOid": "test-order"
     }))
-    .into_response()
+}
+
+async fn handle_modify_order(
+    State(state): State<TestServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if !has_auth_headers(&headers) {
+        return unauthorized();
+    }
+
+    if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+        state.modify_order_payloads.lock().await.push(value);
+    }
+
+    let status = state.modify_order_status.load(Ordering::Relaxed);
+    if status == 400 {
+        return bitget_error(
+            StatusCode::BAD_REQUEST,
+            "25571",
+            "The modification price and qty is the same as the original value",
+        );
+    }
+    if status != 0 {
+        let status = StatusCode::from_u16(u16::try_from(status).unwrap()).unwrap();
+        return (status, "service unavailable").into_response();
+    }
+
+    bitget_ok(json!({
+        "orderId": "test-order-id-12345",
+        "clientOid": "test-order"
+    }))
 }
 
 async fn handle_cancel_all_orders(
@@ -431,28 +440,12 @@ async fn handle_cancel_all_orders(
     _body: Bytes,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "retCode": 10003,
-                "retMsg": "Invalid API key",
-                "result": {},
-                "time": 1704470400123i64
-            })),
-        )
-            .into_response();
+        return unauthorized();
     }
 
     state.cancel_all_requests.fetch_add(1, Ordering::Relaxed);
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": { "list": [] },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
-    .into_response()
+    bitget_ok(json!({ "list": [] }))
 }
 
 async fn handle_switch_mode(
@@ -461,25 +454,14 @@ async fn handle_switch_mode(
     body: Bytes,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"retCode": 10003, "retMsg": "Invalid API key", "result": {}})),
-        )
-            .into_response();
+        return unauthorized();
     }
 
     if let Ok(value) = serde_json::from_slice::<Value>(&body) {
         state.switch_mode_requests.lock().await.push(value);
     }
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {},
-        "retExtInfo": {},
-        "time": 1704470400123i64,
-    }))
-    .into_response()
+    bitget_ok(json!("success"))
 }
 
 async fn handle_set_leverage(
@@ -488,25 +470,14 @@ async fn handle_set_leverage(
     body: Bytes,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"retCode": 10003, "retMsg": "Invalid API key", "result": {}})),
-        )
-            .into_response();
+        return unauthorized();
     }
 
     if let Ok(value) = serde_json::from_slice::<Value>(&body) {
         state.set_leverage_requests.lock().await.push(value);
     }
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {},
-        "retExtInfo": {},
-        "time": 1704470400123i64,
-    }))
-    .into_response()
+    bitget_ok(json!("success"))
 }
 
 async fn handle_set_margin_mode(
@@ -515,38 +486,18 @@ async fn handle_set_margin_mode(
     body: Bytes,
 ) -> impl IntoResponse {
     if !has_auth_headers(&headers) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"retCode": 10003, "retMsg": "Invalid API key", "result": {}})),
-        )
-            .into_response();
+        return unauthorized();
     }
 
     if let Ok(value) = serde_json::from_slice::<Value>(&body) {
         state.set_margin_mode_requests.lock().await.push(value);
     }
 
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {},
-        "retExtInfo": {},
-        "time": 1704470400123i64,
-    }))
-    .into_response()
+    bitget_ok(Value::Null)
 }
 
 async fn handle_server_time() -> impl IntoResponse {
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "timeSecond": "1704470400",
-            "timeNano": "1704470400123456789"
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
+    Json(load_test_data("http_get_server_time.json"))
 }
 
 async fn handle_private_websocket(
@@ -568,15 +519,98 @@ async fn handle_trade_websocket(
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
+fn trade_error_msg(code: usize) -> &'static str {
+    match code {
+        429 => "Too Many Requests",
+        25206 => "TSLAUSDT trading price cannot exceed 2%",
+        _ => "Test venue rejection",
+    }
+}
+
+// Answers an `op:"trade"` request the way Bitget acks it on the private socket
+fn trade_response(request: &Value, ret_code: usize, order_id: Option<&str>) -> Value {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let rate_limit = json!([{"limit": "10", "remaining": "9"}]);
+
+    if ret_code != 0 {
+        return json!({
+            "event": "error",
+            "id": id,
+            "code": ret_code.to_string(),
+            "msg": trade_error_msg(ret_code),
+            "connId": "test-conn-id",
+            "rateLimit": rate_limit,
+        });
+    }
+
+    let args: Vec<Value> = request["args"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|arg| {
+            json!({
+                "code": "0",
+                "msg": "Success",
+                "symbol": arg.get("symbol").cloned().unwrap_or(Value::Null),
+                "orderId": arg
+                    .get("orderId")
+                    .cloned()
+                    .unwrap_or_else(|| json!(order_id.unwrap_or("test-order-id-12345"))),
+                "clientOid": arg.get("clientOid").cloned().unwrap_or(Value::Null),
+                "cTime": "1794193086386",
+            })
+        })
+        .collect();
+
+    json!({
+        "event": "trade",
+        "id": id,
+        "category": request.get("category").cloned().unwrap_or(Value::Null),
+        "topic": request.get("topic").cloned().unwrap_or(Value::Null),
+        "args": args,
+        "code": "0",
+        "msg": "Success",
+        "ts": "1794193086388",
+        "connId": "test-conn-id",
+        "rateLimit": rate_limit,
+    })
+}
+
 async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
     {
         let mut count = state.ws_connection_count.lock().await;
         *count += 1;
     }
 
+    let mut logged_in = false;
+    let mut socket_topics: Vec<String> = Vec::new();
+
     loop {
         if state.disconnect_trigger.load(Ordering::Relaxed) {
             break;
+        }
+
+        // Account pushes only flow on logged-in sockets subscribed to the channel
+        if logged_in && !socket_topics.is_empty() {
+            let mut pushes = state.private_pushes.lock().await;
+            let (ready, rest): (Vec<Value>, Vec<Value>) = pushes.drain(..).partition(|push| {
+                socket_topics
+                    .iter()
+                    .any(|topic| push["arg"]["topic"] == **topic)
+            });
+            *pushes = rest;
+            drop(pushes);
+
+            for push in ready {
+                if socket
+                    .send(Message::Text(push.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
         }
 
         let msg_opt = match tokio::time::timeout(Duration::from_millis(50), socket.recv()).await {
@@ -594,134 +628,96 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
         };
 
         match msg {
+            // Bitget heartbeats are the plain text frames `ping`/`pong`
+            Message::Text(text) if text.as_str() == "ping" => {
+                state.ping_count.fetch_add(1, Ordering::Relaxed);
+
+                if socket.send(Message::Text("pong".into())).await.is_err() {
+                    break;
+                }
+            }
             Message::Text(text) => {
                 let Ok(value) = serde_json::from_str::<Value>(&text) else {
                     continue;
                 };
 
                 let op = value.get("op").and_then(|v| v.as_str());
+                let args = value
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .cloned()
+                    .unwrap_or_default();
 
-                match op {
-                    Some("ping") => {
-                        state.ping_count.fetch_add(1, Ordering::Relaxed);
-                        let pong_response = json!({
-                            "success": true,
-                            "ret_msg": "pong",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "pong"
-                        });
-
-                        if socket
-                            .send(Message::Text(pong_response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                let response = match op {
+                    Some("login") => {
+                        state.login_count.fetch_add(1, Ordering::Relaxed);
+                        if state.withhold_login.load(Ordering::Relaxed) {
+                            continue;
                         }
-                    }
-                    Some("auth") => {
-                        let api_key = value
-                            .get("args")
-                            .and_then(|a| a.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|v| v.as_str());
 
-                        if api_key == Some("test_api_key") {
+                        let login = args.first().cloned().unwrap_or_default();
+                        let valid = login["apiKey"] == "test_api_key"
+                            && login["passphrase"] == "test_api_passphrase"
+                            && login["sign"].as_str().is_some_and(|sign| !sign.is_empty())
+                            && login["timestamp"].as_str().is_some_and(|ts| ts.len() == 13);
+
+                        if valid {
+                            logged_in = true;
                             state.authenticated.store(true, Ordering::Relaxed);
-                            let auth_response = json!({
-                                "success": true,
-                                "ret_msg": "",
-                                "op": "auth",
-                                "conn_id": "test-conn-id"
-                            });
-
-                            if socket
-                                .send(Message::Text(auth_response.to_string().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
+                            vec![load_test_data("ws_auth_success.json")]
                         } else {
-                            let auth_response = json!({
-                                "success": false,
-                                "ret_msg": "Invalid API key",
-                                "op": "auth",
-                                "conn_id": "test-conn-id"
-                            });
-
-                            if socket
-                                .send(Message::Text(auth_response.to_string().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
+                            vec![load_test_data("ws_auth_failure.json")]
                         }
                     }
                     Some("subscribe") => {
-                        let args = value.get("args").and_then(|a| a.as_array());
-                        if let Some(topics) = args {
-                            for topic in topics {
-                                if let Some(topic_str) = topic.as_str() {
-                                    let mut subs = state.subscriptions.lock().await;
-                                    if !subs.contains(&topic_str.to_string()) {
-                                        subs.push(topic_str.to_string());
-                                    }
-                                }
+                        let mut subs = state.subscriptions.lock().await;
+                        for arg in &args {
+                            let topic = arg["topic"].as_str().unwrap_or_default().to_string();
+                            socket_topics.push(topic.clone());
+                            if !subs.contains(&topic) {
+                                subs.push(topic);
                             }
                         }
+                        drop(subs);
 
-                        let sub_response = json!({
-                            "success": true,
-                            "ret_msg": "",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "subscribe"
-                        });
-
-                        if socket
-                            .send(Message::Text(sub_response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                        args.iter()
+                            .map(|arg| {
+                                json!({
+                                    "event": "subscribe",
+                                    "arg": arg,
+                                    "connId": "test-conn-id"
+                                })
+                            })
+                            .collect()
                     }
-                    Some("order.create" | "order.amend" | "order.cancel") => {
+                    Some("trade") => {
                         state.trade_order_requests.fetch_add(1, Ordering::Relaxed);
                         state.trade_order_payloads.lock().await.push(value.clone());
-                        let req_id = value.get("reqId").and_then(|v| v.as_str());
+                        let req_id = value.get("id").and_then(|v| v.as_str());
                         state.trade_order_req_id_present.store(
                             req_id.is_some_and(|req_id| !req_id.is_empty()),
                             Ordering::Relaxed,
                         );
                         let ret_code = state.trade_order_ret_code.load(Ordering::Relaxed);
-                        let ret_msg = if ret_code == 0 {
-                            "OK"
-                        } else {
-                            "Too many visits."
-                        };
-                        let response = json!({
-                            "retCode": ret_code,
-                            "retMsg": ret_msg,
-                            "data": {},
-                            "retExtInfo": {},
-                            "connId": "test-conn-id",
-                            "reqId": req_id.unwrap_or(""),
-                            "op": op.unwrap()
-                        });
-
-                        if socket
-                            .send(Message::Text(response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                        let order_id = state.ack_order_id.lock().await.clone();
+                        vec![trade_response(&value, ret_code, order_id.as_deref())]
                     }
-                    _ => {}
+                    _ => vec![],
+                };
+
+                let mut failed = false;
+                for frame in response {
+                    if socket
+                        .send(Message::Text(frame.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed {
+                    break;
                 }
             }
             Message::Ping(_) => {
@@ -744,22 +740,59 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
 
 fn create_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
-        .route("/v5/account/wallet-balance", get(handle_get_wallet_balance))
-        .route("/v5/position/list", get(handle_get_positions))
-        .route("/v5/order/realtime", get(handle_get_orders_realtime))
-        .route("/v5/order/history", get(handle_get_empty_report_list))
-        .route("/v5/execution/list", get(handle_get_empty_report_list))
-        .route("/v5/order/create", post(handle_post_order))
-        .route("/v5/order/cancel", post(handle_cancel_order))
-        .route("/v5/order/cancel-all", post(handle_cancel_all_orders))
-        .route("/v5/position/switch-mode", post(handle_switch_mode))
-        .route("/v5/position/set-leverage", post(handle_set_leverage))
-        .route("/v5/account/set-margin-mode", post(handle_set_margin_mode))
-        .route("/v3/public/time", get(handle_server_time))
-        .route("/v5/private", get(handle_private_websocket))
-        .route("/v5/trade", get(handle_trade_websocket))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/account/assets", get(handle_get_wallet_balance))
+        .route("/api/v3/account/settings", get(handle_get_account_settings))
+        .route(
+            "/api/v3/position/current-position",
+            get(handle_get_positions),
+        )
+        .route(
+            "/api/v3/trade/unfilled-orders",
+            get(handle_get_orders_realtime),
+        )
+        .route("/api/v3/trade/order-info", get(handle_get_order_info))
+        .route(
+            "/api/v3/trade/history-orders",
+            get(handle_get_empty_report_list),
+        )
+        .route("/api/v3/trade/fills", get(handle_get_empty_report_list))
+        .route(
+            "/api/v3/trade/unfilled-strategy-orders",
+            get(handle_get_strategy_orders),
+        )
+        .route(
+            "/api/v3/trade/history-strategy-orders",
+            get(handle_get_strategy_orders),
+        )
+        .route("/api/v3/trade/place-order", post(handle_post_order))
+        .route(
+            "/api/v3/trade/place-strategy-order",
+            post(handle_post_order),
+        )
+        .route("/api/v3/trade/cancel-order", post(handle_cancel_order))
+        .route(
+            "/api/v3/trade/cancel-strategy-order",
+            post(handle_cancel_order),
+        )
+        .route(
+            "/api/v3/trade/modify-strategy-order",
+            post(handle_modify_order),
+        )
+        .route(
+            "/api/v3/trade/cancel-symbol-order",
+            post(handle_cancel_all_orders),
+        )
+        .route("/api/v3/account/set-hold-mode", post(handle_switch_mode))
+        .route("/api/v3/account/set-leverage", post(handle_set_leverage))
+        .route(
+            "/api/v3/account/adjust-account-mode",
+            post(handle_set_margin_mode),
+        )
+        .route("/api/v3/market/time", get(handle_server_time))
+        .route("/v3/ws/private", get(handle_private_websocket))
+        .route("/v3/ws/private/trade", get(handle_trade_websocket))
         .with_state(state)
 }
 
@@ -774,7 +807,7 @@ async fn start_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    let health_url = format!("http://{addr}/v3/public/time");
+    let health_url = format!("http://{addr}/api/v3/market/time");
     let http_client = HttpClient::builder().build().unwrap();
     wait_until_async(
         || {
@@ -788,15 +821,18 @@ async fn start_test_server()
     Ok((addr, state))
 }
 
-fn create_test_exec_config(addr: SocketAddr) -> BybitExecutionClientConfig {
-    BybitExecutionClientConfig {
+// Both execution sockets are Bitget private connections; the trade path is separate only so the
+// mock can count and fail them independently
+fn create_test_exec_config(addr: SocketAddr) -> BitgetExecutionClientConfig {
+    BitgetExecutionClientConfig {
         api_key: Some("test_api_key".into()),
         api_secret: Some("test_api_secret".into()),
-        product_types: vec![BybitProductType::Linear],
-        environment: BybitEnvironment::Mainnet,
+        api_passphrase: Some("test_api_passphrase".into()),
+        product_types: vec![BitgetProductType::Linear],
+        environment: BitgetEnvironment::Mainnet,
         base_url_http: Some(format!("http://{addr}")),
-        base_url_ws_private: Some(format!("ws://{addr}/v5/private")),
-        base_url_ws_trade: Some(format!("ws://{addr}/v5/trade")),
+        base_url_ws_private: Some(format!("ws://{addr}/v3/ws/private")),
+        base_url_ws_trade: Some(format!("ws://{addr}/v3/ws/private/trade")),
         proxy_url: None,
         http_timeout_secs: 10,
         max_retries: 1,
@@ -815,9 +851,9 @@ fn create_test_exec_config(addr: SocketAddr) -> BybitExecutionClientConfig {
     }
 }
 
-fn create_test_demo_exec_config(addr: SocketAddr) -> BybitExecutionClientConfig {
+fn create_test_demo_exec_config(addr: SocketAddr) -> BitgetExecutionClientConfig {
     let mut config = create_test_exec_config(addr);
-    config.environment = BybitEnvironment::Demo;
+    config.environment = BitgetEnvironment::Demo;
     config.max_retries = 0;
     config
 }
@@ -825,7 +861,7 @@ fn create_test_demo_exec_config(addr: SocketAddr) -> BybitExecutionClientConfig 
 fn create_test_execution_client(
     addr: SocketAddr,
 ) -> (
-    BybitExecutionClient,
+    BitgetExecutionClient,
     tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
     Rc<RefCell<Cache>>,
 ) {
@@ -833,22 +869,22 @@ fn create_test_execution_client(
 }
 
 fn create_test_execution_client_with_config(
-    config: BybitExecutionClientConfig,
+    config: BitgetExecutionClientConfig,
 ) -> (
-    BybitExecutionClient,
+    BitgetExecutionClient,
     tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
     Rc<RefCell<Cache>>,
 ) {
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
 
     let cache = Rc::new(RefCell::new(Cache::default()));
 
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -860,7 +896,7 @@ fn create_test_execution_client_with_config(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let client = BybitExecutionClient::new(core, config).unwrap();
+    let client = BitgetExecutionClient::new(core, config).unwrap();
 
     (client, rx, cache)
 }
@@ -875,17 +911,17 @@ async fn test_exec_client_scoped_spot_position_reports_follow_config(
 ) {
     let (addr, _state) = start_test_server().await.unwrap();
     let mut config = create_test_exec_config(addr);
-    config.product_types = vec![BybitProductType::Spot];
+    config.product_types = vec![BitgetProductType::Spot];
     config.use_spot_position_reports = use_spot_position_reports;
     let (mut client, _rx, cache) = create_test_execution_client_with_config(config);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
     client.connect().await.unwrap();
 
     let reports = client
         .generate_position_status_reports(&GeneratePositionStatusReports::new(
             UUID4::new(),
             UnixNanos::default(),
-            Some(InstrumentId::from("ETHUSDT-SPOT.BYBIT")),
+            Some(InstrumentId::from("ETHUSDT-SPOT.BITGET")),
             None,
             None,
             None,
@@ -896,7 +932,7 @@ async fn test_exec_client_scoped_spot_position_reports_follow_config(
 
     assert_eq!(reports.len(), expected_reports);
     if use_spot_position_reports {
-        assert_eq!(reports[0].instrument_id, "ETHUSDT-SPOT.BYBIT".into());
+        assert_eq!(reports[0].instrument_id, "ETHUSDT-SPOT.BITGET".into());
     }
 
     client.disconnect().await.unwrap();
@@ -907,10 +943,10 @@ async fn test_exec_client_scoped_spot_position_reports_follow_config(
 async fn test_exec_client_mixed_unscoped_position_reports_omit_spot() {
     let (addr, state) = start_test_server().await.unwrap();
     let mut config = create_test_exec_config(addr);
-    config.product_types = vec![BybitProductType::Linear, BybitProductType::Spot];
+    config.product_types = vec![BitgetProductType::Linear, BitgetProductType::Spot];
     config.use_spot_position_reports = true;
     let (mut client, _rx, cache) = create_test_execution_client_with_config(config);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
     client.connect().await.unwrap();
 
     // Measure against a post-connect baseline, since connect issues requests of its own.
@@ -933,12 +969,13 @@ async fn test_exec_client_mixed_unscoped_position_reports_omit_spot() {
     assert!(
         reports
             .iter()
-            .any(|report| report.instrument_id == "BTCUSDT-LINEAR.BYBIT".into())
+            .any(|report| report.instrument_id == "TSLAUSDT-PERP.BITGET".into())
     );
-    // An unscoped LINEAR query is one request per settle coin (USDT, USDC); SPOT adds none.
+    // An unscoped USDT-FUTURES query is one request (Bitget has no settle-coin filter); SPOT
+    // adds none.
     assert_eq!(
         state.position_requests.load(Ordering::Relaxed) - positions_before,
-        2,
+        1,
         "the LINEAR product type should still be requested"
     );
     // SPOT is served from wallet balances, so this is what proves it was omitted.
@@ -952,57 +989,57 @@ async fn test_exec_client_mixed_unscoped_position_reports_omit_spot() {
 }
 
 #[rstest]
-#[case(vec![], "BTCUSDT-LINEAR.BYBIT", true)]
-#[case(vec![], "BTCUSD-INVERSE.BYBIT", false)]
-#[case(vec![], "ETHUSDT-SPOT.BYBIT", false)]
-#[case(vec![], "BTCUSDT.BYBIT", false)]
-#[case(vec![BybitProductType::Spot], "BTCUSDT-LINEAR.BYBIT", false)]
-#[case(vec![BybitProductType::Spot], "BTCUSD-INVERSE.BYBIT", false)]
-#[case(vec![BybitProductType::Spot], "ETHUSDT-SPOT.BYBIT", false)]
-#[case(vec![BybitProductType::Spot], "BTCUSDT.BYBIT", false)]
+#[case(vec![], "BTCUSDT-PERP.BITGET", true)]
+#[case(vec![], "BTCUSD_CM-INVERSE.BITGET", false)]
+#[case(vec![], "ETHUSDT-SPOT.BITGET", false)]
+#[case(vec![], "BTCUSDT.BITGET", false)]
+#[case(vec![BitgetProductType::Spot], "BTCUSDT-PERP.BITGET", false)]
+#[case(vec![BitgetProductType::Spot], "BTCUSD_CM-INVERSE.BITGET", false)]
+#[case(vec![BitgetProductType::Spot], "ETHUSDT-SPOT.BITGET", false)]
+#[case(vec![BitgetProductType::Spot], "BTCUSDT.BITGET", false)]
 #[case(
-    vec![BybitProductType::Linear, BybitProductType::Spot],
-    "BTCUSDT-LINEAR.BYBIT",
+    vec![BitgetProductType::Linear, BitgetProductType::Spot],
+    "BTCUSDT-PERP.BITGET",
     true
 )]
 #[case(
-    vec![BybitProductType::Linear, BybitProductType::Spot],
-    "BTCUSD-INVERSE.BYBIT",
+    vec![BitgetProductType::Linear, BitgetProductType::Spot],
+    "BTCUSD_CM-INVERSE.BITGET",
     false
 )]
 #[case(
-    vec![BybitProductType::Linear, BybitProductType::Spot],
-    "ETHUSDT-SPOT.BYBIT",
+    vec![BitgetProductType::Linear, BitgetProductType::Spot],
+    "ETHUSDT-SPOT.BITGET",
     false
 )]
 #[case(
-    vec![BybitProductType::Linear, BybitProductType::Spot],
-    "BTCUSDT.BYBIT",
+    vec![BitgetProductType::Linear, BitgetProductType::Spot],
+    "BTCUSDT.BITGET",
     false
 )]
 #[case(
-    vec![BybitProductType::Inverse, BybitProductType::Spot],
-    "BTCUSDT-LINEAR.BYBIT",
+    vec![BitgetProductType::Inverse, BitgetProductType::Spot],
+    "BTCUSDT-PERP.BITGET",
     false
 )]
 #[case(
-    vec![BybitProductType::Inverse, BybitProductType::Spot],
-    "BTCUSD-INVERSE.BYBIT",
+    vec![BitgetProductType::Inverse, BitgetProductType::Spot],
+    "BTCUSD_CM-INVERSE.BITGET",
     true
 )]
 #[case(
-    vec![BybitProductType::Inverse, BybitProductType::Spot],
-    "ETHUSDT-SPOT.BYBIT",
+    vec![BitgetProductType::Inverse, BitgetProductType::Spot],
+    "ETHUSDT-SPOT.BITGET",
     false
 )]
 #[case(
-    vec![BybitProductType::Inverse, BybitProductType::Spot],
-    "BTCUSDT.BYBIT",
+    vec![BitgetProductType::Inverse, BitgetProductType::Spot],
+    "BTCUSDT.BITGET",
     false
 )]
 #[tokio::test]
 async fn test_exec_client_bulk_position_coverage_by_product_type(
-    #[case] product_types: Vec<BybitProductType>,
+    #[case] product_types: Vec<BitgetProductType>,
     #[case] instrument_id: &str,
     #[case] expected: bool,
 ) {
@@ -1024,10 +1061,10 @@ async fn test_exec_client_bulk_position_coverage_by_product_type(
 async fn test_exec_client_mass_status_omits_spot_and_preserves_derivative_positions() {
     let (addr, state) = start_test_server().await.unwrap();
     let mut config = create_test_exec_config(addr);
-    config.product_types = vec![BybitProductType::Linear, BybitProductType::Spot];
+    config.product_types = vec![BitgetProductType::Linear, BitgetProductType::Spot];
     config.use_spot_position_reports = true;
     let (mut client, _rx, cache) = create_test_execution_client_with_config(config);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
     client.connect().await.unwrap();
     state.wallet_balance_requests.store(0, Ordering::Relaxed);
 
@@ -1040,7 +1077,7 @@ async fn test_exec_client_mass_status_omits_spot_and_preserves_derivative_positi
     assert!(
         mass_status
             .position_reports()
-            .contains_key(&InstrumentId::from("BTCUSDT-LINEAR.BYBIT"))
+            .contains_key(&InstrumentId::from("TSLAUSDT-PERP.BITGET"))
     );
     assert_eq!(state.wallet_balance_requests.load(Ordering::Relaxed), 0);
 
@@ -1050,20 +1087,20 @@ async fn test_exec_client_mass_status_omits_spot_and_preserves_derivative_positi
 fn create_test_demo_execution_client(
     addr: SocketAddr,
 ) -> (
-    BybitExecutionClient,
+    BitgetExecutionClient,
     tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
     Rc<RefCell<Cache>>,
 ) {
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
 
     let cache = Rc::new(RefCell::new(Cache::default()));
 
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -1076,7 +1113,7 @@ fn create_test_demo_execution_client(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let client = BybitExecutionClient::new(core, config).unwrap();
+    let client = BitgetExecutionClient::new(core, config).unwrap();
 
     (client, rx, cache)
 }
@@ -1100,6 +1137,58 @@ fn add_test_account_to_cache(cache: &Rc<RefCell<Cache>>, account_id: AccountId) 
 
     let account = AccountAny::Margin(MarginAccount::new(account_state, true));
     cache.borrow_mut().add_account(account).unwrap();
+}
+
+// Conditional (strategy) orders take Bitget's REST path, so tests of that path cache one first
+fn stop_market_order(
+    strategy_id: StrategyId,
+    instrument_id: InstrumentId,
+    client_order_id: ClientOrderId,
+) -> OrderAny {
+    OrderAny::StopMarket(StopMarketOrder::new(
+        TraderId::from("TESTER-001"),
+        strategy_id,
+        instrument_id,
+        client_order_id,
+        OrderSide::Buy,
+        Quantity::from("0.01"),
+        Price::from("1500.00"),
+        TriggerType::LastPrice,
+        TimeInForce::Gtc,
+        None,
+        false,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+    ))
+}
+
+fn add_stop_market_to_cache(
+    cache: &Rc<RefCell<Cache>>,
+    strategy_id: StrategyId,
+    instrument_id: InstrumentId,
+    client_order_id: ClientOrderId,
+) {
+    cache
+        .borrow_mut()
+        .add_order(
+            stop_market_order(strategy_id, instrument_id, client_order_id),
+            None,
+            Some(*BITGET_CLIENT_ID),
+            false,
+        )
+        .unwrap();
 }
 
 async fn drain_execution_events(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>) {
@@ -1157,8 +1246,8 @@ async fn test_exec_client_creation() {
     let (addr, _state) = start_test_server().await.unwrap();
     let (client, _rx, _cache) = create_test_execution_client(addr);
 
-    assert_eq!(client.client_id(), *BYBIT_CLIENT_ID);
-    assert_eq!(client.venue(), *BYBIT_VENUE);
+    assert_eq!(client.client_id(), *BITGET_CLIENT_ID);
+    assert_eq!(client.venue(), *BITGET_VENUE);
     assert_eq!(client.oms_type(), OmsType::Netting);
     assert!(!client.is_connected());
 }
@@ -1171,7 +1260,7 @@ async fn test_exec_client_connect_disconnect() {
     let (addr, state) = start_test_server().await.unwrap();
     let registry = SocketReconnectRegistry::default();
     let (mut client, _rx, cache) = registry.scope(|| create_test_execution_client(addr));
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
 
     client.connect().await.unwrap();
 
@@ -1199,15 +1288,15 @@ async fn test_exec_client_connect_disconnect() {
     }
     connected.sort_unstable();
     let expected = vec![
-        Ustr::from("bybit-trading"),
-        Ustr::from("bybit-user-streams"),
+        Ustr::from("bitget-trading"),
+        Ustr::from("bitget-user-streams"),
     ];
     assert!(client.is_connected());
     assert!(state.authenticated.load(Ordering::Relaxed));
     assert_eq!(connected, expected);
 
     for endpoint in &expected {
-        let handle = registry.handle(*BYBIT_CLIENT_ID, *endpoint).unwrap();
+        let handle = registry.handle(*BITGET_CLIENT_ID, *endpoint).unwrap();
         assert_eq!(
             handle.request_reconnect(),
             SocketReconnectRequestOutcome::Accepted
@@ -1230,9 +1319,10 @@ async fn test_exec_client_connect_disconnect() {
 
     let subs = state.subscriptions.lock().await;
     assert!(subs.contains(&"order".to_string()));
-    assert!(subs.contains(&"execution".to_string()));
+    assert!(subs.contains(&"strategy-order".to_string()));
+    assert!(subs.contains(&"fill".to_string()));
     assert!(subs.contains(&"position".to_string()));
-    assert!(subs.contains(&"wallet".to_string()));
+    assert!(subs.contains(&"account".to_string()));
     drop(subs);
 
     client.disconnect().await.unwrap();
@@ -1240,7 +1330,7 @@ async fn test_exec_client_connect_disconnect() {
     assert!(
         expected
             .iter()
-            .all(|endpoint| registry.handle(*BYBIT_CLIENT_ID, *endpoint).is_none())
+            .all(|endpoint| registry.handle(*BITGET_CLIENT_ID, *endpoint).is_none())
     );
 }
 
@@ -1249,7 +1339,7 @@ async fn test_exec_client_connect_disconnect() {
 async fn test_generate_order_status_reports_open_only_retains_recent_closed() {
     let (addr, state) = start_test_server().await.unwrap();
     let (mut client, _rx, cache) = create_test_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
     client.connect().await.unwrap();
     state
         .rejected_orders_realtime
@@ -1259,7 +1349,7 @@ async fn test_generate_order_status_reports_open_only_retains_recent_closed() {
         UUID4::new(),
         UnixNanos::default(),
         true,
-        Some(InstrumentId::from("ETHUSDT-LINEAR.BYBIT")),
+        Some(InstrumentId::from("AMZNUSDT-PERP.BITGET")),
         None,
         None,
         None,
@@ -1273,7 +1363,7 @@ async fn test_generate_order_status_reports_open_only_retains_recent_closed() {
     assert_eq!(reports.len(), 2);
     assert_eq!(reports[0].venue_order_id, "test-order-id-12345".into());
     assert_eq!(reports[0].order_status, OrderStatus::Rejected);
-    assert_eq!(reports[1].venue_order_id, "open-order-2".into());
+    assert_eq!(reports[1].venue_order_id, "1503520610414125056".into());
     assert_eq!(reports[1].order_status, OrderStatus::Accepted);
 
     client.disconnect().await.unwrap();
@@ -1286,7 +1376,7 @@ async fn test_exec_client_failed_startup_rolls_back_private_stream() {
     state.reject_trade_websocket.store(true, Ordering::Relaxed);
     let registry = SocketReconnectRegistry::default();
     let (mut client, _rx, cache) = registry.scope(|| create_test_execution_client(addr));
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
 
     let error = client.connect().await.unwrap_err();
 
@@ -1302,10 +1392,10 @@ async fn test_exec_client_failed_startup_rolls_back_private_stream() {
     assert_eq!(state.private_ws_connections.load(Ordering::Relaxed), 1);
     assert!(!client.is_connected());
     assert!(
-        ["bybit-user-streams", "bybit-trading"]
+        ["bitget-user-streams", "bitget-trading"]
             .into_iter()
             .all(|endpoint| registry
-                .handle(*BYBIT_CLIENT_ID, Ustr::from(endpoint))
+                .handle(*BITGET_CLIENT_ID, Ustr::from(endpoint))
                 .is_none())
     );
 }
@@ -1315,8 +1405,8 @@ async fn test_exec_client_failed_startup_rolls_back_private_stream() {
 async fn test_exec_client_connect_applies_position_mode_for_derivative_symbols() {
     let (addr, state) = start_test_server().await.unwrap();
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -1324,7 +1414,7 @@ async fn test_exec_client_connect_applies_position_mode_for_derivative_symbols()
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -1333,13 +1423,13 @@ async fn test_exec_client_connect_applies_position_mode_for_derivative_symbols()
     );
 
     let mut position_mode = std::collections::HashMap::new();
-    position_mode.insert("ETHUSDT-LINEAR".to_string(), BybitPositionMode::BothSides);
+    position_mode.insert("ETHUSDT-PERP".to_string(), BitgetPositionMode::BothSides);
     position_mode.insert(
-        "BTCUSD-INVERSE".to_string(),
-        BybitPositionMode::MergedSingle,
+        "BTCUSD_CM-INVERSE".to_string(),
+        BitgetPositionMode::MergedSingle,
     );
-    // Spot symbol must be filtered out (Bybit rejects switch-mode on Spot).
-    position_mode.insert("BTCUSDT-SPOT".to_string(), BybitPositionMode::MergedSingle);
+    // Spot symbol must be filtered out (hold mode applies to futures only).
+    position_mode.insert("BTCUSDT-SPOT".to_string(), BitgetPositionMode::MergedSingle);
 
     let mut config = create_test_exec_config(addr);
     config.position_mode = Some(position_mode);
@@ -1347,7 +1437,7 @@ async fn test_exec_client_connect_applies_position_mode_for_derivative_symbols()
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
 
     client.connect().await.unwrap();
 
@@ -1361,22 +1451,17 @@ async fn test_exec_client_connect_applies_position_mode_for_derivative_symbols()
     assert_eq!(
         requests.len(),
         2,
-        "switch-mode should be called for Linear+Inverse only, not Spot",
+        "set-hold-mode should be called for Linear+Inverse only, not Spot",
     );
 
-    let symbols: Vec<&str> = requests
+    // Bitget's hold mode is account-wide: the body carries only `holdMode`
+    let modes: Vec<&str> = requests
         .iter()
-        .filter_map(|r| r.get("symbol").and_then(|v| v.as_str()))
+        .filter_map(|r| r.get("holdMode").and_then(|v| v.as_str()))
         .collect();
-    assert!(symbols.contains(&"ETHUSDT"));
-    assert!(symbols.contains(&"BTCUSD"));
-
-    let categories: Vec<&str> = requests
-        .iter()
-        .filter_map(|r| r.get("category").and_then(|v| v.as_str()))
-        .collect();
-    assert!(categories.contains(&"linear"));
-    assert!(categories.contains(&"inverse"));
+    assert!(modes.contains(&"hedge_mode"));
+    assert!(modes.contains(&"one_way_mode"));
+    assert!(requests.iter().all(|r| r.get("symbol").is_none()));
 
     drop(requests);
     client.disconnect().await.unwrap();
@@ -1387,8 +1472,8 @@ async fn test_exec_client_connect_applies_position_mode_for_derivative_symbols()
 async fn test_exec_client_connect_applies_leverage_and_margin_mode() {
     let (addr, state) = start_test_server().await.unwrap();
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -1396,7 +1481,7 @@ async fn test_exec_client_connect_applies_leverage_and_margin_mode() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -1405,16 +1490,16 @@ async fn test_exec_client_connect_applies_leverage_and_margin_mode() {
     );
 
     let mut leverages = std::collections::HashMap::new();
-    leverages.insert("ETHUSDT-LINEAR".to_string(), 5);
+    leverages.insert("ETHUSDT-PERP".to_string(), 5);
 
     let mut config = create_test_exec_config(addr);
     config.futures_leverages = Some(leverages);
-    config.margin_mode = Some(BybitMarginMode::RegularMargin);
+    config.margin_mode = Some(BitgetMarginMode::RegularMargin);
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
 
     client.connect().await.unwrap();
 
@@ -1434,16 +1519,20 @@ async fn test_exec_client_connect_applies_leverage_and_margin_mode() {
         Some("ETHUSDT"),
     );
     assert_eq!(
-        leverage_reqs[0].get("buyLeverage").and_then(|v| v.as_str()),
+        leverage_reqs[0].get("leverage").and_then(|v| v.as_str()),
         Some("5"),
+    );
+    assert_eq!(
+        leverage_reqs[0].get("category").and_then(|v| v.as_str()),
+        Some("USDT-FUTURES"),
     );
     drop(leverage_reqs);
 
     let margin_reqs = state.set_margin_mode_requests.lock().await;
     assert_eq!(margin_reqs.len(), 1);
     assert_eq!(
-        margin_reqs[0].get("setMarginMode").and_then(|v| v.as_str()),
-        Some("REGULAR_MARGIN"),
+        margin_reqs[0].get("mode").and_then(|v| v.as_str()),
+        Some("basic"),
     );
     drop(margin_reqs);
 
@@ -1452,11 +1541,12 @@ async fn test_exec_client_connect_applies_leverage_and_margin_mode() {
 
 #[rstest]
 #[tokio::test]
-async fn test_exec_client_demo_mode_skips_trade_ws() {
+// Bitget demo accepts `op:"trade"`, so demo opens and logs in both private sockets
+async fn test_exec_client_demo_mode_connects_trade_ws() {
     let (addr, state) = start_test_server().await.unwrap();
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -1464,7 +1554,7 @@ async fn test_exec_client_demo_mode_skips_trade_ws() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -1472,14 +1562,15 @@ async fn test_exec_client_demo_mode_skips_trade_ws() {
         cache,
     );
 
-    let config = BybitExecutionClientConfig {
+    let config = BitgetExecutionClientConfig {
         api_key: Some("test_api_key".into()),
         api_secret: Some("test_api_secret".into()),
-        product_types: vec![BybitProductType::Linear],
-        environment: BybitEnvironment::Demo,
+        api_passphrase: Some("test_api_passphrase".into()),
+        product_types: vec![BitgetProductType::Linear],
+        environment: BitgetEnvironment::Demo,
         base_url_http: Some(format!("http://{addr}")),
-        base_url_ws_private: Some(format!("ws://{addr}/v5/private")),
-        base_url_ws_trade: Some(format!("ws://{addr}/v5/trade")),
+        base_url_ws_private: Some(format!("ws://{addr}/v3/ws/private")),
+        base_url_ws_trade: Some(format!("ws://{addr}/v3/ws/private/trade")),
         proxy_url: None,
         http_timeout_secs: 10,
         max_retries: 1,
@@ -1500,7 +1591,7 @@ async fn test_exec_client_demo_mode_skips_trade_ws() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
 
     // Wait for subscriptions to confirm connection phase is complete
@@ -1518,7 +1609,8 @@ async fn test_exec_client_demo_mode_skips_trade_ws() {
     let private_count = state.private_ws_connections.load(Ordering::Relaxed);
     let trade_count = state.trade_ws_connections.load(Ordering::Relaxed);
     assert_eq!(private_count, 1, "Demo mode should connect to private WS");
-    assert_eq!(trade_count, 0, "Demo mode should NOT connect to trade WS");
+    assert_eq!(trade_count, 1, "Demo mode should connect to trade WS");
+    assert_eq!(state.login_count.load(Ordering::Relaxed), 2);
 
     assert!(client.is_connected());
     client.disconnect().await.unwrap();
@@ -1531,7 +1623,7 @@ async fn test_exec_client_query_order() {
 
     let (addr, _state) = start_test_server().await.unwrap();
     let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
 
     client.connect().await.unwrap();
     client.start().unwrap();
@@ -1546,10 +1638,10 @@ async fn test_exec_client_query_order() {
 
     let cmd = QueryOrder::new(
         TraderId::from("TESTER-001"),
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         StrategyId::from("S-001"),
-        InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE),
-        ClientOrderId::from("client-open-1"),
+        InstrumentId::new(Symbol::from("TSLAUSDT-PERP"), *BITGET_VENUE),
+        ClientOrderId::from("tdcapioc93099"),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1568,7 +1660,7 @@ async fn test_exec_client_query_order() {
         ExecutionEvent::Report(ExecutionReport::Order(report)) => {
             assert_eq!(
                 report.client_order_id,
-                Some(ClientOrderId::from("client-open-1")),
+                Some(ClientOrderId::from("tdcapioc93099")),
             );
         }
         other => panic!("Expected OrderStatusReport, was {other:?}"),
@@ -1579,33 +1671,33 @@ async fn test_exec_client_query_order() {
 
 #[rstest]
 #[case::derivatives_config_default(
-    "ETHUSDT-LINEAR",
-    Some(BybitOrderSmpType::CancelMaker),
+    "ETHUSDT-PERP",
+    Some(BitgetOrderSmpType::CancelMaker),
     None,
-    Some("CancelMaker")
+    Some("cancel_maker")
 )]
 #[case::spot_param_overrides_config(
     "BTCUSDT-SPOT",
-    Some(BybitOrderSmpType::CancelMaker),
+    Some(BitgetOrderSmpType::CancelMaker),
     Some("CancelBoth"),
-    Some("CancelBoth")
+    Some("cancel_both")
 )]
-#[case::spot_param_without_config("BTCUSDT-SPOT", None, Some("CancelTaker"), Some("CancelTaker"))]
-#[case::unset_omits_field("ETHUSDT-LINEAR", None, None, None)]
+#[case::spot_param_without_config("BTCUSDT-SPOT", None, Some("CancelTaker"), Some("cancel_taker"))]
+#[case::unset_omits_field("ETHUSDT-PERP", None, None, None)]
 #[tokio::test]
 async fn test_exec_client_submit_order_sends_configured_smp_type(
     #[case] symbol: &str,
-    #[case] configured: Option<BybitOrderSmpType>,
+    #[case] configured: Option<BitgetOrderSmpType>,
     #[case] param: Option<&str>,
     #[case] expected: Option<&str>,
 ) {
     let (addr, state) = start_test_server().await.unwrap();
     let mut config = create_test_exec_config(addr);
-    config.product_types = vec![BybitProductType::Linear, BybitProductType::Spot];
+    config.product_types = vec![BitgetProductType::Linear, BitgetProductType::Spot];
     config.smp_type = configured;
 
     let (mut client, mut rx, cache) = create_test_execution_client_with_config(config);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
     client.start().unwrap();
     client.connect().await.unwrap();
 
@@ -1618,8 +1710,8 @@ async fn test_exec_client_submit_order_sends_configured_smp_type(
 
     let trader_id = TraderId::from("TESTER-001");
     let strategy_id = StrategyId::from("S-001");
-    let client_id = *BYBIT_CLIENT_ID;
-    let instrument_id = InstrumentId::new(Symbol::from(symbol), *BYBIT_VENUE);
+    let client_id = *BITGET_CLIENT_ID;
+    let instrument_id = InstrumentId::new(Symbol::from(symbol), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("test-smp-submit");
     let order = OrderAny::Market(MarketOrder::new(
         trader_id,
@@ -1679,15 +1771,16 @@ async fn test_exec_client_submit_order_sends_configured_smp_type(
 
     let payloads = state.trade_order_payloads.lock().await;
     assert_eq!(payloads.len(), 1);
-    assert_eq!(payloads[0]["op"].as_str(), Some("order.create"));
+    assert_eq!(payloads[0]["op"].as_str(), Some("trade"));
+    assert_eq!(payloads[0]["topic"].as_str(), Some("place-order"));
 
     let order_args = &payloads[0]["args"][0];
 
     assert_eq!(
-        order_args.get("orderLinkId").and_then(Value::as_str),
+        order_args.get("clientOid").and_then(Value::as_str),
         Some(client_order_id.as_str())
     );
-    assert_eq!(order_args.get("smpType").and_then(Value::as_str), expected);
+    assert_eq!(order_args.get("stpMode").and_then(Value::as_str), expected);
 
     drop(payloads);
     client.disconnect().await.unwrap();
@@ -1698,7 +1791,7 @@ async fn test_exec_client_submit_order_sends_configured_smp_type(
 async fn test_exec_client_trade_rate_limit_emits_order_rejected() {
     let (addr, state) = start_test_server().await.unwrap();
     let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
     client.start().unwrap();
     client.connect().await.unwrap();
 
@@ -1708,12 +1801,12 @@ async fn test_exec_client_trade_rate_limit_emits_order_rejected() {
     )
     .await;
     drain_execution_events(&mut rx).await;
-    state.trade_order_ret_code.store(10006, Ordering::Relaxed);
+    state.trade_order_ret_code.store(429, Ordering::Relaxed);
 
     let trader_id = TraderId::from("TESTER-001");
     let strategy_id = StrategyId::from("S-001");
-    let client_id = *BYBIT_CLIENT_ID;
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let client_id = *BITGET_CLIENT_ID;
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
     let client_order_id = ClientOrderId::from("test-ws-rate-limit-reject");
     let order = OrderAny::Market(MarketOrder::new(
         trader_id,
@@ -1781,7 +1874,7 @@ async fn test_exec_client_trade_rate_limit_emits_order_rejected() {
         panic!("Expected OrderRejected, was {rejected:?}");
     };
     assert_eq!(event.client_order_id, client_order_id);
-    assert_eq!(event.reason.to_string(), "Too many visits.");
+    assert_eq!(event.reason.to_string(), "Too Many Requests");
 
     client.disconnect().await.unwrap();
 }
@@ -1793,7 +1886,7 @@ async fn test_query_account_does_not_block_within_runtime() {
 
     let (addr, _state) = start_test_server().await.unwrap();
     let (mut client, mut rx, cache) = create_test_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
 
     client.connect().await.unwrap();
     client.start().unwrap();
@@ -1808,8 +1901,8 @@ async fn test_query_account_does_not_block_within_runtime() {
 
     let cmd = QueryAccount::new(
         TraderId::from("TESTER-001"),
-        Some(*BYBIT_CLIENT_ID),
-        AccountId::from("BYBIT-001"),
+        Some(*BITGET_CLIENT_ID),
+        AccountId::from("BITGET-001"),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1839,10 +1932,10 @@ async fn test_exec_client_submit_order_list_demo() {
 
     let (addr, state) = start_test_server().await.unwrap();
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -1850,7 +1943,7 @@ async fn test_exec_client_submit_order_list_demo() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -1858,14 +1951,15 @@ async fn test_exec_client_submit_order_list_demo() {
         cache.clone(),
     );
 
-    let config = BybitExecutionClientConfig {
+    let config = BitgetExecutionClientConfig {
         api_key: Some("test_api_key".into()),
         api_secret: Some("test_api_secret".into()),
-        product_types: vec![BybitProductType::Linear],
-        environment: BybitEnvironment::Demo,
+        api_passphrase: Some("test_api_passphrase".into()),
+        product_types: vec![BitgetProductType::Linear],
+        environment: BitgetEnvironment::Demo,
         base_url_http: Some(format!("http://{addr}")),
-        base_url_ws_private: Some(format!("ws://{addr}/v5/private")),
-        base_url_ws_trade: Some(format!("ws://{addr}/v5/trade")),
+        base_url_ws_private: Some(format!("ws://{addr}/v3/ws/private")),
+        base_url_ws_trade: Some(format!("ws://{addr}/v3/ws/private/trade")),
         proxy_url: None,
         http_timeout_secs: 10,
         max_retries: 1,
@@ -1886,7 +1980,7 @@ async fn test_exec_client_submit_order_list_demo() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -2001,6 +2095,18 @@ async fn test_exec_client_submit_order_list_demo() {
 
     assert_eq!(submitted_count, 2, "Expected 2 OrderSubmitted events");
 
+    // Plain orders go out as one `op:"trade"` batch-place on the trade socket, demo included
+    wait_until_async(
+        || async { state.trade_order_payloads.lock().await.len() == 1 },
+        Duration::from_secs(5),
+    )
+    .await;
+    let payloads = state.trade_order_payloads.lock().await;
+    assert_eq!(payloads[0]["topic"], "batch-place");
+    assert_eq!(payloads[0]["category"], "usdt-futures");
+    assert_eq!(payloads[0]["args"].as_array().unwrap().len(), 2);
+    drop(payloads);
+
     client.disconnect().await.unwrap();
 }
 
@@ -2009,7 +2115,7 @@ async fn test_exec_client_submit_order_list_demo() {
 async fn test_exec_client_demo_cancel_post_lookup_failure_does_not_reject() {
     let (addr, state) = start_test_server().await.unwrap();
     let (mut client, mut rx, cache) = create_test_demo_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
 
     client.connect().await.unwrap();
     client.start().unwrap();
@@ -2021,12 +2127,24 @@ async fn test_exec_client_demo_cancel_post_lookup_failure_does_not_reject() {
     .await;
     drain_execution_events(&mut rx).await;
 
+    // A conditional order is cancelled over REST; 40010 (request timed out) leaves the outcome
+    // unknown
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
+    let client_order_id = ClientOrderId::from("test-cancel-post-lookup-ambiguous");
+    add_stop_market_to_cache(
+        &cache,
+        StrategyId::from("S-001"),
+        instrument_id,
+        client_order_id,
+    );
+    state.cancel_order_ret_code.store(40010, Ordering::Relaxed);
+
     let cmd = CancelOrder::new(
         TraderId::from("TESTER-001"),
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         StrategyId::from("S-001"),
-        InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE),
-        ClientOrderId::from("test-cancel-post-lookup-ambiguous"),
+        instrument_id,
+        client_order_id,
         Some(VenueOrderId::from("test-order-id-12345")),
         UUID4::new(),
         UnixNanos::default(),
@@ -2037,6 +2155,7 @@ async fn test_exec_client_demo_cancel_post_lookup_failure_does_not_reject() {
     client.cancel_order(cmd).unwrap();
 
     assert_no_cancel_rejected(&mut rx, Duration::from_millis(300)).await;
+    assert_eq!(state.cancel_order_requests.load(Ordering::Relaxed), 1);
 
     client.disconnect().await.unwrap();
 }
@@ -2046,8 +2165,8 @@ async fn test_exec_client_demo_cancel_post_lookup_failure_does_not_reject() {
 async fn test_exec_client_demo_batch_cancel_failure_preserves_owning_strategies() {
     let (addr, state) = start_test_server().await.unwrap();
     let (mut client, mut rx, cache) = create_test_demo_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
-    state.cancel_order_ret_code.store(110001, Ordering::Relaxed);
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
+    state.cancel_order_ret_code.store(25204, Ordering::Relaxed);
 
     client.connect().await.unwrap();
     client.start().unwrap();
@@ -2059,14 +2178,24 @@ async fn test_exec_client_demo_batch_cancel_failure_preserves_owning_strategies(
     .await;
     drain_execution_events(&mut rx).await;
 
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
+
+    // Conditional orders make the batch go over REST, one cancel per order
+    for (index, owner) in ["S-001", "S-002"].into_iter().enumerate() {
+        add_stop_market_to_cache(
+            &cache,
+            StrategyId::from(owner),
+            instrument_id,
+            ClientOrderId::from(format!("O-DEMO-BATCH-{index}")),
+        );
+    }
     let cancels: Vec<CancelOrder> = ["S-001", "S-002"]
         .into_iter()
         .enumerate()
         .map(|(index, owner)| {
             CancelOrder::new(
                 TraderId::from("TESTER-001"),
-                Some(*BYBIT_CLIENT_ID),
+                Some(*BITGET_CLIENT_ID),
                 StrategyId::from(owner),
                 instrument_id,
                 ClientOrderId::from(format!("O-DEMO-BATCH-{index}")),
@@ -2082,7 +2211,7 @@ async fn test_exec_client_demo_batch_cancel_failure_preserves_owning_strategies(
     client
         .batch_cancel_orders(BatchCancelOrders::new(
             TraderId::from("TESTER-001"),
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             StrategyId::from("S-001"),
             instrument_id,
             cancels.clone(),
@@ -2128,7 +2257,7 @@ async fn test_exec_client_demo_batch_cancel_failure_preserves_owning_strategies(
 async fn test_exec_client_demo_sided_cancel_all_with_empty_cache_sends_nothing() {
     let (addr, state) = start_test_server().await.unwrap();
     let (mut client, mut rx, cache) = create_test_demo_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
     state.empty_orders_realtime.store(true, Ordering::Relaxed);
 
     client.connect().await.unwrap();
@@ -2141,7 +2270,7 @@ async fn test_exec_client_demo_sided_cancel_all_with_empty_cache_sends_nothing()
     .await;
     drain_execution_events(&mut rx).await;
 
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
     assert!(
         cache
             .borrow()
@@ -2155,7 +2284,7 @@ async fn test_exec_client_demo_sided_cancel_all_with_empty_cache_sends_nothing()
     client
         .cancel_all_orders(CancelAllOrders::new(
             TraderId::from("TESTER-001"),
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             StrategyId::from("S-001"),
             instrument_id,
             Some(OrderSide::Buy),
@@ -2185,7 +2314,7 @@ async fn test_exec_client_demo_sided_cancel_all_with_empty_cache_sends_nothing()
 async fn test_exec_client_demo_modify_whole_http_failure_does_not_reject() {
     let (addr, state) = start_test_server().await.unwrap();
     let (mut client, mut rx, cache) = create_test_demo_execution_client(addr);
-    add_test_account_to_cache(&cache, AccountId::from("BYBIT-001"));
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
 
     client.connect().await.unwrap();
     client.start().unwrap();
@@ -2197,16 +2326,28 @@ async fn test_exec_client_demo_modify_whole_http_failure_does_not_reject() {
     .await;
     drain_execution_events(&mut rx).await;
 
+    // Conditional orders are modified over REST (`modify-strategy-order`); a 503 leaves the
+    // outcome unknown
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
+    let client_order_id = ClientOrderId::from("test-modify-http-ambiguous");
+    add_stop_market_to_cache(
+        &cache,
+        StrategyId::from("S-001"),
+        instrument_id,
+        client_order_id,
+    );
+    state.modify_order_status.store(503, Ordering::Relaxed);
+
     let cmd = ModifyOrder::new(
         TraderId::from("TESTER-001"),
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         StrategyId::from("S-001"),
-        InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE),
-        ClientOrderId::from("test-modify-http-ambiguous"),
+        instrument_id,
+        client_order_id,
         Some(VenueOrderId::from("test-order-id-12345")),
         Some(Quantity::from("0.02")),
-        Some(Price::from("1600.00")),
         None,
+        Some(Price::from("1600.00")),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -2216,6 +2357,14 @@ async fn test_exec_client_demo_modify_whole_http_failure_does_not_reject() {
     client.modify_order(cmd).unwrap();
 
     assert_no_modify_rejected(&mut rx, Duration::from_millis(300)).await;
+    let payloads = state.modify_order_payloads.lock().await;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0]["orderId"], "test-order-id-12345");
+    assert_eq!(payloads[0]["clientOid"], "test-modify-http-ambiguous");
+    assert_eq!(payloads[0]["qty"], "0.02");
+    assert_eq!(payloads[0]["triggerPrice"], "1600.00");
+    drop(payloads);
+    assert_eq!(state.trade_order_requests.load(Ordering::Relaxed), 0);
 
     client.disconnect().await.unwrap();
 }
@@ -2226,10 +2375,10 @@ async fn test_exec_client_demo_submit_post_lookup_failure_does_not_reject() {
     let (addr, state) = start_test_server().await.unwrap();
 
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -2237,7 +2386,7 @@ async fn test_exec_client_demo_submit_post_lookup_failure_does_not_reject() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -2249,7 +2398,7 @@ async fn test_exec_client_demo_submit_post_lookup_failure_does_not_reject() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -2268,27 +2417,8 @@ async fn test_exec_client_demo_submit_post_lookup_failure_does_not_reject() {
     let order_lookup_requests = state.orders_realtime_requests.load(Ordering::Relaxed);
 
     let cid = ClientOrderId::from("test-unknown-submit-outcome");
-    let order = OrderAny::Market(MarketOrder::new(
-        trader_id,
-        strategy_id,
-        instrument_id,
-        cid,
-        OrderSide::Buy,
-        Quantity::from("0.01"),
-        TimeInForce::Gtc,
-        UUID4::new(),
-        UnixNanos::default(),
-        false,
-        false,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ));
+    // Conditional orders go to REST place-strategy-order and are looked up afterwards
+    let order = stop_market_order(strategy_id, instrument_id, cid);
     let init = order.init_event().clone();
 
     cache
@@ -2349,14 +2479,14 @@ async fn test_exec_client_demo_submit_post_lookup_failure_does_not_reject() {
 
 #[rstest]
 #[tokio::test]
-async fn test_exec_client_demo_submit_tp_trigger_price_emits_order_denied() {
+async fn test_exec_client_demo_submit_take_profit_sends_takeprofit() {
     let (addr, state) = start_test_server().await.unwrap();
 
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -2364,7 +2494,7 @@ async fn test_exec_client_demo_submit_tp_trigger_price_emits_order_denied() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -2376,7 +2506,7 @@ async fn test_exec_client_demo_submit_tp_trigger_price_emits_order_denied() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -2391,7 +2521,7 @@ async fn test_exec_client_demo_submit_tp_trigger_price_emits_order_denied() {
         .is_ok()
     {}
 
-    let cid = ClientOrderId::from("test-tp-trigger-denied");
+    let cid = ClientOrderId::from("test-tp-demo-ws");
     let order = OrderAny::Market(MarketOrder::new(
         trader_id,
         strategy_id,
@@ -2422,7 +2552,7 @@ async fn test_exec_client_demo_submit_tp_trigger_price_emits_order_denied() {
 
     let mut params = Params::new();
     params.insert("take_profit".to_string(), json!("3000"));
-    params.insert("tp_trigger_price".to_string(), json!("2950"));
+    params.insert("stop_loss".to_string(), json!("1500"));
 
     let cmd = SubmitOrder::new(
         trader_id,
@@ -2441,22 +2571,19 @@ async fn test_exec_client_demo_submit_tp_trigger_price_emits_order_denied() {
 
     client.submit_order(cmd).unwrap();
 
-    // The demo path cannot carry TP/SL trigger prices, so the first event must be OrderDenied
-    // (no OrderSubmitted, no HTTP submission).
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .expect("timed out waiting for OrderDenied")
-        .expect("channel closed");
-    let text = match event {
-        ExecutionEvent::Order(ref order_event) => order_event.to_string(),
-        other => panic!("Expected OrderDenied, was {other:?}"),
-    };
-    assert!(
-        text.contains("OrderDenied")
-            && text.contains("UNSUPPORTED_TP_SL")
-            && text.contains("TP/SL trigger prices are not supported in demo mode"),
-        "Expected OrderDenied with trigger-price reason, was {text}",
-    );
+    // Bitget demo carries attached TP/SL on the WS place-order (lowercase field names)
+    wait_until_async(
+        || async { state.trade_order_payloads.lock().await.len() == 1 },
+        Duration::from_secs(5),
+    )
+    .await;
+    let payloads = state.trade_order_payloads.lock().await;
+    let args = &payloads[0]["args"][0];
+    assert_eq!(payloads[0]["topic"], "place-order");
+    assert_eq!(args["clientOid"], "test-tp-demo-ws");
+    assert_eq!(args["takeprofit"], "3000");
+    assert_eq!(args["stoploss"], "1500");
+    drop(payloads);
 
     client.disconnect().await.unwrap();
 }
@@ -2464,13 +2591,16 @@ async fn test_exec_client_demo_submit_tp_trigger_price_emits_order_denied() {
 #[rstest]
 #[tokio::test]
 async fn test_exec_client_demo_submit_confirmed_rejection_emits_order_rejected() {
+    use nautilus_common::messages::execution::SubmitOrderList;
+    use nautilus_model::orders::OrderList;
+
     let (addr, state) = start_test_server().await.unwrap();
 
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -2478,7 +2608,7 @@ async fn test_exec_client_demo_submit_confirmed_rejection_emits_order_rejected()
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -2490,7 +2620,7 @@ async fn test_exec_client_demo_submit_confirmed_rejection_emits_order_rejected()
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -2510,27 +2640,35 @@ async fn test_exec_client_demo_submit_confirmed_rejection_emits_order_rejected()
         .store(true, Ordering::Relaxed);
     let order_lookup_requests = state.orders_realtime_requests.load(Ordering::Relaxed);
 
+    // A reduce-only list goes to REST place-order (`batch-place` cannot carry reduce-only); the
+    // post-submit lookup finds the post-only order cancelled with `post_only_fill_cancel`
     let cid = ClientOrderId::from("test-confirmed-submit-reject");
-    let order = OrderAny::Market(MarketOrder::new(
+    let order = OrderAny::Limit(LimitOrder::new(
         trader_id,
         strategy_id,
         instrument_id,
         cid,
         OrderSide::Buy,
         Quantity::from("0.01"),
+        Price::from("1600.00"),
         TimeInForce::Gtc,
+        None,
+        true,
+        true,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         UUID4::new(),
         UnixNanos::default(),
-        false,
-        false,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
     ));
     let init = order.init_event().clone();
 
@@ -2539,13 +2677,18 @@ async fn test_exec_client_demo_submit_confirmed_rejection_emits_order_rejected()
         .add_order(order, None, Some(client_id), false)
         .unwrap();
 
-    let cmd = SubmitOrder::new(
+    let cmd = SubmitOrderList::new(
         trader_id,
         Some(client_id),
         strategy_id,
-        instrument_id,
-        cid,
-        init,
+        OrderList::new(
+            OrderListId::from("test-confirmed-reject-list"),
+            instrument_id,
+            strategy_id,
+            vec![cid],
+            UnixNanos::default(),
+        ),
+        vec![init],
         None,
         None,
         None,
@@ -2554,7 +2697,7 @@ async fn test_exec_client_demo_submit_confirmed_rejection_emits_order_rejected()
         None, // correlation_id
     );
 
-    client.submit_order(cmd).unwrap();
+    client.submit_order_list(cmd).unwrap();
 
     let submitted = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -2580,7 +2723,7 @@ async fn test_exec_client_demo_submit_confirmed_rejection_emits_order_rejected()
     };
 
     assert_eq!(event.client_order_id, cid);
-    assert_eq!(event.reason.to_string(), "EC_PostOnlyWillTakeLiquidity");
+    assert_eq!(event.reason.to_string(), "post_only_fill_cancel");
     assert!(!event.reconciliation);
     assert!(event.due_post_only);
 
@@ -2595,10 +2738,10 @@ async fn test_exec_client_submit_order_list_denies_all_on_invalid_leg() {
 
     let (addr, state) = start_test_server().await.unwrap();
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -2606,7 +2749,7 @@ async fn test_exec_client_submit_order_list_denies_all_on_invalid_leg() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -2614,14 +2757,15 @@ async fn test_exec_client_submit_order_list_denies_all_on_invalid_leg() {
         cache.clone(),
     );
 
-    let config = BybitExecutionClientConfig {
+    let config = BitgetExecutionClientConfig {
         api_key: Some("test_api_key".into()),
         api_secret: Some("test_api_secret".into()),
-        product_types: vec![BybitProductType::Linear],
-        environment: BybitEnvironment::Demo,
+        api_passphrase: Some("test_api_passphrase".into()),
+        product_types: vec![BitgetProductType::Linear],
+        environment: BitgetEnvironment::Demo,
         base_url_http: Some(format!("http://{addr}")),
-        base_url_ws_private: Some(format!("ws://{addr}/v5/private")),
-        base_url_ws_trade: Some(format!("ws://{addr}/v5/trade")),
+        base_url_ws_private: Some(format!("ws://{addr}/v3/ws/private")),
+        base_url_ws_trade: Some(format!("ws://{addr}/v3/ws/private/trade")),
         proxy_url: None,
         http_timeout_secs: 10,
         max_retries: 1,
@@ -2642,7 +2786,7 @@ async fn test_exec_client_submit_order_list_denies_all_on_invalid_leg() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -2799,10 +2943,10 @@ async fn test_exec_client_submit_order_unsupported_order_type_emits_order_denied
     let (addr, state) = start_test_server().await.unwrap();
 
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -2810,7 +2954,7 @@ async fn test_exec_client_submit_order_unsupported_order_type_emits_order_denied
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -2822,7 +2966,7 @@ async fn test_exec_client_submit_order_unsupported_order_type_emits_order_denied
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -2837,7 +2981,7 @@ async fn test_exec_client_submit_order_unsupported_order_type_emits_order_denied
         .is_ok()
     {}
 
-    // Bybit does not support TrailingStopMarket, so the single-order path denies before submit
+    // Bitget does not support TrailingStopMarket, so the single-order path denies before submit
     let cid = ClientOrderId::from("test-unsupported-order-type");
     let order = OrderAny::TrailingStopMarket(TrailingStopMarketOrder::new(
         trader_id,
@@ -2915,12 +3059,12 @@ async fn test_exec_client_submit_conditional_order_on_option_denied() {
     let (addr, state) = start_test_server().await.unwrap();
 
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
     let instrument_id = InstrumentId::new(
         Symbol::from("BTC-25SEP26-86500-C-USDT-OPTION"),
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
     );
 
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -2929,7 +3073,7 @@ async fn test_exec_client_submit_conditional_order_on_option_denied() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -2941,7 +3085,7 @@ async fn test_exec_client_submit_conditional_order_on_option_denied() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -3071,7 +3215,7 @@ async fn test_exec_client_submit_conditional_order_on_option_denied() {
         UnixNanos::default(),
     ));
 
-    // Bybit does not support conditional orders for options, so each order is
+    // Bitget does not support conditional orders for options, so each order is
     // denied before submission without an OrderSubmitted event
     for order in [stop_market, stop_limit, market_if_touched, limit_if_touched] {
         let cid = order.client_order_id();
@@ -3125,12 +3269,12 @@ async fn test_exec_client_submit_order_list_denies_conditional_leg_on_option() {
     let (addr, state) = start_test_server().await.unwrap();
 
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
     let instrument_id = InstrumentId::new(
         Symbol::from("BTC-25SEP26-86500-C-USDT-OPTION"),
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
     );
 
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -3139,7 +3283,7 @@ async fn test_exec_client_submit_order_list_denies_conditional_leg_on_option() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -3151,7 +3295,7 @@ async fn test_exec_client_submit_order_list_denies_conditional_leg_on_option() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -3305,10 +3449,10 @@ async fn test_exec_client_submit_order_list_denies_incomplete_when_leg_missing()
 
     let (addr, state) = start_test_server().await.unwrap();
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -3316,7 +3460,7 @@ async fn test_exec_client_submit_order_list_denies_incomplete_when_leg_missing()
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -3328,7 +3472,7 @@ async fn test_exec_client_submit_order_list_denies_incomplete_when_leg_missing()
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -3448,10 +3592,10 @@ async fn test_exec_client_submit_order_list_denies_closed_leg() {
 
     let (addr, state) = start_test_server().await.unwrap();
     let trader_id = TraderId::from("TESTER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let client_id = *BYBIT_CLIENT_ID;
+    let account_id = AccountId::from("BITGET-001");
+    let client_id = *BITGET_CLIENT_ID;
     let strategy_id = StrategyId::from("S-001");
-    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), *BYBIT_VENUE);
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     add_test_account_to_cache(&cache, account_id);
@@ -3459,7 +3603,7 @@ async fn test_exec_client_submit_order_list_denies_closed_leg() {
     let core = ExecutionClientCore::new(
         trader_id,
         client_id,
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         OmsType::Netting,
         account_id,
         AccountType::Margin,
@@ -3471,7 +3615,7 @@ async fn test_exec_client_submit_order_list_denies_closed_leg() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     set_exec_event_sender(tx);
 
-    let mut client = BybitExecutionClient::new(core, config).unwrap();
+    let mut client = BitgetExecutionClient::new(core, config).unwrap();
     client.connect().await.unwrap();
     client.start().unwrap();
 
@@ -3615,5 +3759,311 @@ async fn test_exec_client_submit_order_list_denies_closed_leg() {
         "sibling reason was: {sibling}"
     );
 
+    client.disconnect().await.unwrap();
+}
+
+async fn connect_test_client(
+    config: BitgetExecutionClientConfig,
+    state: &TestServerState,
+) -> (
+    BitgetExecutionClient,
+    tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
+    Rc<RefCell<Cache>>,
+) {
+    let (mut client, mut rx, cache) = create_test_execution_client_with_config(config);
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
+    client.start().unwrap();
+    client.connect().await.unwrap();
+    wait_until_async(
+        || async { state.subscriptions.lock().await.len() >= 5 },
+        Duration::from_secs(10),
+    )
+    .await;
+    drain_execution_events(&mut rx).await;
+    (client, rx, cache)
+}
+
+fn tsla_limit_order(
+    client_order_id: &str,
+    price: &str,
+    time_in_force: TimeInForce,
+    post_only: bool,
+) -> OrderAny {
+    OrderAny::Limit(LimitOrder::new(
+        TraderId::from("TESTER-001"),
+        StrategyId::from("S-001"),
+        InstrumentId::from("TSLAUSDT-PERP.BITGET"),
+        ClientOrderId::from(client_order_id),
+        OrderSide::Buy,
+        Quantity::from("0.02"),
+        Price::from(price),
+        time_in_force,
+        None,
+        post_only,
+        false,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+    ))
+}
+
+fn submit_cached(
+    client: &BitgetExecutionClient,
+    cache: &Rc<RefCell<Cache>>,
+    order: OrderAny,
+) -> ClientOrderId {
+    let client_order_id = order.client_order_id();
+    let command = SubmitOrder::new(
+        order.trader_id(),
+        Some(*BITGET_CLIENT_ID),
+        order.strategy_id(),
+        order.instrument_id(),
+        client_order_id,
+        order.init_event().clone(),
+        None,
+        None,
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+    );
+    cache
+        .borrow_mut()
+        .add_order(order, None, Some(*BITGET_CLIENT_ID), false)
+        .unwrap();
+    client.submit_order(command).unwrap();
+    client_order_id
+}
+
+async fn next_order_event(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
+) -> OrderEventAny {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ExecutionEvent::Order(event) = rx.recv().await.expect("channel closed") {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for an order event")
+}
+
+// Verified on demo: a crossing post-only order is acked `code "0"` and then pushed `cancelled`
+// with `post_only_fill_cancel`, with no `new` before it
+#[rstest]
+#[tokio::test]
+async fn test_exec_client_post_only_cross_emits_rejected_due_post_only() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (mut client, mut rx, cache) =
+        connect_test_client(create_test_exec_config(addr), &state).await;
+    *state.ack_order_id.lock().await = Some("1503520295321231360".to_string());
+
+    let cid = submit_cached(
+        &client,
+        &cache,
+        tsla_limit_order("tdcapcross93093", "360.72", TimeInForce::Gtc, true),
+    );
+    assert!(matches!(
+        next_order_event(&mut rx).await,
+        OrderEventAny::Submitted(_)
+    ));
+    wait_until_async(
+        || async { state.trade_order_requests.load(Ordering::Relaxed) == 1 },
+        Duration::from_secs(5),
+    )
+    .await;
+    let payloads = state.trade_order_payloads.lock().await;
+    assert_eq!(payloads[0]["args"][0]["timeInForce"], "post_only");
+    drop(payloads);
+
+    state
+        .private_pushes
+        .lock()
+        .await
+        .push(load_test_data("ws_account_order_post_only_rejected.json"));
+    let event = next_order_event(&mut rx).await;
+
+    let OrderEventAny::Rejected(rejected) = event else {
+        panic!("Expected OrderRejected, was {event:?}");
+    };
+    assert_eq!(rejected.client_order_id, cid);
+    assert!(rejected.due_post_only);
+    client.disconnect().await.unwrap();
+}
+
+// Fills come only from the `fill` topic; a replayed `execId` is dropped and the commission is
+// the signed sum of `feeDetail`
+#[rstest]
+#[tokio::test]
+async fn test_exec_client_fill_dedupes_exec_id_and_sums_fee() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (mut client, mut rx, cache) =
+        connect_test_client(create_test_exec_config(addr), &state).await;
+    *state.ack_order_id.lock().await = Some("1503520323393708032".to_string());
+
+    let cid = submit_cached(
+        &client,
+        &cache,
+        tsla_limit_order("tdcapioc93099", "361.44", TimeInForce::Ioc, false),
+    );
+    assert!(matches!(
+        next_order_event(&mut rx).await,
+        OrderEventAny::Submitted(_)
+    ));
+
+    // Demo push order for an IOC take: `order` filled first, then the `fill` (replayed here)
+    let fill = load_test_data("ws_account_execution.json");
+    state.private_pushes.lock().await.extend([
+        load_test_data("ws_account_order_filled.json"),
+        fill.clone(),
+        fill,
+    ]);
+
+    // The order topic carries no fills, so acceptance is ensured before the fill event
+    let event = next_order_event(&mut rx).await;
+    assert!(
+        matches!(event, OrderEventAny::Accepted(_)),
+        "Expected OrderAccepted, was {event:?}"
+    );
+    let event = next_order_event(&mut rx).await;
+    let OrderEventAny::Filled(filled) = event else {
+        panic!("Expected OrderFilled, was {event:?}");
+    };
+    assert_eq!(filled.client_order_id, cid);
+    assert_eq!(filled.trade_id.as_str(), "1503520323400871936");
+    assert_eq!(filled.last_qty, Quantity::from("0.02"));
+    assert_eq!(filled.last_px, Price::from("360.72"));
+    assert_eq!(filled.commission, Some(Money::from("0.00288576 USDT")));
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if let ExecutionEvent::Order(OrderEventAny::Filled(event)) =
+                rx.recv().await.expect("channel closed")
+            {
+                return event;
+            }
+        }
+    })
+    .await;
+    assert!(duplicate.is_err(), "duplicate execId must not fill twice");
+    client.disconnect().await.unwrap();
+}
+
+// Orders wait for the trade socket to (re-)login and are rejected locally, never sent, once the
+// auth wait expires (10 s by default, shortened here)
+#[rstest]
+#[tokio::test]
+async fn test_exec_client_order_queued_until_login_then_rejected_locally() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let mut config = create_test_exec_config(addr);
+    config.auth_timeout_secs = Some(1);
+    let registry = SocketReconnectRegistry::default();
+    let (mut client, mut rx, cache) = registry.scope(|| {
+        let (client, rx, cache) = create_test_execution_client_with_config(config);
+        (client, rx, cache)
+    });
+    add_test_account_to_cache(&cache, AccountId::from("BITGET-001"));
+    client.start().unwrap();
+    client.connect().await.unwrap();
+    drain_execution_events(&mut rx).await;
+    let logins = state.login_count.load(Ordering::Relaxed);
+    assert_eq!(logins, 2, "both private sockets log in");
+
+    state.withhold_login.store(true, Ordering::Relaxed);
+    let handle = registry
+        .handle(*BITGET_CLIENT_ID, Ustr::from("bitget-trading"))
+        .unwrap();
+    assert_eq!(
+        handle.request_reconnect(),
+        SocketReconnectRequestOutcome::Accepted
+    );
+    wait_until_async(
+        || async { state.login_count.load(Ordering::Relaxed) > logins },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    let cid = submit_cached(
+        &client,
+        &cache,
+        tsla_limit_order("test-queued-order", "342.62", TimeInForce::Gtc, true),
+    );
+    assert!(matches!(
+        next_order_event(&mut rx).await,
+        OrderEventAny::Submitted(_)
+    ));
+    let event = next_order_event(&mut rx).await;
+
+    let OrderEventAny::Rejected(rejected) = event else {
+        panic!("Expected OrderRejected, was {event:?}");
+    };
+    assert_eq!(rejected.client_order_id, cid);
+    assert!(
+        rejected.reason.as_str().contains("authenticated"),
+        "unexpected reason: {}",
+        rejected.reason
+    );
+    assert_eq!(state.trade_order_requests.load(Ordering::Relaxed), 0);
+    client.disconnect().await.unwrap();
+}
+
+// A conditional modify the venue refuses is a confirmed rejection
+#[rstest]
+#[tokio::test]
+async fn test_exec_client_conditional_modify_venue_reject_emits_modify_rejected() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (mut client, mut rx, cache) =
+        connect_test_client(create_test_exec_config(addr), &state).await;
+    let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-PERP"), *BITGET_VENUE);
+    let client_order_id = ClientOrderId::from("test-modify-rejected");
+    add_stop_market_to_cache(
+        &cache,
+        StrategyId::from("S-001"),
+        instrument_id,
+        client_order_id,
+    );
+    state.modify_order_status.store(400, Ordering::Relaxed);
+
+    client
+        .modify_order(ModifyOrder::new(
+            TraderId::from("TESTER-001"),
+            Some(*BITGET_CLIENT_ID),
+            StrategyId::from("S-001"),
+            instrument_id,
+            client_order_id,
+            Some(VenueOrderId::from("test-order-id-12345")),
+            None,
+            None,
+            Some(Price::from("1550.00")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .unwrap();
+    let event = next_order_event(&mut rx).await;
+
+    let OrderEventAny::ModifyRejected(rejected) = event else {
+        panic!("Expected OrderModifyRejected, was {event:?}");
+    };
+    assert_eq!(rejected.client_order_id, client_order_id);
+    assert!(rejected.reason.as_str().contains("25571"));
+    // The venue requires `qty` on every modify, so the cached quantity fills the gap
+    let payloads = state.modify_order_payloads.lock().await;
+    assert_eq!(payloads[0]["qty"], "0.01");
+    assert_eq!(payloads[0]["triggerPrice"], "1550.00");
+    drop(payloads);
     client.disconnect().await.unwrap();
 }

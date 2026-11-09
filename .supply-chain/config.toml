@@ -40,6 +40,9 @@ audit-as-crates-io = false
 [policy.nautilus-blockchain]
 audit-as-crates-io = false
 
+[policy.nautilus-bitget]
+audit-as-crates-io = false
+
 [policy.nautilus-bybit]
 audit-as-crates-io = false
 

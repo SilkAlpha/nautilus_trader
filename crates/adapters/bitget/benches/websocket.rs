@@ -16,7 +16,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use nautilus_bybit::websocket::{messages::BybitWsFrame, parse_bybit_ws_frame};
+use nautilus_bitget::websocket::{messages::BitgetWsFrame, parse_bitget_ws_frame};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -30,9 +30,9 @@ const ACCOUNT_EXECUTION: &str = include_str!("../test_data/ws_account_execution.
 const ACCOUNT_WALLET: &str = include_str!("../test_data/ws_account_wallet.json");
 const ACCOUNT_POSITION: &str = include_str!("../test_data/ws_account_position.json");
 
-const PONG: &str = r#"{"op":"pong"}"#;
-const SUBSCRIBE_SUCCESS: &str =
-    r#"{"success":true,"ret_msg":"","conn_id":"abc123","req_id":"1","op":"subscribe"}"#;
+// Bitget's pong is the bare text frame `pong`; quoted so the JSON benches parse it
+const PONG: &str = r#""pong""#;
+const SUBSCRIBE_SUCCESS: &str = include_str!("../test_data/ws_subscription_ack.json");
 
 fn bench_classification(c: &mut Criterion) {
     let mut group = c.benchmark_group("Classification");
@@ -56,7 +56,7 @@ fn bench_classification(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("classify", name), &value, |b, value| {
             b.iter(|| {
-                black_box(parse_bybit_ws_frame(black_box(value.clone())));
+                black_box(parse_bitget_ws_frame(black_box(value.clone())));
             });
         });
     }
@@ -84,7 +84,7 @@ fn bench_full_flow(c: &mut Criterion) {
             |b, msg| {
                 b.iter(|| {
                     let value: Value = serde_json::from_str(black_box(msg)).unwrap();
-                    let msg_type = parse_bybit_ws_frame(value.clone());
+                    let msg_type = parse_bitget_ws_frame(value.clone());
                     black_box((value, msg_type));
                 });
             },
@@ -142,7 +142,7 @@ fn bench_batch(c: &mut Criterion) {
                     for i in 0..size {
                         let msg = messages[i % messages.len()];
                         let value: Value = serde_json::from_str(msg).unwrap();
-                        let msg_type = parse_bybit_ws_frame(value.clone());
+                        let msg_type = parse_bitget_ws_frame(value.clone());
                         black_box((value, msg_type));
                     }
                 });
@@ -212,26 +212,26 @@ fn bench_tungstenite_message_access(c: &mut Criterion) {
 fn bench_message_type_match(c: &mut Criterion) {
     let mut group = c.benchmark_group("Message Type");
 
-    let frames: Vec<(_, BybitWsFrame)> = vec![
+    let frames: Vec<(_, BitgetWsFrame)> = vec![
         (
             "trade",
-            parse_bybit_ws_frame(serde_json::from_str(TRADE).unwrap()),
+            parse_bitget_ws_frame(serde_json::from_str(TRADE).unwrap()),
         ),
         (
             "orderbook",
-            parse_bybit_ws_frame(serde_json::from_str(ORDERBOOK_DELTA).unwrap()),
+            parse_bitget_ws_frame(serde_json::from_str(ORDERBOOK_DELTA).unwrap()),
         ),
         (
             "ticker",
-            parse_bybit_ws_frame(serde_json::from_str(TICKER_LINEAR).unwrap()),
+            parse_bitget_ws_frame(serde_json::from_str(TICKER_LINEAR).unwrap()),
         ),
         (
             "kline",
-            parse_bybit_ws_frame(serde_json::from_str(KLINE).unwrap()),
+            parse_bitget_ws_frame(serde_json::from_str(KLINE).unwrap()),
         ),
         (
             "account_order",
-            parse_bybit_ws_frame(serde_json::from_str(ACCOUNT_ORDER).unwrap()),
+            parse_bitget_ws_frame(serde_json::from_str(ACCOUNT_ORDER).unwrap()),
         ),
     ];
 
@@ -243,11 +243,11 @@ fn bench_message_type_match(c: &mut Criterion) {
                 b.iter(|| {
                     let is_data = matches!(
                         black_box(frame),
-                        BybitWsFrame::Trade(_)
-                            | BybitWsFrame::Orderbook(_)
-                            | BybitWsFrame::Kline(_)
-                            | BybitWsFrame::TickerLinear(_)
-                            | BybitWsFrame::TickerOption(_)
+                        BitgetWsFrame::Trade(_)
+                            | BitgetWsFrame::Orderbook(_)
+                            | BitgetWsFrame::Kline(_)
+                            | BitgetWsFrame::TickerLinear(_)
+                            | BitgetWsFrame::TickerOption(_)
                     );
                     black_box(is_data);
                 });

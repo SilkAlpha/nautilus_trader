@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Python bindings for Bybit configuration.
+//! Python bindings for Bitget configuration.
 
 use nautilus_core::{python::to_pyvalue_err, string::secret::SecretString};
 use nautilus_model::identifiers::AccountId;
@@ -22,16 +22,16 @@ use pyo3::{PyResult, pymethods};
 
 use crate::{
     common::{
-        enums::{BybitEnvironment, BybitMarginMode, BybitProductType},
+        enums::{BitgetEnvironment, BitgetMarginMode, BitgetProductType},
         parse::parse_smp_type,
     },
-    config::{BybitDataClientConfig, BybitExecutionClientConfig},
+    config::{BitgetDataClientConfig, BitgetExecutionClientConfig},
 };
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitDataClientConfig {
-    /// Configuration for the Bybit live data client.
+impl BitgetDataClientConfig {
+    /// Configuration for the Bitget live data client.
     #[new]
     #[pyo3(signature = (
         product_types = None,
@@ -53,11 +53,12 @@ impl BybitDataClientConfig {
         transport_backend = None,
         book_snapshot_timeout_secs = None,
         bars_timestamp_on_close = None,
+        api_passphrase = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
-        product_types: Option<Vec<BybitProductType>>,
-        environment: Option<BybitEnvironment>,
+        product_types: Option<Vec<BitgetProductType>>,
+        environment: Option<BitgetEnvironment>,
         api_key: Option<String>,
         api_secret: Option<String>,
         base_url_http: Option<String>,
@@ -75,11 +76,13 @@ impl BybitDataClientConfig {
         transport_backend: Option<TransportBackend>,
         book_snapshot_timeout_secs: Option<u64>,
         bars_timestamp_on_close: Option<bool>,
+        api_passphrase: Option<String>,
     ) -> Self {
         let defaults = Self::default();
         Self {
             api_key: api_key.map(SecretString::from),
             api_secret: api_secret.map(SecretString::from),
+            api_passphrase: api_passphrase.map(SecretString::from),
             product_types: product_types.unwrap_or(defaults.product_types),
             environment: environment.unwrap_or(defaults.environment),
             base_url_http,
@@ -117,14 +120,14 @@ impl BybitDataClientConfig {
     }
 
     fn __repr__(&self) -> String {
-        stringify!(BybitDataClientConfig).to_string()
+        stringify!(BitgetDataClientConfig).to_string()
     }
 }
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitExecutionClientConfig {
-    /// Configuration for the Bybit live execution client.
+impl BitgetExecutionClientConfig {
+    /// Configuration for the Bitget live execution client.
     #[new]
     #[pyo3(signature = (
         product_types = None,
@@ -148,11 +151,12 @@ impl BybitExecutionClientConfig {
         margin_mode = None,
         smp_type = None,
         transport_backend = None,
+        api_passphrase = None,
     ))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
-        product_types: Option<Vec<BybitProductType>>,
-        environment: Option<BybitEnvironment>,
+        product_types: Option<Vec<BitgetProductType>>,
+        environment: Option<BitgetEnvironment>,
         api_key: Option<String>,
         api_secret: Option<String>,
         base_url_http: Option<String>,
@@ -169,9 +173,10 @@ impl BybitExecutionClientConfig {
         account_id: Option<AccountId>,
         use_spot_position_reports: Option<bool>,
         auto_repay_spot_borrows: Option<bool>,
-        margin_mode: Option<BybitMarginMode>,
+        margin_mode: Option<BitgetMarginMode>,
         smp_type: Option<String>,
         transport_backend: Option<TransportBackend>,
+        api_passphrase: Option<String>,
     ) -> PyResult<Self> {
         let smp_type = smp_type
             .map(|value| parse_smp_type(&value))
@@ -182,6 +187,7 @@ impl BybitExecutionClientConfig {
         Ok(Self {
             api_key: api_key.map(SecretString::from),
             api_secret: api_secret.map(SecretString::from),
+            api_passphrase: api_passphrase.map(SecretString::from),
             product_types: product_types.unwrap_or(defaults.product_types),
             environment: environment.unwrap_or(defaults.environment),
             base_url_http,
@@ -222,6 +228,6 @@ impl BybitExecutionClientConfig {
     }
 
     fn __repr__(&self) -> String {
-        stringify!(BybitExecutionClientConfig).to_string()
+        stringify!(BitgetExecutionClientConfig).to_string()
     }
 }

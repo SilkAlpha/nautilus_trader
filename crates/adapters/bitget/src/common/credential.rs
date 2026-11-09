@@ -13,34 +13,49 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Bybit API credential resolution, storage, and request signing.
+//! Bitget API credential resolution, storage, and request signing.
 
 #![allow(unused_assignments)] // Fields are used in methods, false positive from nightly
 
 use std::fmt::Debug;
 
 use aws_lc_rs::hmac;
-use nautilus_core::{env::resolve_env_var_pair, hex, string::secret::REDACTED};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use nautilus_core::{env::get_or_env_var_opt, string::secret::REDACTED};
 use zeroize::ZeroizeOnDrop;
 
-use crate::common::enums::BybitEnvironment;
+use crate::common::{consts::BITGET_WS_LOGIN_PATH, enums::BitgetEnvironment};
 
-/// Returns the environment variable names for API credentials,
+/// Returns the environment variable names for API credentials (key, secret, passphrase),
 /// based on the trading environment.
+///
+/// Bitget has no testnet, so `Testnet` uses the demo variables.
 #[must_use]
-pub fn credential_env_vars(environment: BybitEnvironment) -> (&'static str, &'static str) {
+pub fn credential_env_vars(
+    environment: BitgetEnvironment,
+) -> (&'static str, &'static str, &'static str) {
     match environment {
-        BybitEnvironment::Demo => ("BYBIT_DEMO_API_KEY", "BYBIT_DEMO_API_SECRET"),
-        BybitEnvironment::Testnet => ("BYBIT_TESTNET_API_KEY", "BYBIT_TESTNET_API_SECRET"),
-        BybitEnvironment::Mainnet => ("BYBIT_API_KEY", "BYBIT_API_SECRET"),
+        BitgetEnvironment::Demo | BitgetEnvironment::Testnet => (
+            "BITGET_DEMO_API_KEY",
+            "BITGET_DEMO_API_SECRET",
+            "BITGET_DEMO_API_PASSPHRASE",
+        ),
+        BitgetEnvironment::Mainnet => (
+            "BITGET_API_KEY",
+            "BITGET_API_SECRET",
+            "BITGET_API_PASSPHRASE",
+        ),
     }
 }
 
-/// API credentials required for signing Bybit REST requests.
+/// API credentials required for signing Bitget REST requests and the WebSocket login.
+///
+/// Bitget keys carry a passphrase chosen at key creation, sent as `ACCESS-PASSPHRASE`.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct Credential {
     api_key: Box<str>,
     api_secret: Box<[u8]>,
+    api_passphrase: Box<str>,
 }
 
 impl Debug for Credential {
@@ -48,6 +63,7 @@ impl Debug for Credential {
         f.debug_struct(stringify!(Credential))
             .field("api_key", &REDACTED)
             .field("api_secret", &REDACTED)
+            .field("api_passphrase", &REDACTED)
             .finish()
     }
 }
@@ -55,25 +71,34 @@ impl Debug for Credential {
 impl Credential {
     /// Resolves credentials from provided values or environment variables.
     ///
-    /// If both `api_key` and `api_secret` are provided, uses those.
-    /// Otherwise falls back to environment variables based on the environment.
+    /// Each of `api_key`, `api_secret` and `api_passphrase` falls back to its environment
+    /// variable; returns `None` unless all three resolve.
     #[must_use]
     pub fn resolve(
         api_key: Option<String>,
         api_secret: Option<String>,
-        environment: BybitEnvironment,
+        api_passphrase: Option<String>,
+        environment: BitgetEnvironment,
     ) -> Option<Self> {
-        let (key_var, secret_var) = credential_env_vars(environment);
-        let (k, s) = resolve_env_var_pair(api_key, api_secret, key_var, secret_var)?;
-        Some(Self::new(k, s))
+        let (key_var, secret_var, passphrase_var) = credential_env_vars(environment);
+        Some(Self::new(
+            get_or_env_var_opt(api_key, key_var)?,
+            get_or_env_var_opt(api_secret, secret_var)?,
+            get_or_env_var_opt(api_passphrase, passphrase_var)?,
+        ))
     }
 
-    /// Creates a new [`Credential`] instance from the API key and secret.
+    /// Creates a new [`Credential`] instance from the API key, secret and passphrase.
     #[must_use]
-    pub fn new(api_key: impl Into<String>, api_secret: impl Into<String>) -> Self {
+    pub fn new(
+        api_key: impl Into<String>,
+        api_secret: impl Into<String>,
+        api_passphrase: impl Into<String>,
+    ) -> Self {
         Self {
             api_key: api_key.into().into_boxed_str(),
             api_secret: api_secret.into().into_bytes().into_boxed_slice(),
+            api_passphrase: api_passphrase.into().into_boxed_str(),
         }
     }
 
@@ -81,6 +106,12 @@ impl Credential {
     #[must_use]
     pub fn api_key(&self) -> &str {
         &self.api_key
+    }
+
+    /// Returns the API passphrase associated with this credential.
+    #[must_use]
+    pub fn api_passphrase(&self) -> &str {
+        &self.api_passphrase
     }
 
     /// Returns a masked version of the API key for logging purposes.
@@ -92,38 +123,36 @@ impl Credential {
         nautilus_core::string::secret::mask_api_key(&self.api_key)
     }
 
-    /// Produces the Bybit WebSocket authentication signature for the provided expiry timestamp.
+    /// Produces the Bitget WebSocket login signature for the provided millisecond timestamp.
     ///
-    /// `expires` should be the millisecond timestamp used by the login payload.
+    /// Signs `timestamp + "GET" + "/user/verify"`; `timestamp` must be the value sent in the
+    /// login payload (the venue accepts seconds or milliseconds; the adapter sends milliseconds).
     #[must_use]
-    pub fn sign_websocket_auth(&self, expires: i64) -> String {
-        let message = format!("GET/realtime{expires}");
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.api_secret);
-        let tag = hmac::sign(&key, message.as_bytes());
-        hex::encode(tag.as_ref())
+    pub fn sign_websocket_auth(&self, timestamp: i64) -> String {
+        self.sign_with_payload(&timestamp.to_string(), "GET", BITGET_WS_LOGIN_PATH, None)
     }
 
-    /// Produces the Bybit HMAC signature for the provided payload.
+    /// Produces the Bitget `ACCESS-SIGN` value: `Base64(HMAC-SHA256(secret, prehash))` with
+    /// `prehash = timestamp + METHOD + request_path + body`.
     ///
-    /// `payload` should contain either a URL-encoded query string (for GET requests)
-    /// or a JSON body (for POST requests). Callers are responsible for ensuring that
-    /// the encoding matches the bytes sent over the wire.
+    /// `request_path` includes `?query` when present (unencoded, as sent). `payload` is the
+    /// JSON body for POST requests; it must be byte-identical to the body sent.
     #[must_use]
     pub fn sign_with_payload(
         &self,
         timestamp: &str,
-        recv_window_ms: u64,
+        method: &str,
+        request_path: &str,
         payload: Option<&str>,
     ) -> String {
-        let recv_window = recv_window_ms.to_string();
         let payload_len = payload.map_or(0usize, str::len);
         let mut message = String::with_capacity(
-            timestamp.len() + self.api_key.len() + recv_window.len() + payload_len,
+            timestamp.len() + method.len() + request_path.len() + payload_len,
         );
 
         message.push_str(timestamp);
-        message.push_str(&self.api_key);
-        message.push_str(&recv_window);
+        message.push_str(method);
+        message.push_str(request_path);
 
         if let Some(payload) = payload {
             message.push_str(payload);
@@ -131,7 +160,7 @@ impl Credential {
 
         let key = hmac::Key::new(hmac::HMAC_SHA256, &self.api_secret);
         let tag = hmac::sign(&key, message.as_bytes());
-        hex::encode(tag.as_ref())
+        BASE64_STANDARD.encode(tag.as_ref())
     }
 }
 
@@ -143,88 +172,92 @@ mod tests {
 
     const API_KEY: &str = "test_api_key";
     const API_SECRET: &str = "test_secret";
-    const RECV_WINDOW: u64 = 5_000;
-    const TIMESTAMP: &str = "1700000000000";
+    const API_PASSPHRASE: &str = "test_passphrase";
+    const TIMESTAMP: &str = "16273667805456";
 
+    // Expected values computed with the Python sample from the Bitget quick-start:
+    // base64.b64encode(hmac.new(secret.encode(), prehash.encode(), 'sha256').digest())
     #[rstest]
     fn sign_with_payload_matches_reference_get() {
-        let credential = Credential::new(API_KEY, API_SECRET);
-        let query = "category=linear&symbol=BTCUSDT";
+        let credential = Credential::new(API_KEY, API_SECRET, API_PASSPHRASE);
+        let path = "/api/v3/account/fee-rate?category=SPOT&symbol=BTCUSDT";
 
-        let signature = credential.sign_with_payload(TIMESTAMP, RECV_WINDOW, Some(query));
+        let signature = credential.sign_with_payload(TIMESTAMP, "GET", path, None);
 
-        assert_eq!(
-            signature,
-            "fd4f31228a46109dc6673062328693696df9a96c7ff04e6491a45e7f63a0fdd7"
-        );
+        assert_eq!(signature, "4hhzzxsi/PNT7iNhqhouYxLYLCLxG7yrY3eMhmeYQdY=");
     }
 
     #[rstest]
     fn sign_with_payload_matches_reference_post() {
-        let credential = Credential::new(API_KEY, API_SECRET);
-        let body = "{\"category\": \"linear\", \"symbol\": \"BTCUSDT\", \"orderLinkId\": \"test-order-1\"}";
+        let credential = Credential::new(API_KEY, API_SECRET, API_PASSPHRASE);
+        let body = r#"{"category":"SPOT","symbol":"BTCUSDT","side":"buy","orderType":"limit","qty":"0.1","price":"30000","timeInForce":"gtc"}"#;
 
-        let signature = credential.sign_with_payload(TIMESTAMP, RECV_WINDOW, Some(body));
-
-        assert_eq!(
-            signature,
-            "2df4a0603d69c08d5dea29ba85b46eb7db64ce9e9ebd34a7802a3d69700cb2a1"
+        let signature = credential.sign_with_payload(
+            TIMESTAMP,
+            "POST",
+            "/api/v3/trade/place-order",
+            Some(body),
         );
+
+        assert_eq!(signature, "BHUr17oJOJ29n7ikT+CRfI38AQKsjqxBLepiXP99leI=");
     }
 
     #[rstest]
     fn sign_with_empty_payload_omits_tail() {
-        let credential = Credential::new(API_KEY, API_SECRET);
+        let credential = Credential::new(API_KEY, API_SECRET, API_PASSPHRASE);
 
-        let signature = credential.sign_with_payload(TIMESTAMP, RECV_WINDOW, None);
+        let signature = credential.sign_with_payload(TIMESTAMP, "GET", "/api/v3/market/time", None);
 
-        let expected = credential.sign_with_payload(TIMESTAMP, RECV_WINDOW, Some(""));
+        let expected =
+            credential.sign_with_payload(TIMESTAMP, "GET", "/api/v3/market/time", Some(""));
         assert_eq!(signature, expected);
     }
 
     #[rstest]
     fn sign_websocket_auth_matches_reference() {
-        let credential = Credential::new(API_KEY, API_SECRET);
-        let expires: i64 = 1_700_000_000_000;
+        let credential = Credential::new(API_KEY, API_SECRET, API_PASSPHRASE);
 
-        let signature = credential.sign_websocket_auth(expires);
+        let signature = credential.sign_websocket_auth(1_538_054_050);
 
-        assert_eq!(
-            signature,
-            "bacffe7500499eb829bb58c45d36d1b3e5ac67c14eaeba91df5e99ccee013925"
-        );
+        assert_eq!(signature, "ZKcxhODLTztM2iNiV/trAzhDaeE9+T9LNddmARBPvj8=");
     }
 
     #[rstest]
     fn test_debug_redacts_secret() {
-        let credential = Credential::new(API_KEY, API_SECRET);
+        let credential = Credential::new(API_KEY, API_SECRET, API_PASSPHRASE);
         let dbg_out = format!("{credential:?}");
 
-        assert_eq!(dbg_out.matches(REDACTED).count(), 2);
+        assert_eq!(dbg_out.matches(REDACTED).count(), 3);
         assert!(!dbg_out.contains(API_KEY));
         assert!(!dbg_out.contains(API_SECRET));
+        assert!(!dbg_out.contains(API_PASSPHRASE));
     }
 
     #[rstest]
-    fn test_resolve_with_both_args() {
+    fn test_resolve_with_all_args() {
         let result = Credential::resolve(
             Some("my_key".to_string()),
             Some("my_secret".to_string()),
-            BybitEnvironment::Mainnet,
+            Some("my_passphrase".to_string()),
+            BitgetEnvironment::Mainnet,
         );
 
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().api_key(), "my_key");
+        let credential = result.unwrap();
+        assert_eq!(credential.api_key(), "my_key");
+        assert_eq!(credential.api_passphrase(), "my_passphrase");
     }
 
     #[rstest]
     fn test_resolve_with_no_args_no_env() {
-        let (key_var, secret_var) = credential_env_vars(BybitEnvironment::Mainnet);
-        if std::env::var(key_var).is_ok() || std::env::var(secret_var).is_ok() {
+        let (key_var, secret_var, passphrase_var) = credential_env_vars(BitgetEnvironment::Mainnet);
+        if std::env::var(key_var).is_ok()
+            || std::env::var(secret_var).is_ok()
+            || std::env::var(passphrase_var).is_ok()
+        {
             return;
         }
 
-        let result = Credential::resolve(None, None, BybitEnvironment::Mainnet);
+        let result = Credential::resolve(None, None, None, BitgetEnvironment::Mainnet);
 
         assert!(result.is_none());
     }

@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Instrument status mapping and polling for the Bybit adapter.
+//! Instrument status mapping and polling for the Bitget adapter.
 
 use ahash::{AHashMap, AHashSet};
 use nautilus_common::{live::sender::EventSender, messages::DataEvent};
@@ -22,16 +22,22 @@ use nautilus_model::{
     data::InstrumentStatus, enums::MarketStatusAction, identifiers::InstrumentId,
 };
 
-use super::enums::BybitInstrumentStatus;
+use super::enums::BitgetInstrumentStatus;
 
-impl From<BybitInstrumentStatus> for MarketStatusAction {
-    fn from(status: BybitInstrumentStatus) -> Self {
+impl From<BitgetInstrumentStatus> for MarketStatusAction {
+    fn from(status: BitgetInstrumentStatus) -> Self {
         match status {
-            BybitInstrumentStatus::PreLaunch | BybitInstrumentStatus::PendingOpen => Self::PreOpen,
-            BybitInstrumentStatus::Trading => Self::Trading,
-            BybitInstrumentStatus::Delivering => Self::PreClose,
-            BybitInstrumentStatus::Closed => Self::Close,
-            BybitInstrumentStatus::Other => Self::NotAvailableForTrading,
+            BitgetInstrumentStatus::PreLaunch | BitgetInstrumentStatus::PendingOpen => {
+                Self::PreOpen
+            }
+            BitgetInstrumentStatus::Trading => Self::Trading,
+            // Bitget restricts opening or closing positions only
+            BitgetInstrumentStatus::LimitOpen | BitgetInstrumentStatus::LimitClose => Self::Pause,
+            BitgetInstrumentStatus::Delivering => Self::PreClose,
+            BitgetInstrumentStatus::Closed => Self::Close,
+            BitgetInstrumentStatus::RestrictedApi | BitgetInstrumentStatus::Other => {
+                Self::NotAvailableForTrading
+            }
         }
     }
 }
@@ -122,17 +128,23 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case(BybitInstrumentStatus::Trading, MarketStatusAction::Trading)]
-    #[case(BybitInstrumentStatus::PreLaunch, MarketStatusAction::PreOpen)]
-    #[case(BybitInstrumentStatus::PendingOpen, MarketStatusAction::PreOpen)]
-    #[case(BybitInstrumentStatus::Delivering, MarketStatusAction::PreClose)]
-    #[case(BybitInstrumentStatus::Closed, MarketStatusAction::Close)]
+    #[case(BitgetInstrumentStatus::Trading, MarketStatusAction::Trading)]
+    #[case(BitgetInstrumentStatus::PreLaunch, MarketStatusAction::PreOpen)]
+    #[case(BitgetInstrumentStatus::PendingOpen, MarketStatusAction::PreOpen)]
+    #[case(BitgetInstrumentStatus::Delivering, MarketStatusAction::PreClose)]
+    #[case(BitgetInstrumentStatus::LimitOpen, MarketStatusAction::Pause)]
+    #[case(BitgetInstrumentStatus::LimitClose, MarketStatusAction::Pause)]
     #[case(
-        BybitInstrumentStatus::Other,
+        BitgetInstrumentStatus::RestrictedApi,
         MarketStatusAction::NotAvailableForTrading
     )]
-    fn test_bybit_instrument_status_to_market_action(
-        #[case] input: BybitInstrumentStatus,
+    #[case(BitgetInstrumentStatus::Closed, MarketStatusAction::Close)]
+    #[case(
+        BitgetInstrumentStatus::Other,
+        MarketStatusAction::NotAvailableForTrading
+    )]
+    fn test_bitget_instrument_status_to_market_action(
+        #[case] input: BitgetInstrumentStatus,
         #[case] expected: MarketStatusAction,
     ) {
         assert_eq!(MarketStatusAction::from(input), expected);
@@ -141,7 +153,7 @@ mod tests {
     #[rstest]
     fn test_diff_emits_on_change() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let id = InstrumentId::from("BTCUSDT-PERP.BITGET");
 
         let mut cached = AHashMap::new();
         cached.insert(id, MarketStatusAction::Trading);
@@ -174,7 +186,7 @@ mod tests {
     #[rstest]
     fn test_diff_no_emit_when_unchanged() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let id = InstrumentId::from("BTCUSDT-PERP.BITGET");
 
         let mut cached = AHashMap::new();
         cached.insert(id, MarketStatusAction::Trading);
@@ -197,7 +209,7 @@ mod tests {
     #[rstest]
     fn test_diff_emits_for_new_symbol() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let id = InstrumentId::from("ETHUSDT-LINEAR.BYBIT");
+        let id = InstrumentId::from("ETHUSDT-PERP.BITGET");
 
         let mut cached = AHashMap::new();
         let mut new_statuses = AHashMap::new();
@@ -226,7 +238,7 @@ mod tests {
     #[rstest]
     fn test_diff_emits_not_available_for_removed_symbol() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let id = InstrumentId::from("BTCUSDT-PERP.BITGET");
 
         let mut cached = AHashMap::new();
         cached.insert(id, MarketStatusAction::Trading);
@@ -260,8 +272,8 @@ mod tests {
     #[rstest]
     fn test_diff_subscription_gating_only_emits_for_subscribed() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let subscribed_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
-        let unsubscribed_id = InstrumentId::from("ETHUSDT-LINEAR.BYBIT");
+        let subscribed_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
+        let unsubscribed_id = InstrumentId::from("ETHUSDT-PERP.BITGET");
 
         let mut subs = AHashSet::new();
         subs.insert(subscribed_id);
@@ -306,8 +318,8 @@ mod tests {
     #[rstest]
     fn test_diff_removal_only_emits_for_subscribed() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let subscribed_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
-        let unsubscribed_id = InstrumentId::from("ETHUSDT-LINEAR.BYBIT");
+        let subscribed_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
+        let unsubscribed_id = InstrumentId::from("ETHUSDT-PERP.BITGET");
 
         let mut subs = AHashSet::new();
         subs.insert(subscribed_id);

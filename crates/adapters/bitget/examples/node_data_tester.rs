@@ -13,20 +13,21 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Example demonstrating live data testing with the Bybit adapter.
+//! Example demonstrating live data testing with the Bitget adapter.
 //!
 //! Edit the constants below to change the target instrument and subscriptions.
 //!
-//! Run with: `cargo run --example bybit-data-tester --package nautilus-bybit --features examples`
+//! Run with: `cargo run --example bitget-data-tester --package nautilus-bitget --features examples`
 //!
 //! Credentials are read from the environment when set:
-//! - `BYBIT_API_KEY`
-//! - `BYBIT_API_SECRET`
+//! - `BITGET_API_KEY`
+//! - `BITGET_API_SECRET`
+//! - `BITGET_API_PASSPHRASE`
 
-use nautilus_bybit::{
-    common::{consts::BYBIT_CLIENT_ID, enums::BybitProductType},
-    config::BybitDataClientConfig,
-    factories::BybitDataClientFactory,
+use nautilus_bitget::{
+    common::{consts::BITGET_CLIENT_ID, enums::BitgetProductType},
+    config::BitgetDataClientConfig,
+    factories::BitgetDataClientFactory,
 };
 use nautilus_common::enums::Environment;
 use nautilus_live::node::LiveNode;
@@ -34,8 +35,8 @@ use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 
 const TRADER_ID: &str = "TESTER-001";
-const NODE_NAME: &str = "BYBIT-TESTER-001";
-const INSTRUMENT_ID: &str = "BTCUSDT-LINEAR.BYBIT";
+const NODE_NAME: &str = "BITGET-TESTER-001";
+const INSTRUMENT_ID: &str = "BTCUSDT-PERP.BITGET";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,20 +47,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_name = NODE_NAME.to_string();
     let instrument_ids = vec![InstrumentId::from(INSTRUMENT_ID)];
 
-    let bybit_config = BybitDataClientConfig {
-        api_key: None,    // Will use 'BYBIT_API_KEY' env var
-        api_secret: None, // Will use 'BYBIT_API_SECRET' env var
-        product_types: vec![BybitProductType::Linear],
+    let bitget_config = BitgetDataClientConfig {
+        api_key: None,        // Will use 'BITGET_API_KEY' env var
+        api_secret: None,     // Will use 'BITGET_API_SECRET' env var
+        api_passphrase: None, // Will use 'BITGET_API_PASSPHRASE' env var
+        product_types: vec![BitgetProductType::Linear],
         ..Default::default()
     };
 
-    let client_factory = BybitDataClientFactory::new();
-    let client_id = *BYBIT_CLIENT_ID;
+    let client_factory = BitgetDataClientFactory::new();
+    let client_id = *BITGET_CLIENT_ID;
 
     let mut node = LiveNode::builder(trader_id, environment)?
         .with_name(node_name)
         .with_delay_post_stop_secs(2)
-        .add_data_client(None, Box::new(client_factory), Box::new(bybit_config))?
+        .add_data_client(None, Box::new(client_factory), Box::new(bitget_config))?
         .build()?;
 
     let tester_config = DataTesterConfig::builder()

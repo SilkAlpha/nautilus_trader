@@ -1,29 +1,32 @@
 {
-    "topic": "tickers.BTCUSDT",
-    "type": "snapshot",
-    "data": {
-        "symbol": "BTCUSDT",
-        "tickDirection": "PlusTick",
-        "price24hPcnt": "0.017103",
-        "lastPrice": "17216.00",
-        "prevPrice24h": "16926.50",
-        "highPrice24h": "17281.50",
-        "lowPrice24h": "16915.00",
-        "prevPrice1h": "17238.00",
-        "markPrice": "17217.33",
-        "indexPrice": "17227.36",
-        "openInterest": "68744.761",
-        "openInterestValue": "1183601235.91",
-        "turnover24h": "1570383121.943499",
-        "volume24h": "91705.276",
-        "nextFundingTime": "1673280000000",
-        "fundingRate": "-0.000212",
-        "bid1Price": "17215.50",
-        "bid1Size": "84.489",
-        "ask1Price": "17216.00",
-        "ask1Size": "83.020",
-        "fundingIntervalHour": "8"
-    },
-    "cs": 24987956059,
-    "ts": 1673272861686
+  "action": "snapshot",
+  "arg": {
+    "instType": "usdt-futures",
+    "topic": "ticker",
+    "symbol": "BTCUSDT"
+  },
+  "data": [
+    {
+      "highPrice24h": "76160",
+      "lowPrice24h": "73408.8",
+      "openPrice24h": "75684.6",
+      "lastPrice": "75242.8",
+      "turnover24h": "2111570110.88331",
+      "volume24h": "28174.1333",
+      "bid1Price": "75242.8",
+      "ask1Price": "75242.9",
+      "bid1Size": "3.5691",
+      "ask1Size": "5.7606",
+      "price24hPcnt": "-0.00584",
+      "indexPrice": "75276.4573913043478261",
+      "markPrice": "75244.9",
+      "fundingRate": "0.000054",
+      "openInterest": "37217.449100000024",
+      "deliveryTime": "",
+      "deliveryStartTime": "",
+      "deliveryStatus": "",
+      "nextFundingTime": "1794211200000"
+    }
+  ],
+  "ts": 1794192890492
 }

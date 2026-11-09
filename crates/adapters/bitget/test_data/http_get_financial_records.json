@@ -1,0 +1,80 @@
+{
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794193114758,
+  "data": {
+    "list": [
+      {
+        "category": "USDT-FUTURES",
+        "id": "1503520362425901056",
+        "symbol": "TSLAUSDT",
+        "coin": "USDT",
+        "type": "BUY_DEAL",
+        "positionType": "crossed",
+        "amount": "-0.00508576",
+        "fee": "-0.00288576",
+        "positionAmount": "0",
+        "positionBalance": "0",
+        "balance": "49998.28810184",
+        "ts": "1794193109136"
+      },
+      {
+        "category": "USDT-FUTURES",
+        "id": "1503520348433702912",
+        "symbol": "TSLAUSDT",
+        "coin": "USDT",
+        "type": "SELL_DEAL",
+        "positionType": "crossed",
+        "amount": "-0.00288488",
+        "fee": "-0.00288488",
+        "positionAmount": "0",
+        "positionBalance": "0",
+        "balance": "49998.2931876",
+        "ts": "1794193105800"
+      },
+      {
+        "category": "USDT-FUTURES",
+        "id": "1503520338728083457",
+        "symbol": "TSLAUSDT",
+        "coin": "USDT",
+        "type": "SELL_DEAL",
+        "positionType": "crossed",
+        "amount": "-0.00508488",
+        "fee": "-0.00288488",
+        "positionAmount": "0",
+        "positionBalance": "0",
+        "balance": "49998.29607248",
+        "ts": "1794193103486"
+      },
+      {
+        "category": "USDT-FUTURES",
+        "id": "1503520323402096640",
+        "symbol": "TSLAUSDT",
+        "coin": "USDT",
+        "type": "BUY_DEAL",
+        "positionType": "crossed",
+        "amount": "-0.00288576",
+        "fee": "-0.00288576",
+        "positionAmount": "0",
+        "positionBalance": "0",
+        "balance": "49998.30115736",
+        "ts": "1794193099832"
+      },
+      {
+        "category": "USDT-FUTURES",
+        "id": "1503520135308533763",
+        "symbol": "TSLAUSDT",
+        "coin": "USDT",
+        "type": "BUY_DEAL",
+        "positionType": "crossed",
+        "amount": "-1.0422488",
+        "fee": "-0.5482488",
+        "positionAmount": "0",
+        "positionBalance": "0",
+        "balance": "49998.30404312",
+        "ts": "1794193054987"
+      }
+    ],
+    "cursor": "1503520135308533763"
+  }
+}

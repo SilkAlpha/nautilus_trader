@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Shared primitives and utilities for the Bybit adapter.
+//! Shared primitives and utilities for the Bitget adapter.
 
 pub mod consts;
 pub mod credential;

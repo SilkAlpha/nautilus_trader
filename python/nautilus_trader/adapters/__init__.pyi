@@ -4,6 +4,7 @@
 from . import architect_ax
 from . import betfair
 from . import binance
+from . import bitget
 from . import blockchain
 from . import bybit
 from . import coinapi
@@ -25,6 +26,7 @@ __all__ = [
     "architect_ax",
     "betfair",
     "binance",
+    "bitget",
     "blockchain",
     "bybit",
     "coinapi",

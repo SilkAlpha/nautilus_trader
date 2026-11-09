@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Example demonstrating the delta-neutral volatility strategy on Bybit options.
+//! Example demonstrating the delta-neutral volatility strategy on Bitget options.
 //!
 //! This runs the `DeltaNeutralVol` strategy which:
 //! 1. Discovers BTC option instruments from the cache
@@ -22,22 +22,22 @@
 //! 4. Enters the strangle with IV-based limit orders (via `order_iv` param)
 //! 5. Delta-hedges with the underlying perpetual on a periodic timer
 //!
-//! The strategy uses `order_iv` to price option orders by implied volatility,
-//! which the Bybit adapter translates to the `orderIv` API field.
+//! The strategy uses `order_iv` to price option orders by implied volatility. Bitget lists no
+//! options, so on Bitget the example exits before connecting.
 //!
 //! Edit the constants below to change the option family, hedge instrument, target
 //! deltas, and hedging behavior. Entry is disabled by default (`ENTER_STRANGLE`).
 //!
-//! Run with: `cargo run --example bybit-delta-neutral --package nautilus-bybit --features examples`
+//! Run with: `cargo run --example bitget-delta-neutral --package nautilus-bitget --features examples`
 //!
 //! Credentials are read from the environment when set:
-//! - `BYBIT_API_KEY`
-//! - `BYBIT_API_SECRET`
+//! - `BITGET_API_KEY`
+//! - `BITGET_API_SECRET`
 
-use nautilus_bybit::{
-    common::{consts::BYBIT_CLIENT_ID, enums::BybitProductType},
-    config::{BybitDataClientConfig, BybitExecutionClientConfig},
-    factories::{BybitDataClientFactory, BybitExecutionClientFactory},
+use nautilus_bitget::{
+    common::{consts::BITGET_CLIENT_ID, enums::BitgetProductType},
+    config::{BitgetDataClientConfig, BitgetExecutionClientConfig},
+    factories::{BitgetDataClientFactory, BitgetExecutionClientFactory},
 };
 use nautilus_common::enums::Environment;
 use nautilus_live::node::LiveNode;
@@ -47,11 +47,11 @@ use nautilus_trading::examples::strategies::delta_neutral_vol::{
 };
 
 const TRADER_ID: &str = "TESTER-001";
-const ACCOUNT_ID: &str = "BYBIT-001";
-const NODE_NAME: &str = "BYBIT-DELTA-NEUTRAL-001";
+const ACCOUNT_ID: &str = "BITGET-001";
+const NODE_NAME: &str = "BITGET-DELTA-NEUTRAL-001";
 
 const OPTION_FAMILY: &str = "BTC";
-const HEDGE_INSTRUMENT_ID: &str = "BTCUSDT-LINEAR.BYBIT";
+const HEDGE_INSTRUMENT_ID: &str = "BTCUSDT-PERP.BITGET";
 
 const CONTRACTS: u64 = 1;
 const REHEDGE_DELTA_THRESHOLD: f64 = 0.5;
@@ -59,32 +59,41 @@ const REHEDGE_INTERVAL_SECS: u64 = 30;
 const ENTER_STRANGLE: bool = false;
 const IV_PARAM_KEY: &str = "order_iv";
 
+/// Bitget lists no option instruments (kept for parity with the other adapters' examples).
+const BITGET_LISTS_OPTIONS: bool = false;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
+    // Bitget lists no option instruments, so this example has nothing to run against
+    if !BITGET_LISTS_OPTIONS {
+        eprintln!("Options are not supported by Bitget; this example exits without connecting");
+        return Ok(());
+    }
+
     let environment = Environment::Live;
     let trader_id = TraderId::from(TRADER_ID);
     let account_id = AccountId::from(ACCOUNT_ID);
-    let client_id = *BYBIT_CLIENT_ID;
+    let client_id = *BITGET_CLIENT_ID;
 
-    let data_config = BybitDataClientConfig {
+    let data_config = BitgetDataClientConfig {
         api_key: None,
         api_secret: None,
-        product_types: vec![BybitProductType::Option, BybitProductType::Linear],
+        product_types: vec![BitgetProductType::Option, BitgetProductType::Linear],
         ..Default::default()
     };
 
-    let exec_config = BybitExecutionClientConfig {
+    let exec_config = BitgetExecutionClientConfig {
         api_key: None,
         api_secret: None,
-        product_types: vec![BybitProductType::Option, BybitProductType::Linear],
+        product_types: vec![BitgetProductType::Option, BitgetProductType::Linear],
         account_id: Some(account_id),
         ..Default::default()
     };
 
-    let data_factory = BybitDataClientFactory::new();
-    let exec_factory = BybitExecutionClientFactory::new();
+    let data_factory = BitgetDataClientFactory::new();
+    let exec_factory = BitgetExecutionClientFactory::new();
 
     let hedge_instrument_id = InstrumentId::from(HEDGE_INSTRUMENT_ID);
 

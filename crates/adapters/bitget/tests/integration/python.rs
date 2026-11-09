@@ -17,13 +17,13 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::{
-        consts::BYBIT,
-        enums::{BybitEnvironment, BybitProductType},
+        consts::BITGET,
+        enums::{BitgetEnvironment, BitgetProductType},
     },
-    config::{BybitDataClientConfig, BybitExecutionClientConfig},
-    factories::{BybitDataClientFactory, BybitExecutionClientFactory},
+    config::{BitgetDataClientConfig, BitgetExecutionClientConfig},
+    factories::{BitgetDataClientFactory, BitgetExecutionClientFactory},
     python,
 };
 use nautilus_common::{
@@ -39,15 +39,16 @@ use rstest::rstest;
 
 const SMOKE_API_KEY: &str = "test_key";
 const SMOKE_API_SECRET: &str = "test_secret";
+const SMOKE_API_PASSPHRASE: &str = "test_passphrase";
 
 #[rstest]
-fn test_bybit_python_factories_extract_from_registry() {
+fn test_bitget_python_factories_extract_from_registry() {
     setup_data_event_sender();
     setup_exec_event_sender();
     Python::initialize();
 
     Python::attach(|py| {
-        register_bybit_python_module(py);
+        register_bitget_python_module(py);
         assert_data_factory_extracts_from_python_object(py);
         assert_exec_factory_extracts_from_python_object(py);
     });
@@ -63,21 +64,21 @@ fn setup_exec_event_sender() {
     replace_exec_event_sender(sender);
 }
 
-fn register_bybit_python_module(py: Python<'_>) {
-    let module = PyModule::new(py, "bybit").expect("Bybit module should be created");
-    python::bybit(py, &module).expect("Bybit Python module should register");
+fn register_bitget_python_module(py: Python<'_>) {
+    let module = PyModule::new(py, "bitget").expect("Bitget module should be created");
+    python::bitget(py, &module).expect("Bitget Python module should register");
 }
 
 fn assert_data_factory_extracts_from_python_object(py: Python<'_>) {
-    let factory = Py::new(py, BybitDataClientFactory::new())
+    let factory = Py::new(py, BitgetDataClientFactory::new())
         .expect("factory should convert to Python object")
         .into_any();
     let config = Py::new(
         py,
-        BybitDataClientConfig {
-            product_types: vec![BybitProductType::Linear],
-            environment: BybitEnvironment::Testnet,
-            ..BybitDataClientConfig::default()
+        BitgetDataClientConfig {
+            product_types: vec![BitgetProductType::Linear],
+            environment: BitgetEnvironment::Testnet,
+            ..BitgetDataClientConfig::default()
         },
     )
     .expect("config should convert to Python object")
@@ -90,43 +91,44 @@ fn assert_data_factory_extracts_from_python_object(py: Python<'_>) {
     let extracted_config = registry
         .extract_config(py, config)
         .expect("data config should extract");
-    let bybit_config = extracted_config
+    let bitget_config = extracted_config
         .as_any()
-        .downcast_ref::<BybitDataClientConfig>()
+        .downcast_ref::<BitgetDataClientConfig>()
         .expect("data config should downcast");
     let cache = Rc::new(RefCell::new(Cache::default()));
     let clock = Rc::new(RefCell::new(VirtualClock::new()));
     let client = extracted_factory
         .create(
-            "BYBIT-DATA-EXTRACTED",
+            "BITGET-DATA-EXTRACTED",
             extracted_config.as_ref(),
             cache.into(),
             clock,
         )
         .expect("extracted factory should create data client");
 
-    assert_eq!(extracted_factory.name(), BYBIT);
-    assert_eq!(extracted_factory.config_type(), "BybitDataClientConfig");
-    assert_eq!(bybit_config.product_types, [BybitProductType::Linear]);
-    assert_eq!(bybit_config.environment, BybitEnvironment::Testnet);
-    assert_eq!(client.client_id(), ClientId::from("BYBIT-DATA-EXTRACTED"));
+    assert_eq!(extracted_factory.name(), BITGET);
+    assert_eq!(extracted_factory.config_type(), "BitgetDataClientConfig");
+    assert_eq!(bitget_config.product_types, [BitgetProductType::Linear]);
+    assert_eq!(bitget_config.environment, BitgetEnvironment::Testnet);
+    assert_eq!(client.client_id(), ClientId::from("BITGET-DATA-EXTRACTED"));
 }
 
 fn assert_exec_factory_extracts_from_python_object(py: Python<'_>) {
     let trader_id = TraderId::from("TRADER-001");
-    let account_id = AccountId::from("BYBIT-001");
-    let factory = Py::new(py, BybitExecutionClientFactory::new())
+    let account_id = AccountId::from("BITGET-001");
+    let factory = Py::new(py, BitgetExecutionClientFactory::new())
         .expect("factory should convert to Python object")
         .into_any();
     let config = Py::new(
         py,
-        BybitExecutionClientConfig {
+        BitgetExecutionClientConfig {
             account_id: Some(account_id),
-            product_types: vec![BybitProductType::Linear],
-            environment: BybitEnvironment::Testnet,
+            product_types: vec![BitgetProductType::Linear],
+            environment: BitgetEnvironment::Testnet,
             api_key: Some(SMOKE_API_KEY.into()),
             api_secret: Some(SMOKE_API_SECRET.into()),
-            ..BybitExecutionClientConfig::default()
+            api_passphrase: Some(SMOKE_API_PASSPHRASE.into()),
+            ..BitgetExecutionClientConfig::default()
         },
     )
     .expect("config should convert to Python object")
@@ -139,28 +141,28 @@ fn assert_exec_factory_extracts_from_python_object(py: Python<'_>) {
     let extracted_config = registry
         .extract_config(py, config)
         .expect("exec config should extract");
-    let bybit_config = extracted_config
+    let bitget_config = extracted_config
         .as_any()
-        .downcast_ref::<BybitExecutionClientConfig>()
+        .downcast_ref::<BitgetExecutionClientConfig>()
         .expect("exec config should downcast");
     let cache = Rc::new(RefCell::new(Cache::default()));
     let client = extracted_factory
         .create(
             trader_id,
-            "BYBIT-EXEC-EXTRACTED",
+            "BITGET-EXEC-EXTRACTED",
             extracted_config.as_ref(),
             cache.into(),
             Rc::new(RefCell::new(VirtualClock::new())),
         )
         .expect("extracted factory should create exec client");
 
-    assert_eq!(extracted_factory.name(), BYBIT);
+    assert_eq!(extracted_factory.name(), BITGET);
     assert_eq!(
         extracted_factory.config_type(),
-        "BybitExecutionClientConfig"
+        "BitgetExecutionClientConfig"
     );
-    assert_eq!(bybit_config.account_id, Some(account_id));
-    assert_eq!(bybit_config.product_types, [BybitProductType::Linear]);
-    assert_eq!(client.client_id(), ClientId::from("BYBIT-EXEC-EXTRACTED"));
+    assert_eq!(bitget_config.account_id, Some(account_id));
+    assert_eq!(bitget_config.product_types, [BitgetProductType::Linear]);
+    assert_eq!(client.client_id(), ClientId::from("BITGET-EXEC-EXTRACTED"));
     assert_eq!(client.account_id(), account_id);
 }

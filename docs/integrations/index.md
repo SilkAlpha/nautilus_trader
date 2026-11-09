@@ -13,6 +13,7 @@ The following integrations are available or planned:
 | [CoinAPI](https://www.coinapi.io/?ref=nautilus)            | `COINAPI`             | Data Provider           | ![status](https://img.shields.io/badge/beta-yellow)       | [Guide](coinapi.md)             |
 | [Coinbase](https://coinbase.com)                           | `COINBASE`            | Crypto Exchange (CEX)   | ![status](https://img.shields.io/badge/stable-green)      | [Guide](coinbase.md)            |
 | [Blockchain](blockchain.md)                                | `BLOCKCHAIN`          | DeFi Data Provider      | ![status](https://img.shields.io/badge/stable-green)      | [Guide](blockchain.md)          |
+| [Bitget](https://www.bitget.com)                           | `BITGET`              | Crypto Exchange (CEX)   | ![status](https://img.shields.io/badge/beta-yellow)       | [Guide](bitget.md)              |
 | [Bybit](https://www.bybit.com)                             | `BYBIT`               | Crypto Exchange (CEX)   | ![status](https://img.shields.io/badge/stable-green)      | [Guide](bybit.md)               |
 | [Databento](https://databento.com)                         | `DATABENTO`           | Data Provider           | ![status](https://img.shields.io/badge/stable-green)      | [Guide](databento.md)           |
 | [Deribit](https://www.deribit.com)                         | `DERIBIT`             | Crypto Exchange (CEX)   | ![status](https://img.shields.io/badge/stable-green)      | [Guide](deribit.md)             |

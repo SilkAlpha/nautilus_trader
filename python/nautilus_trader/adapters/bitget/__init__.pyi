@@ -9,41 +9,41 @@ from nautilus_trader import model
 from nautilus_trader import network
 
 __all__ = [
-    "BYBIT",
-    "BYBIT_CLIENT_ID",
-    "BYBIT_VENUE",
-    "BybitDataClientConfig",
-    "BybitDataClientFactory",
-    "BybitEnvironment",
-    "BybitExecutionClientConfig",
-    "BybitExecutionClientFactory",
-    "BybitLiquidation",
-    "BybitMarginAction",
-    "BybitMarginBorrowResult",
-    "BybitMarginRepayResult",
-    "BybitMarginStatusResult",
-    "BybitPositionIdx",
-    "BybitPositionMode",
-    "BybitProductType",
-    "BybitTickerData",
+    "BITGET",
+    "BITGET_CLIENT_ID",
+    "BITGET_VENUE",
+    "BitgetDataClientConfig",
+    "BitgetDataClientFactory",
+    "BitgetEnvironment",
+    "BitgetExecutionClientConfig",
+    "BitgetExecutionClientFactory",
+    "BitgetLiquidation",
+    "BitgetMarginAction",
+    "BitgetMarginBorrowResult",
+    "BitgetMarginRepayResult",
+    "BitgetMarginStatusResult",
+    "BitgetPositionIdx",
+    "BitgetPositionMode",
+    "BitgetProductType",
+    "BitgetTickerData",
 ]
 
-BYBIT: str
-BYBIT_CLIENT_ID: model.ClientId
-BYBIT_VENUE: model.Venue
+BITGET: str
+BITGET_CLIENT_ID: model.ClientId
+BITGET_VENUE: model.Venue
 
 @typing.final
-class BybitAccountDetails: ...
+class BitgetAccountDetails: ...
 
 @typing.final
-class BybitApiKeyPermissions: ...
+class BitgetApiKeyPermissions: ...
 
 @typing.final
-class BybitDataClientConfig:
+class BitgetDataClientConfig:
     @property
-    def product_types(self) -> list[BybitProductType]: ...
+    def product_types(self) -> list[BitgetProductType]: ...
     @property
-    def environment(self) -> BybitEnvironment: ...
+    def environment(self) -> BitgetEnvironment: ...
     @property
     def base_url_http(self) -> str | None: ...
     @property
@@ -72,8 +72,8 @@ class BybitDataClientConfig:
     def bars_timestamp_on_close(self) -> bool: ...
     def __init__(
         self,
-        product_types: typing.Sequence[BybitProductType] | None = None,
-        environment: BybitEnvironment | None = None,
+        product_types: typing.Sequence[BitgetProductType] | None = None,
+        environment: BitgetEnvironment | None = None,
         api_key: str | None = None,
         api_secret: str | None = None,
         base_url_http: str | None = None,
@@ -91,6 +91,7 @@ class BybitDataClientConfig:
         transport_backend: network.TransportBackend | None = None,
         book_snapshot_timeout_secs: int | None = None,
         bars_timestamp_on_close: bool | None = None,
+        api_passphrase: str | None = None,
     ) -> None: ...
     @property
     def instrument_status_poll_secs(self) -> int | None: ...
@@ -98,16 +99,16 @@ class BybitDataClientConfig:
     def has_proxy_url(self) -> bool: ...
 
 @typing.final
-class BybitDataClientFactory:
+class BitgetDataClientFactory:
     def __init__(self) -> None: ...
     def name(self) -> str: ...
 
 @typing.final
-class BybitExecutionClientConfig:
+class BitgetExecutionClientConfig:
     @property
-    def product_types(self) -> list[BybitProductType]: ...
+    def product_types(self) -> list[BitgetProductType]: ...
     @property
-    def environment(self) -> BybitEnvironment: ...
+    def environment(self) -> BitgetEnvironment: ...
     @property
     def base_url_http(self) -> str | None: ...
     @property
@@ -135,13 +136,13 @@ class BybitExecutionClientConfig:
     @property
     def auto_repay_spot_borrows(self) -> bool: ...
     @property
-    def margin_mode(self) -> BybitMarginMode | None: ...
+    def margin_mode(self) -> BitgetMarginMode | None: ...
     @property
     def transport_backend(self) -> network.TransportBackend: ...
     def __init__(
         self,
-        product_types: typing.Sequence[BybitProductType] | None = None,
-        environment: BybitEnvironment | None = None,
+        product_types: typing.Sequence[BitgetProductType] | None = None,
+        environment: BitgetEnvironment | None = None,
         api_key: str | None = None,
         api_secret: str | None = None,
         base_url_http: str | None = None,
@@ -158,9 +159,10 @@ class BybitExecutionClientConfig:
         account_id: model.AccountId | None = None,
         use_spot_position_reports: bool | None = None,
         auto_repay_spot_borrows: bool | None = None,
-        margin_mode: BybitMarginMode | None = None,
+        margin_mode: BitgetMarginMode | None = None,
         smp_type: str | None = None,
         transport_backend: network.TransportBackend | None = None,
+        api_passphrase: str | None = None,
     ) -> None: ...
     @property
     def smp_type(self) -> str | None: ...
@@ -168,15 +170,15 @@ class BybitExecutionClientConfig:
     def has_proxy_url(self) -> bool: ...
 
 @typing.final
-class BybitExecutionClientFactory:
+class BitgetExecutionClientFactory:
     def __init__(self) -> None: ...
     def name(self) -> str: ...
 
 @typing.final
-class BybitFeeRate: ...
+class BitgetFeeRate: ...
 
 @typing.final
-class BybitHttpClient:
+class BitgetHttpClient:
     def __init__(
         self,
         api_key: str | None = None,
@@ -190,6 +192,7 @@ class BybitHttpClient:
         retry_delay_max_ms: int = 10000,
         recv_window_ms: int = 5000,
         proxy_url: str | None = None,
+        api_passphrase: str | None = None,
     ) -> None: ...
     @property
     def base_url(self) -> str: ...
@@ -200,15 +203,15 @@ class BybitHttpClient:
     def cache_instrument(self, instrument: typing.Any) -> None: ...
     def cancel_all_requests(self) -> None: ...
     def set_use_spot_position_reports(self, value: bool) -> None: ...
-    def set_margin_mode(self, margin_mode: BybitMarginMode) -> typing.Any: ...
+    def set_margin_mode(self, margin_mode: BitgetMarginMode) -> typing.Any: ...
     def get_account_details(self) -> typing.Any: ...
     def set_leverage(
-        self, product_type: BybitProductType, symbol: str, buy_leverage: str, sell_leverage: str
+        self, product_type: BitgetProductType, symbol: str, buy_leverage: str, sell_leverage: str
     ) -> typing.Any: ...
     def switch_mode(
         self,
-        product_type: BybitProductType,
-        mode: BybitPositionMode,
+        product_type: BitgetProductType,
+        mode: BitgetPositionMode,
         symbol: str | None = None,
         coin: str | None = None,
     ) -> typing.Any: ...
@@ -220,16 +223,16 @@ class BybitHttpClient:
     ) -> typing.Any: ...
     def request_instruments(
         self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: str | None = None,
         base_coin: str | None = None,
     ) -> typing.Any: ...
-    def request_instrument_statuses(self, product_type: BybitProductType) -> typing.Any: ...
-    def request_tickers(self, params: BybitTickersParams) -> typing.Any: ...
+    def request_instrument_statuses(self, product_type: BitgetProductType) -> typing.Any: ...
+    def request_tickers(self, params: BitgetTickersParams) -> typing.Any: ...
     def submit_order(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
         client_order_id: model.ClientOrderId,
         order_side: model.OrderSide,
@@ -242,16 +245,16 @@ class BybitHttpClient:
         reduce_only: bool = False,
         is_quote_quantity: bool = False,
         is_leverage: bool = False,
-        position_idx: BybitPositionIdx | None = None,
+        position_idx: BitgetPositionIdx | None = None,
         bbo_side_type: str | None = None,
         bbo_level: str | None = None,
         smp_type: str | None = None,
-        native_tp_sl: BybitNativeTpSlParams | None = None,
+        native_tp_sl: BitgetNativeTpSlParams | None = None,
     ) -> typing.Any: ...
     def modify_order(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
         client_order_id: model.ClientOrderId | None = None,
         venue_order_id: model.VenueOrderId | None = None,
@@ -261,7 +264,7 @@ class BybitHttpClient:
     def cancel_order(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
         client_order_id: model.ClientOrderId | None = None,
         venue_order_id: model.VenueOrderId | None = None,
@@ -269,26 +272,26 @@ class BybitHttpClient:
     def cancel_all_orders(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
     ) -> typing.Any: ...
     def query_order(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
         client_order_id: model.ClientOrderId | None = None,
         venue_order_id: model.VenueOrderId | None = None,
     ) -> typing.Any: ...
     def request_trades(
         self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
         limit: int | None = None,
     ) -> typing.Any: ...
     def request_funding_rates(
         self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
         start: datetime.datetime | None = None,
         end: datetime.datetime | None = None,
@@ -296,13 +299,13 @@ class BybitHttpClient:
     ) -> typing.Any: ...
     def request_orderbook_snapshot(
         self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId,
         limit: int | None = None,
     ) -> typing.Any: ...
     def request_bars(
         self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         bar_type: model.BarType,
         start: datetime.datetime | None = None,
         end: datetime.datetime | None = None,
@@ -311,17 +314,17 @@ class BybitHttpClient:
     ) -> typing.Any: ...
     def request_fee_rates(
         self,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: str | None = None,
         base_coin: str | None = None,
     ) -> typing.Any: ...
     def request_account_state(
-        self, account_type: BybitAccountType, account_id: model.AccountId
+        self, account_type: BitgetAccountType, account_id: model.AccountId
     ) -> typing.Any: ...
     def request_order_status_reports(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId | None = None,
         open_only: bool = False,
         start: datetime.datetime | None = None,
@@ -331,7 +334,7 @@ class BybitHttpClient:
     def request_fill_reports(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId | None = None,
         start: int | None = None,
         end: int | None = None,
@@ -340,12 +343,12 @@ class BybitHttpClient:
     def request_position_status_reports(
         self,
         account_id: model.AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: model.InstrumentId | None = None,
     ) -> typing.Any: ...
 
 @typing.final
-class BybitLiquidation:
+class BitgetLiquidation:
     @property
     def instrument_id(self) -> model.InstrumentId: ...
     @property
@@ -371,13 +374,13 @@ class BybitLiquidation:
         quantity: model.Quantity,
         ts_event: int,
         ts_init: int,
-    ) -> BybitLiquidation: ...
+    ) -> BitgetLiquidation: ...
     def to_json(self) -> str: ...
     @classmethod
     def from_json(cls, data: typing.Any) -> typing.Any: ...
 
 @typing.final
-class BybitMarginBorrowResult:
+class BitgetMarginBorrowResult:
     def __init__(
         self, coin: str, amount: str, success: bool, message: str, ts_event: int, ts_init: int
     ) -> None: ...
@@ -395,7 +398,7 @@ class BybitMarginBorrowResult:
     def ts_init(self) -> int: ...
 
 @typing.final
-class BybitMarginRepayResult:
+class BitgetMarginRepayResult:
     def __init__(
         self,
         coin: str,
@@ -422,7 +425,7 @@ class BybitMarginRepayResult:
     def ts_init(self) -> int: ...
 
 @typing.final
-class BybitMarginStatusResult:
+class BitgetMarginStatusResult:
     def __init__(self, coin: str, borrow_amount: str, ts_event: int, ts_init: int) -> None: ...
     @property
     def coin(self) -> str: ...
@@ -434,7 +437,7 @@ class BybitMarginStatusResult:
     def ts_init(self) -> int: ...
 
 @typing.final
-class BybitNativeTpSlParams:
+class BitgetNativeTpSlParams:
     def __init__(
         self,
         take_profit: str | None = None,
@@ -452,13 +455,13 @@ class BybitNativeTpSlParams:
     ) -> None: ...
 
 @typing.final
-class BybitOrder: ...
+class BitgetOrder: ...
 
 @typing.final
-class BybitOrderCursorList: ...
+class BitgetOrderCursorList: ...
 
 @typing.final
-class BybitRawHttpClient:
+class BitgetRawHttpClient:
     def __init__(
         self,
         api_key: str | None = None,
@@ -472,6 +475,7 @@ class BybitRawHttpClient:
         retry_delay_max_ms: int = 10000,
         recv_window_ms: int = 5000,
         proxy_url: str | None = None,
+        api_passphrase: str | None = None,
     ) -> None: ...
     @property
     def base_url(self) -> str: ...
@@ -483,36 +487,36 @@ class BybitRawHttpClient:
     def get_server_time(self) -> typing.Any: ...
     def get_open_orders(
         self,
-        category: BybitProductType,
+        category: BitgetProductType,
         symbol: str | None = None,
         base_coin: str | None = None,
         settle_coin: str | None = None,
         order_id: str | None = None,
         order_link_id: str | None = None,
-        open_only: BybitOpenOnly | None = None,
-        order_filter: BybitOrderFilter | None = None,
+        open_only: BitgetOpenOnly | None = None,
+        order_filter: BitgetOrderFilter | None = None,
         limit: int | None = None,
         cursor: str | None = None,
     ) -> typing.Any: ...
 
 @typing.final
-class BybitServerTime: ...
+class BitgetServerTime: ...
 
 @typing.final
-class BybitTickerData: ...
+class BitgetTickerData: ...
 
 @typing.final
-class BybitTickersParams:
+class BitgetTickersParams:
     def __init__(
         self,
-        category: BybitProductType,
+        category: BitgetProductType,
         symbol: str | None = None,
         base_coin: str | None = None,
         exp_date: str | None = None,
     ) -> None: ...
 
 @typing.final
-class BybitAccountType(enum.Enum):
+class BitgetAccountType(enum.Enum):
     UNIFIED = ...
     FUND = ...
 
@@ -525,11 +529,24 @@ class BybitAccountType(enum.Enum):
     @staticmethod
     def variants() -> list[str]: ...
     @classmethod
-    def from_str(cls, data: typing.Any) -> BybitAccountType: ...
+    def from_str(cls, data: typing.Any) -> BitgetAccountType: ...
 
 @typing.final
-class BybitCancelType(enum.Enum):
+class BitgetCancelType(enum.Enum):
     CancelByUser = ...
+    CancelByPostOnly = ...
+    CancelByIocNotFull = ...
+    CancelByFokNotFull = ...
+    CancelByTradeTooManyTimes = ...
+    CancelByTradeCountTooSmall = ...
+    CancelByMaxDealSize = ...
+    CancelByBackContract = ...
+    CancelByTrader = ...
+    CancelBySlippage = ...
+    CancelByPenetrate = ...
+    CancelByCallAuction = ...
+    CancelByLimitPriceExceed = ...
+    CancelByReceiveWindow = ...
     CancelByReduceOnly = ...
     CancelByPrepareLiq = ...
     CancelAllBeforeLiq = ...
@@ -569,7 +586,7 @@ class BybitCancelType(enum.Enum):
     Other = ...
 
 @typing.final
-class BybitEnvironment(enum.Enum):
+class BitgetEnvironment(enum.Enum):
     MAINNET = ...
     DEMO = ...
     TESTNET = ...
@@ -583,10 +600,10 @@ class BybitEnvironment(enum.Enum):
     @staticmethod
     def variants() -> list[str]: ...
     @classmethod
-    def from_str(cls, data: typing.Any) -> BybitEnvironment: ...
+    def from_str(cls, data: typing.Any) -> BitgetEnvironment: ...
 
 @typing.final
-class BybitMarginAction(enum.Enum):
+class BitgetMarginAction(enum.Enum):
     BORROW = ...
     REPAY = ...
     GET_BORROW_AMOUNT = ...
@@ -599,10 +616,10 @@ class BybitMarginAction(enum.Enum):
     @staticmethod
     def variants() -> list[str]: ...
     @classmethod
-    def from_str(cls, data: typing.Any) -> BybitMarginAction: ...
+    def from_str(cls, data: typing.Any) -> BitgetMarginAction: ...
 
 @typing.final
-class BybitMarginMode(enum.Enum):
+class BitgetMarginMode(enum.Enum):
     ISOLATED_MARGIN = ...
     REGULAR_MARGIN = ...
     PORTFOLIO_MARGIN = ...
@@ -616,15 +633,15 @@ class BybitMarginMode(enum.Enum):
     @staticmethod
     def variants() -> list[str]: ...
     @classmethod
-    def from_str(cls, data: typing.Any) -> BybitMarginMode: ...
+    def from_str(cls, data: typing.Any) -> BitgetMarginMode: ...
 
 @typing.final
-class BybitOpenOnly(enum.Enum):
+class BitgetOpenOnly(enum.Enum):
     OpenOnly = ...
     ClosedRecent = ...
 
 @typing.final
-class BybitOrderFilter(enum.Enum):
+class BitgetOrderFilter(enum.Enum):
     Order = ...
     StopOrder = ...
     TpslOrder = ...
@@ -632,13 +649,13 @@ class BybitOrderFilter(enum.Enum):
     BidirectionalTpslOrder = ...
 
 @typing.final
-class BybitOrderSide(enum.Enum):
+class BitgetOrderSide(enum.Enum):
     Unknown = ...
     Buy = ...
     Sell = ...
 
 @typing.final
-class BybitOrderStatus(enum.Enum):
+class BitgetOrderStatus(enum.Enum):
     Created = ...
     New = ...
     Rejected = ...
@@ -651,13 +668,13 @@ class BybitOrderStatus(enum.Enum):
     Deactivated = ...
 
 @typing.final
-class BybitOrderType(enum.Enum):
+class BitgetOrderType(enum.Enum):
     Market = ...
     Limit = ...
     Unknown = ...
 
 @typing.final
-class BybitPositionIdx(enum.Enum):
+class BitgetPositionIdx(enum.Enum):
     ONE_WAY = ...
     BUY_HEDGE = ...
     SELL_HEDGE = ...
@@ -671,10 +688,10 @@ class BybitPositionIdx(enum.Enum):
     @staticmethod
     def variants() -> list[str]: ...
     @classmethod
-    def from_str(cls, data: typing.Any) -> BybitPositionIdx: ...
+    def from_str(cls, data: typing.Any) -> BitgetPositionIdx: ...
 
 @typing.final
-class BybitPositionMode(enum.Enum):
+class BitgetPositionMode(enum.Enum):
     MERGED_SINGLE = ...
     BOTH_SIDES = ...
 
@@ -683,14 +700,14 @@ class BybitPositionMode(enum.Enum):
     @property
     def name(self) -> str: ...
     @property
-    def value(self) -> int: ...
+    def value(self) -> str: ...
     @staticmethod
     def variants() -> list[str]: ...
     @classmethod
-    def from_str(cls, data: typing.Any) -> BybitPositionMode: ...
+    def from_str(cls, data: typing.Any) -> BitgetPositionMode: ...
 
 @typing.final
-class BybitProductType(enum.Enum):
+class BitgetProductType(enum.Enum):
     SPOT = ...
     LINEAR = ...
     INVERSE = ...
@@ -705,10 +722,10 @@ class BybitProductType(enum.Enum):
     @staticmethod
     def variants() -> list[str]: ...
     @classmethod
-    def from_str(cls, data: typing.Any) -> BybitProductType: ...
+    def from_str(cls, data: typing.Any) -> BitgetProductType: ...
 
 @typing.final
-class BybitStopOrderType(enum.Enum):
+class BitgetStopOrderType(enum.Enum):
     None_ = ...
     Unknown = ...
     TakeProfit = ...
@@ -723,7 +740,7 @@ class BybitStopOrderType(enum.Enum):
     BidirectionalTpslOrder = ...
 
 @typing.final
-class BybitTimeInForce(enum.Enum):
+class BitgetTimeInForce(enum.Enum):
     Gtc = ...
     Ioc = ...
     Fok = ...
@@ -731,30 +748,30 @@ class BybitTimeInForce(enum.Enum):
     Rpi = ...
 
 @typing.final
-class BybitTpSlMode(enum.Enum):
+class BitgetTpSlMode(enum.Enum):
     Full = ...
     Partial = ...
     Unknown = ...
 
 @typing.final
-class BybitTriggerDirection(enum.Enum):
+class BitgetTriggerDirection(enum.Enum):
     None_ = ...
     RisesTo = ...
     FallsTo = ...
 
 @typing.final
-class BybitTriggerType(enum.Enum):
+class BitgetTriggerType(enum.Enum):
     None_ = ...
     LastPrice = ...
     IndexPrice = ...
     MarkPrice = ...
 
-def bybit_bar_spec_to_interval(aggregation: model.BarAggregation, step: int) -> str: ...
-def bybit_extract_raw_symbol(symbol: str) -> str: ...
-def bybit_product_type_from_symbol(symbol: str) -> BybitProductType: ...
-def bybit_resolve_position_idx(
-    position_mode: BybitPositionMode | None,
+def bitget_bar_spec_to_interval(aggregation: model.BarAggregation, step: int) -> str: ...
+def bitget_extract_raw_symbol(symbol: str) -> str: ...
+def bitget_product_type_from_symbol(symbol: str) -> BitgetProductType: ...
+def bitget_resolve_position_idx(
+    position_mode: BitgetPositionMode | None,
     order_side: model.OrderSide,
     is_reduce_only: bool,
-    manual_override: BybitPositionIdx | None = None,
-) -> BybitPositionIdx | None: ...
+    manual_override: BitgetPositionIdx | None = None,
+) -> BitgetPositionIdx | None: ...

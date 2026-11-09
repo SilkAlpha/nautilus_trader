@@ -21,12 +21,11 @@
 //! the WebSocket dispatch path onto an unbounded channel; a single background
 //! consumer task repays each one in turn.
 //!
-//! Bybit charges the trading fee for a SPOT BUY in the base coin (the coin just
+//! The trading fee for a SPOT BUY is charged in the base coin (the coin just
 //! bought), so the amount actually received is slightly less than the amount
-//! borrowed. Repayment therefore uses the venue's manual (converting) repay
-//! endpoint, which draws that small shortfall from other assets rather than
-//! failing on an insufficient debt-coin balance. MNT uses no-convert repayment
-//! because Bybit excludes it from converting repayment.
+//! borrowed. Bitget UTA reports the borrow as the coin `debt` of
+//! `GET /api/v3/account/assets` and repays through `POST /api/v3/account/repay`,
+//! which serves both the converting and the no-convert path.
 
 use std::time::Duration;
 
@@ -36,13 +35,10 @@ use nautilus_model::types::Quantity;
 use rust_decimal::{Decimal, RoundingStrategy};
 use ustr::Ustr;
 
-use crate::{common::enums::BybitRepayStatus, http::client::BybitHttpClient};
+use crate::{common::enums::BitgetRepayStatus, http::client::BitgetHttpClient};
 
-const BLACKOUT_START_SEC: u64 = 4 * 60;
-const BLACKOUT_END_SEC: u64 = 5 * 60 + 30;
-
-// Bybit excludes MNT from convert-repay but permits no-convert repayment:
-// https://bybit-exchange.github.io/docs/v5/account/repay
+// Kept for parity with the other venues' MNT special case; on Bitget both repay paths post to
+// the same endpoint
 const CONVERT_REPAY_UNSUPPORTED_COIN: &str = "MNT";
 
 #[derive(Clone, Debug)]
@@ -60,22 +56,19 @@ enum RepayOutcome {
     Skipped,
 }
 
-/// Delay to wait out Bybit's hourly repayment blackout (mm:04:00-mm:05:30 UTC,
-/// end inclusive so repayment resumes at :05:31), or `None` when repayment is allowed.
+/// Delay to wait out a repayment blackout, or `None` when repayment is allowed.
+///
+/// Bitget documents no repayment blackout window, so repayment is always allowed.
 #[must_use]
 fn repay_blackout_delay(now_ns: UnixNanos) -> Option<Duration> {
-    let sec_of_hour = now_ns.as_seconds().rem_euclid(3600);
-    if (BLACKOUT_START_SEC..=BLACKOUT_END_SEC).contains(&sec_of_hour) {
-        Some(Duration::from_secs(BLACKOUT_END_SEC + 1 - sec_of_hour))
-    } else {
-        None
-    }
+    let _ = now_ns;
+    None
 }
 
 /// Repays each queued SPOT borrow in turn (waiting out the blackout) until the channel closes.
 pub(crate) async fn run_spot_repay_consumer(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<RepayRequest>,
-    http_client: BybitHttpClient,
+    http_client: BitgetHttpClient,
     clock: &'static AtomicTime,
 ) {
     log::debug!("Spot repay consumer starting");
@@ -84,7 +77,7 @@ pub(crate) async fn run_spot_repay_consumer(
         // Repayment is blocked during the hourly blackout; wait it out.
         if let Some(wait) = repay_blackout_delay(clock.get_time_ns()) {
             log::info!(
-                "In Bybit repay blackout window; deferring repayment of {} for {wait:?}",
+                "In Bitget repay blackout window; deferring repayment of {} for {wait:?}",
                 req.coin,
             );
             tokio::time::sleep(wait).await;
@@ -100,7 +93,7 @@ pub(crate) async fn run_spot_repay_consumer(
 
 /// Repays the outstanding borrow for a single coin, capped at `bought`.
 async fn repay_coin(
-    http_client: &BybitHttpClient,
+    http_client: &BitgetHttpClient,
     request: RepayRequest,
 ) -> anyhow::Result<RepayOutcome> {
     let RepayRequest {
@@ -156,22 +149,22 @@ async fn repay_coin(
     };
 
     match status {
-        BybitRepayStatus::Success => {
+        BitgetRepayStatus::Success => {
             log::info!(
                 "Repaid {repay_qty} {coin} spot borrow \
                  (outstanding was {outstanding}, bought {bought})"
             );
             Ok(RepayOutcome::Repaid)
         }
-        BybitRepayStatus::Processing => {
+        BitgetRepayStatus::Processing => {
             log::info!(
                 "Repayment of {repay_qty} {coin} spot borrow is processing \
                  (outstanding was {outstanding}, bought {bought})"
             );
             Ok(RepayOutcome::Processing)
         }
-        BybitRepayStatus::Failed => {
-            anyhow::bail!("Bybit repay for {coin} returned result status {status}")
+        BitgetRepayStatus::Failed => {
+            anyhow::bail!("Bitget repay for {coin} returned result status {status}")
         }
     }
 }
@@ -210,7 +203,7 @@ mod tests {
             serde_json::from_str(include_str!("../test_data/http_get_wallet_balance.json"))
                 .expect("valid wallet balance fixture");
 
-        let coins = wallet["result"]["list"][0]["coin"]
+        let coins = wallet["data"]["assets"]
             .as_array_mut()
             .expect("fixture has a coin list");
         let entry = if let Some(index) = coins.iter().position(|entry| entry["coin"] == coin) {
@@ -221,7 +214,7 @@ mod tests {
             coins.push(entry);
             coins.last_mut().expect("inserted coin is present")
         };
-        entry["spotBorrow"] = json!(spot_borrow);
+        entry["debt"] = json!(spot_borrow);
 
         wallet
     }
@@ -240,7 +233,7 @@ mod tests {
 
         let router = Router::new()
             .route(
-                "/v5/account/wallet-balance",
+                "/api/v3/account/assets",
                 get(move || {
                     let wallet = wallet.clone();
                     async move {
@@ -251,11 +244,8 @@ mod tests {
                     }
                 }),
             )
-            .route("/v5/account/repay", post(handle_repay))
-            .route(
-                "/v5/account/no-convert-repay",
-                post(handle_no_convert_repay),
-            )
+            // Bitget serves converting and no-convert repayment from one endpoint
+            .route("/api/v3/account/repay", post(handle_repay))
             .with_state(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -278,30 +268,26 @@ mod tests {
         repay_response(state.result_status)
     }
 
-    async fn handle_no_convert_repay(
-        State(state): State<MockVenue>,
-        body: axum::body::Bytes,
-    ) -> Response {
-        let params: Value = serde_json::from_slice(&body).expect("valid repay body");
-        state.no_convert_repay_bodies.lock().push(params);
-        repay_response(state.result_status)
-    }
-
     fn repay_response(result_status: &str) -> Response {
+        let data = if result_status == "SU" {
+            json!("success")
+        } else {
+            json!({"resultStatus": result_status})
+        };
         Json(json!({
-            "retCode": 0,
-            "retMsg": "OK",
-            "result": {"resultStatus": result_status},
-            "retExtInfo": {},
-            "time": 1704470400123i64
+            "code": "00000",
+            "msg": "success",
+            "requestTime": 1704470400123i64,
+            "data": data
         }))
         .into_response()
     }
 
-    fn test_client(base_url: String) -> BybitHttpClient {
-        BybitHttpClient::with_credentials(
+    fn test_client(base_url: String) -> BitgetHttpClient {
+        BitgetHttpClient::with_credentials(
             "test_api_key".to_string(),
             "test_api_secret".to_string(),
+            "test_api_passphrase".to_string(),
             Some(base_url),
             60,
             0,
@@ -374,11 +360,8 @@ mod tests {
         let outcome = repay_coin(&client, request).await.unwrap();
 
         assert_eq!(outcome, RepayOutcome::Repaid);
-        assert!(repay_bodies.lock().is_empty());
-        assert_eq!(
-            single_repay_amount(&no_convert_repay_bodies, "MNT"),
-            dec!(0.9985)
-        );
+        assert!(no_convert_repay_bodies.lock().is_empty());
+        assert_eq!(single_repay_amount(&repay_bodies, "MNT"), dec!(0.9985));
     }
 
     #[rstest]
@@ -437,18 +420,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case(4, 0, Some(91))]
-    #[case(4, 30, Some(61))]
-    #[case(5, 0, Some(31))]
-    #[case(5, 29, Some(2))]
-    #[case(5, 30, Some(1))]
-    fn test_blackout_wait_inside_window(
-        #[case] minute: u64,
-        #[case] second: u64,
-        #[case] expected_secs: Option<u64>,
-    ) {
-        let wait = repay_blackout_delay(ns_at(minute, second));
-        assert_eq!(wait.map(|d| d.as_secs()), expected_secs);
+    #[case(4, 0)]
+    #[case(4, 30)]
+    #[case(5, 0)]
+    #[case(5, 29)]
+    #[case(5, 30)]
+    fn test_blackout_wait_inside_window(#[case] minute: u64, #[case] second: u64) {
+        // Bitget has no repayment blackout
+        assert!(repay_blackout_delay(ns_at(minute, second)).is_none());
     }
 
     #[rstest]

@@ -1,0 +1,54 @@
+{
+  "action": "snapshot",
+  "arg": {
+    "instType": "UTA",
+    "topic": "order"
+  },
+  "data": [
+    {
+      "category": "usdt-futures",
+      "symbol": "TSLAUSDT",
+      "orderId": "1503520806866935808",
+      "clientOid": "tdcappart93215",
+      "price": "360.63",
+      "qty": "4.71",
+      "holdMode": "one_way_mode",
+      "holdSide": "short",
+      "tradeSide": "sell_single",
+      "orderType": "limit",
+      "timeInForce": "ioc",
+      "side": "sell",
+      "marginMode": "crossed",
+      "marginCoin": "USDT",
+      "reduceOnly": "no",
+      "cumExecQty": "3.71",
+      "cumExecValue": "1337.9373",
+      "avgPrice": "360.63",
+      "totalProfit": "0",
+      "orderStatus": "partially_filled",
+      "cancelReason": "",
+      "leverage": "5",
+      "feeDetail": [
+        {
+          "feeCoin": "USDT",
+          "fee": "0.53517492"
+        }
+      ],
+      "createdTime": "1794193215099",
+      "updatedTime": "1794193215101",
+      "stpMode": "none",
+      "tpTriggerBy": "",
+      "slTriggerBy": "",
+      "takeprofit": "",
+      "stoploss": "",
+      "tpOrderType": "market",
+      "slOrderType": "market",
+      "tpLimitPrice": "",
+      "slLimitPrice": "",
+      "amount": "0",
+      "delegateType": "normal",
+      "matchType": "0"
+    }
+  ],
+  "ts": 1794193215102
+}

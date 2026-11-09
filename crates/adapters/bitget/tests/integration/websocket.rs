@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Integration tests for Bybit WebSocket client using a mock server.
+//! Integration tests for Bitget WebSocket client using a mock server.
 
 use std::{
     net::SocketAddr,
@@ -34,16 +34,15 @@ use axum::{
     routing::get,
 };
 use futures_util::StreamExt;
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::enums::{
-        BybitBboSideType, BybitEnvironment, BybitOrderSide, BybitOrderType, BybitProductType,
-        BybitTimeInForce, BybitTriggerType,
+        BitgetEnvironment, BitgetOrderSide, BitgetOrderType, BitgetProductType, BitgetTimeInForce,
     },
     websocket::{
-        client::BybitWebSocketClient,
+        client::BitgetWebSocketClient,
         messages::{
-            BybitWsAmendOrderParams, BybitWsCancelOrderParams, BybitWsMessage,
-            BybitWsPlaceOrderParams,
+            BitgetWsAmendOrderParams, BitgetWsCancelOrderParams, BitgetWsMessage,
+            BitgetWsPlaceOrderParams,
         },
     },
 };
@@ -144,24 +143,20 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
         *count += 1;
     }
 
-    // Server-side ping loop
-    let state_clone = state.clone();
-
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-        loop {
-            interval.tick().await;
-
-            if state_clone.disconnect_trigger.load(Ordering::Relaxed) {
-                break;
-            }
-        }
-    });
+    // Bitget keepalive is a text frame either way: the venue may send `ping` and expect `pong`
+    let mut last_server_ping = tokio::time::Instant::now();
 
     // Main message handling loop
     loop {
         if state.disconnect_trigger.load(Ordering::Relaxed) {
             break;
+        }
+
+        if last_server_ping.elapsed() >= Duration::from_millis(500) {
+            last_server_ping = tokio::time::Instant::now();
+            if socket.send(Message::Text("ping".into())).await.is_err() {
+                break;
+            }
         }
 
         let msg_opt = match tokio::time::timeout(Duration::from_millis(50), socket.recv()).await {
@@ -183,6 +178,16 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
         }
 
         match msg {
+            Message::Text(text) if text.as_str() == "ping" => {
+                state.ping_count.fetch_add(1, Ordering::Relaxed);
+
+                if socket.send(Message::Text("pong".into())).await.is_err() {
+                    break;
+                }
+            }
+            Message::Text(text) if text.as_str() == "pong" => {
+                state.pong_count.fetch_add(1, Ordering::Relaxed);
+            }
             Message::Text(text) => {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
                     continue;
@@ -191,143 +196,98 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                 let op = value.get("op").and_then(|v| v.as_str());
 
                 match op {
-                    Some("ping") => {
-                        state.ping_count.fetch_add(1, Ordering::Relaxed);
-                        // Respond with pong
-                        let pong_response = json!({
-                            "success": true,
-                            "ret_msg": "pong",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "pong"
-                        });
+                    Some("login") => {
+                        // Check for auth delay
+                        if let Some(delay_ms) = *state.auth_response_delay_ms.lock().await {
+                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        }
+
+                        // Parse login request
+                        let api_key = value
+                            .get("args")
+                            .and_then(|a| a.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|v| v.get("apiKey"))
+                            .and_then(|v| v.as_str());
+
+                        let response = if api_key == Some("test_api_key") {
+                            state.authenticated.store(true, Ordering::Relaxed);
+                            load_test_data("ws_auth_success.json")
+                        } else {
+                            // Login failed
+                            load_test_data("ws_auth_failure.json")
+                        };
 
                         if socket
-                            .send(Message::Text(pong_response.to_string().into()))
+                            .send(Message::Text(response.to_string().into()))
                             .await
                             .is_err()
                         {
                             break;
                         }
                     }
-                    Some("auth") => {
-                        // Check for auth delay
-                        if let Some(delay_ms) = *state.auth_response_delay_ms.lock().await {
-                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        }
-
-                        // Parse auth request
-                        let api_key = value
-                            .get("args")
-                            .and_then(|a| a.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|v| v.as_str());
-
-                        if api_key == Some("test_api_key") {
-                            state.authenticated.store(true, Ordering::Relaxed);
-                            let auth_response = json!({
-                                "success": true,
-                                "ret_msg": "",
-                                "op": "auth",
-                                "conn_id": "test-conn-id"
-                            });
-
-                            if socket
-                                .send(Message::Text(auth_response.to_string().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        } else {
-                            // Auth failed
-                            let auth_response = json!({
-                                "success": false,
-                                "ret_msg": "Invalid API key",
-                                "op": "auth",
-                                "conn_id": "test-conn-id"
-                            });
-
-                            if socket
-                                .send(Message::Text(auth_response.to_string().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
                     Some("subscribe") => {
                         let args = value.get("args").and_then(|a| a.as_array());
-                        let mut failed_topics = Vec::new();
+                        let mut responses = Vec::new();
 
-                        if let Some(topics) = args {
+                        if let Some(args) = args {
                             let fail_list = state.fail_next_subscriptions.lock().await.clone();
 
-                            for topic in topics {
-                                if let Some(topic_str) = topic.as_str() {
-                                    let should_fail = fail_list.contains(&topic_str.to_string());
+                            for arg in args {
+                                let topic = arg_topic(arg);
+                                let should_fail = fail_list.contains(&topic);
 
-                                    state
-                                        .subscription_events
-                                        .lock()
-                                        .await
-                                        .push((topic_str.to_string(), !should_fail));
+                                state
+                                    .subscription_events
+                                    .lock()
+                                    .await
+                                    .push((topic.clone(), !should_fail));
 
-                                    if should_fail {
-                                        failed_topics.push(topic_str);
-                                    } else {
-                                        let mut subs = state.subscriptions.lock().await;
-                                        if !subs.contains(&topic_str.to_string()) {
-                                            subs.push(topic_str.to_string());
-                                        }
+                                if should_fail {
+                                    // Bitget echoes the rejected arg inside `msg`
+                                    responses.push(json!({
+                                        "event": "error",
+                                        "code": 30001,
+                                        "msg": format!("{arg} doesn't exist"),
+                                        "connId": "test-conn-id"
+                                    }));
+                                } else {
+                                    let mut subs = state.subscriptions.lock().await;
+                                    if !subs.contains(&topic) {
+                                        subs.push(topic);
                                     }
+                                    responses.push(json!({
+                                        "event": "subscribe",
+                                        "arg": arg,
+                                        "connId": "test-conn-id"
+                                    }));
                                 }
                             }
                         }
 
-                        // Send subscription response (success or failure)
-                        if failed_topics.is_empty() {
-                            let sub_response = json!({
-                                "success": true,
-                                "ret_msg": "",
-                                "conn_id": "test-conn-id",
-                                "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                                "op": "subscribe"
-                            });
-
+                        let mut closed = false;
+                        for response in responses {
                             if socket
-                                .send(Message::Text(sub_response.to_string().into()))
+                                .send(Message::Text(response.to_string().into()))
                                 .await
                                 .is_err()
                             {
-                                break;
-                            }
-                        } else {
-                            // Send failure for failed subscriptions
-                            let error_response = json!({
-                                "success": false,
-                                "ret_msg": format!("Subscription failed for topics: {:?}", failed_topics),
-                                "ret_code": 10001,
-                                "conn_id": "test-conn-id",
-                                "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                                "op": "subscribe"
-                            });
-
-                            if socket
-                                .send(Message::Text(error_response.to_string().into()))
-                                .await
-                                .is_err()
-                            {
+                                closed = true;
                                 break;
                             }
                         }
+                        if closed {
+                            break;
+                        }
 
                         // Send a sample data message for the first topic
-                        if let Some(topics) = args
-                            && let Some(first_topic) = topics.first().and_then(|t| t.as_str())
+                        if let Some(args) = args
+                            && let Some(first_topic) = args
+                                .first()
+                                .and_then(|t| t.get("topic"))
+                                .and_then(|t| t.as_str())
                         {
-                            if first_topic.contains("publicTrade") {
+                            if first_topic == "publicTrade" {
                                 // Send a trade message
                                 let trade_msg = load_test_data("ws_public_trade.json");
 
@@ -338,7 +298,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                                 {
                                     break;
                                 }
-                            } else if first_topic.contains("orderbook") {
+                            } else if first_topic.starts_with("books") {
                                 // Send an orderbook message
                                 let orderbook_msg = load_test_data("ws_orderbook_snapshot.json");
 
@@ -354,146 +314,55 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                     }
                     Some("unsubscribe") => {
                         let args = value.get("args").and_then(|a| a.as_array());
-                        if let Some(topics) = args {
-                            for topic in topics {
-                                if let Some(topic_str) = topic.as_str() {
-                                    let mut events = state.subscription_events.lock().await;
-                                    events.retain(|(t, _)| t != topic_str);
-                                    drop(events);
+                        let mut responses = Vec::new();
 
-                                    let mut subs = state.subscriptions.lock().await;
-                                    subs.retain(|s| s != topic_str);
-                                }
+                        if let Some(args) = args {
+                            for arg in args {
+                                let topic = arg_topic(arg);
+                                let mut events = state.subscription_events.lock().await;
+                                events.retain(|(t, _)| *t != topic);
+                                drop(events);
+
+                                let mut subs = state.subscriptions.lock().await;
+                                subs.retain(|s| *s != topic);
+
+                                // Send unsubscription confirmation
+                                responses.push(json!({
+                                    "event": "unsubscribe",
+                                    "arg": arg,
+                                    "connId": "test-conn-id"
+                                }));
                             }
                         }
 
-                        // Send unsubscription confirmation
-                        let unsub_response = json!({
-                            "success": true,
-                            "ret_msg": "",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "unsubscribe"
-                        });
-
-                        if socket
-                            .send(Message::Text(unsub_response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
+                        let mut closed = false;
+                        for response in responses {
+                            if socket
+                                .send(Message::Text(response.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        if closed {
                             break;
                         }
                     }
-                    Some("order.create") => {
+                    Some("trade") => {
+                        // Order entry (`place-order`, `modify-order`, `cancel-order`, `batch-*`)
                         state.captured_messages.lock().await.push(value.clone());
-                        let req_id = value.get("reqId").and_then(|v| v.as_str());
                         let response = json!({
-                            "retCode": 0,
-                            "retMsg": "OK",
-                            "data": {},
+                            "event": "trade",
+                            "id": value.get("id").cloned().unwrap_or_default(),
+                            "category": value.get("category").cloned().unwrap_or_default(),
+                            "topic": value.get("topic").cloned().unwrap_or_default(),
+                            "args": [],
+                            "code": "0",
+                            "msg": "Success",
                             "connId": "test-conn-id",
-                            "reqId": req_id.unwrap_or(""),
-                            "op": "order.create"
-                        });
-
-                        if socket
-                            .send(Message::Text(response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Some("order.amend") => {
-                        state.captured_messages.lock().await.push(value.clone());
-                        let req_id = value.get("reqId").and_then(|v| v.as_str());
-                        let response = json!({
-                            "retCode": 0,
-                            "retMsg": "OK",
-                            "data": {},
-                            "connId": "test-conn-id",
-                            "reqId": req_id.unwrap_or(""),
-                            "op": "order.amend"
-                        });
-
-                        if socket
-                            .send(Message::Text(response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Some("order.cancel") => {
-                        state.captured_messages.lock().await.push(value.clone());
-                        let req_id = value.get("reqId").and_then(|v| v.as_str());
-                        let response = json!({
-                            "retCode": 0,
-                            "retMsg": "OK",
-                            "data": {},
-                            "connId": "test-conn-id",
-                            "reqId": req_id.unwrap_or(""),
-                            "op": "order.cancel"
-                        });
-
-                        if socket
-                            .send(Message::Text(response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Some("order.create-batch") => {
-                        state.captured_messages.lock().await.push(value.clone());
-                        let req_id = value.get("reqId").and_then(|v| v.as_str());
-                        let response = json!({
-                            "retCode": 0,
-                            "retMsg": "OK",
-                            "data": {},
-                            "connId": "test-conn-id",
-                            "reqId": req_id.unwrap_or(""),
-                            "op": "order.create-batch"
-                        });
-
-                        if socket
-                            .send(Message::Text(response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Some("order.amend-batch") => {
-                        state.captured_messages.lock().await.push(value.clone());
-                        let req_id = value.get("reqId").and_then(|v| v.as_str());
-                        let response = json!({
-                            "retCode": 0,
-                            "retMsg": "OK",
-                            "data": {},
-                            "connId": "test-conn-id",
-                            "reqId": req_id.unwrap_or(""),
-                            "op": "order.amend-batch"
-                        });
-
-                        if socket
-                            .send(Message::Text(response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Some("order.cancel-batch") => {
-                        state.captured_messages.lock().await.push(value.clone());
-                        let req_id = value.get("reqId").and_then(|v| v.as_str());
-                        let response = json!({
-                            "retCode": 0,
-                            "retMsg": "OK",
-                            "data": {},
-                            "connId": "test-conn-id",
-                            "reqId": req_id.unwrap_or(""),
-                            "op": "order.cancel-batch"
+                            "rateLimit": [{"limit": "10", "remaining": "9"}]
                         });
 
                         if socket
@@ -508,14 +377,9 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                 }
             }
             Message::Ping(_) => {
-                state.ping_count.fetch_add(1, Ordering::Relaxed);
-
                 if socket.send(Message::Pong(vec![].into())).await.is_err() {
                     break;
                 }
-            }
-            Message::Pong(_) => {
-                state.pong_count.fetch_add(1, Ordering::Relaxed);
             }
             Message::Close(_) => {
                 break;
@@ -532,6 +396,20 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
     *count = count.saturating_sub(1);
 }
 
+// Returns the dotted topic key for a Bitget subscription `arg` (private channels keep their name)
+fn arg_topic(arg: &serde_json::Value) -> String {
+    let field = |name: &str| arg.get(name).and_then(|v| v.as_str());
+    let topic = field("topic").unwrap_or_default();
+    if field("instType") == Some("UTA") {
+        return topic.to_string();
+    }
+    match (field("interval"), field("symbol")) {
+        (Some(interval), Some(symbol)) => format!("{topic}.{interval}.{symbol}"),
+        (None, Some(symbol)) => format!("{topic}.{symbol}"),
+        _ => topic.to_string(),
+    }
+}
+
 // Load test data from existing files
 fn load_test_data(filename: &str) -> serde_json::Value {
     let path = format!("test_data/{filename}");
@@ -541,7 +419,7 @@ fn load_test_data(filename: &str) -> serde_json::Value {
 
 fn make_linear_pair(raw_symbol: &str, base: &str, quote: &str) -> CurrencyPair {
     CurrencyPair::builder()
-        .instrument_id(format!("{raw_symbol}-LINEAR.BYBIT").into())
+        .instrument_id(format!("{raw_symbol}-PERP.BITGET").into())
         .raw_symbol(raw_symbol.into())
         .base_currency(Currency::from(base))
         .quote_currency(Currency::from(quote))
@@ -557,8 +435,8 @@ fn make_linear_pair(raw_symbol: &str, base: &str, quote: &str) -> CurrencyPair {
 
 fn create_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/public/linear", get(handle_websocket))
-        .route("/v5/private", get(handle_websocket))
+        .route("/v3/ws/public", get(handle_websocket))
+        .route("/v3/ws/private", get(handle_websocket))
         .with_state(state)
 }
 
@@ -620,11 +498,11 @@ async fn wait_for_connection_count(state: &TestServerState, expected: usize, tim
 #[tokio::test]
 async fn test_public_client_connection() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -650,12 +528,13 @@ async fn test_public_client_connection() {
 #[tokio::test]
 async fn test_private_client_authentication() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -684,12 +563,13 @@ async fn test_private_client_authentication() {
 #[tokio::test]
 async fn test_authentication_failure() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("invalid_key".to_string()),
         Some("invalid_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -715,11 +595,11 @@ async fn test_authentication_failure() {
 #[tokio::test]
 async fn test_ping_pong() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         1, // 1 second heartbeat,
         TransportBackend::default(),
@@ -751,11 +631,11 @@ async fn test_ping_pong() {
 #[tokio::test]
 async fn test_subscription_lifecycle() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -800,11 +680,11 @@ async fn test_subscription_lifecycle() {
 #[tokio::test]
 async fn test_message_routing() {
     let (addr, _state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -834,11 +714,11 @@ async fn test_message_routing() {
 #[tokio::test]
 async fn test_reconnection_flow() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -877,11 +757,11 @@ async fn test_reconnection_flow() {
 #[tokio::test]
 async fn test_multiple_subscriptions() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -894,7 +774,7 @@ async fn test_multiple_subscriptions() {
     let topics = vec![
         "publicTrade.BTCUSDT".to_string(),
         "publicTrade.ETHUSDT".to_string(),
-        "orderbook.50.BTCUSDT".to_string(),
+        "books50.BTCUSDT".to_string(),
     ];
     client.subscribe(topics).await.unwrap();
 
@@ -917,7 +797,7 @@ async fn test_multiple_subscriptions() {
     );
     assert!(
         subs.iter()
-            .any(|(topic, ok)| topic == "orderbook.50.BTCUSDT" && *ok)
+            .any(|(topic, ok)| topic == "books50.BTCUSDT" && *ok)
     );
 
     client.close().await.unwrap();
@@ -927,9 +807,9 @@ async fn test_multiple_subscriptions() {
 #[tokio::test(start_paused = true)]
 async fn test_wait_until_active_timeout() {
     // Nothing connects the client, so it stays closed and the wait must time out
-    let client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some("ws://127.0.0.1:9999/invalid".to_string()),
         20,
         TransportBackend::default(),
@@ -949,11 +829,11 @@ async fn test_wait_until_active_timeout() {
 #[tokio::test]
 async fn test_heartbeat_timeout_reconnection() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         1, // 1 second heartbeat,
         TransportBackend::default(),
@@ -982,11 +862,11 @@ async fn test_heartbeat_timeout_reconnection() {
 #[tokio::test]
 async fn test_sends_pong_for_text_ping() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         1,
         TransportBackend::default(),
@@ -995,15 +875,14 @@ async fn test_sends_pong_for_text_ping() {
 
     client.connect().await.unwrap();
 
-    // Wait for pings to be sent
+    // The mock venue sends a text `ping` on connect; the client must answer `pong`
     wait_until_async(
-        || async { state.ping_count.load(Ordering::Relaxed) > 0 },
+        || async { state.pong_count.load(Ordering::Relaxed) > 0 },
         Duration::from_secs(3),
     )
     .await;
 
-    // Verify ping was received by server
-    assert!(state.ping_count.load(Ordering::Relaxed) > 0);
+    assert!(state.pong_count.load(Ordering::Relaxed) > 0);
 
     client.close().await.unwrap();
 }
@@ -1012,11 +891,11 @@ async fn test_sends_pong_for_text_ping() {
 #[tokio::test]
 async fn test_sends_pong_for_control_ping() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1043,12 +922,13 @@ async fn test_sends_pong_for_control_ping() {
 #[tokio::test]
 async fn test_reauth_after_disconnect() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1077,12 +957,13 @@ async fn test_reauth_after_disconnect() {
 #[tokio::test]
 async fn test_login_failure_emits_error() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("invalid_key".to_string()),
         Some("invalid_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1108,12 +989,12 @@ async fn test_login_failure_emits_error() {
 #[tokio::test]
 async fn test_unauthenticated_private_subscription_fails() {
     let (addr, _state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
     // Create public client
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1133,11 +1014,11 @@ async fn test_unauthenticated_private_subscription_fails() {
 #[tokio::test]
 async fn test_subscription_after_reconnection() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1173,11 +1054,11 @@ async fn test_subscription_after_reconnection() {
 #[tokio::test]
 async fn test_subscription_restoration_tracking() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1189,7 +1070,7 @@ async fn test_subscription_restoration_tracking() {
     // Subscribe to multiple topics
     let topics = vec![
         "publicTrade.BTCUSDT".to_string(),
-        "orderbook.50.ETHUSDT".to_string(),
+        "books50.ETHUSDT".to_string(),
     ];
     client.subscribe(topics).await.unwrap();
 
@@ -1211,11 +1092,11 @@ async fn test_subscription_restoration_tracking() {
 #[tokio::test]
 async fn test_reconnection_retries_failed_subscriptions() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1251,11 +1132,11 @@ async fn test_reconnection_retries_failed_subscriptions() {
 #[tokio::test]
 async fn test_trade_subscription_flow() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1265,7 +1146,7 @@ async fn test_trade_subscription_flow() {
     client.connect().await.unwrap();
 
     // Subscribe to trades using the high-level method
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     client.subscribe_trades(instrument_id).await.unwrap();
 
     // Wait for subscription
@@ -1288,11 +1169,11 @@ async fn test_trade_subscription_flow() {
 #[tokio::test]
 async fn test_orderbook_subscription_flow() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1302,7 +1183,7 @@ async fn test_orderbook_subscription_flow() {
     client.connect().await.unwrap();
 
     // Subscribe to orderbook using the high-level method
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     client.subscribe_orderbook(instrument_id, 50).await.unwrap();
 
     // Wait for subscription
@@ -1315,7 +1196,7 @@ async fn test_orderbook_subscription_flow() {
     let subs = state.subscription_events.lock().await.clone();
     assert!(
         subs.iter()
-            .any(|(topic, ok)| topic.contains("orderbook") && *ok)
+            .any(|(topic, ok)| topic.starts_with("books") && *ok)
     );
 
     client.close().await.unwrap();
@@ -1325,11 +1206,11 @@ async fn test_orderbook_subscription_flow() {
 #[tokio::test]
 async fn test_ticker_subscription_flow() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1339,7 +1220,7 @@ async fn test_ticker_subscription_flow() {
     client.connect().await.unwrap();
 
     // Subscribe to ticker using the high-level method
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     client.subscribe_ticker(instrument_id).await.unwrap();
 
     // Wait for subscription
@@ -1362,11 +1243,11 @@ async fn test_ticker_subscription_flow() {
 #[tokio::test]
 async fn test_klines_subscription_flow() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1375,7 +1256,7 @@ async fn test_klines_subscription_flow() {
 
     client.connect().await.unwrap();
 
-    let bar_type = BarType::from("BTCUSDT-LINEAR.BYBIT-1-MINUTE-LAST-EXTERNAL");
+    let bar_type = BarType::from("BTCUSDT-PERP.BITGET-1-MINUTE-LAST-EXTERNAL");
     client.subscribe_bars(bar_type).await.unwrap();
 
     // Wait for subscription
@@ -1398,12 +1279,13 @@ async fn test_klines_subscription_flow() {
 #[tokio::test]
 async fn test_private_orders_subscription() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1429,12 +1311,13 @@ async fn test_private_orders_subscription() {
 #[tokio::test]
 async fn test_private_executions_subscription() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1460,12 +1343,13 @@ async fn test_private_executions_subscription() {
 #[tokio::test]
 async fn test_private_wallet_subscription() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1491,11 +1375,11 @@ async fn test_private_wallet_subscription() {
 #[tokio::test]
 async fn test_rapid_consecutive_reconnections() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1551,11 +1435,11 @@ async fn test_rapid_consecutive_reconnections() {
 #[tokio::test]
 async fn test_reconnection_race_condition() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1586,9 +1470,7 @@ async fn test_reconnection_race_condition() {
     .await;
 
     state.disconnect_trigger.store(true, Ordering::Relaxed);
-    let _result = client
-        .subscribe(vec!["orderbook.50.ETHUSDT".to_string()])
-        .await;
+    let _result = client.subscribe(vec!["books50.ETHUSDT".to_string()]).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1610,14 +1492,15 @@ async fn test_reconnection_race_condition() {
 #[tokio::test]
 async fn test_reconnection_waits_for_delayed_auth_ack() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
     state.set_auth_delay(500).await;
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1648,11 +1531,11 @@ async fn test_reconnection_waits_for_delayed_auth_ack() {
 #[tokio::test]
 async fn test_multiple_partial_subscription_failures() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1664,7 +1547,7 @@ async fn test_multiple_partial_subscription_failures() {
     let topics = vec![
         "publicTrade.BTCUSDT".to_string(),
         "publicTrade.ETHUSDT".to_string(),
-        "orderbook.50.BTCUSDT".to_string(),
+        "books50.BTCUSDT".to_string(),
     ];
     client.subscribe(topics.clone()).await.unwrap();
 
@@ -1692,7 +1575,7 @@ async fn test_multiple_partial_subscription_failures() {
 
     let mixed_topics = vec![
         "publicTrade.SOLUSDT".to_string(),
-        "orderbook.50.ETHUSDT".to_string(),
+        "books50.ETHUSDT".to_string(),
     ];
     let _result = client.subscribe(mixed_topics).await;
 
@@ -1719,11 +1602,11 @@ async fn test_multiple_partial_subscription_failures() {
 #[tokio::test]
 async fn test_is_active_false_during_reconnection() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -1761,11 +1644,11 @@ async fn test_is_active_false_during_reconnection() {
 #[tokio::test]
 async fn test_sends_pong_for_text_ping_message() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         1, // 1 second heartbeat,
         TransportBackend::default(),
@@ -1795,13 +1678,14 @@ async fn test_sends_pong_for_text_ping_message() {
 }
 
 // Tests for conditional order types
+//
+// Bitget `op:"trade"` carries plain orders only and has no trigger direction: conditional orders
+// go to the REST strategy-order endpoint (`type=trigger`), so the WebSocket builder refuses them.
 #[cfg(test)]
 mod conditional_order_tests {
-    use nautilus_bybit::{
-        common::enums::{
-            BybitOrderSide, BybitOrderType, BybitProductType, BybitTimeInForce, BybitTriggerType,
-        },
-        websocket::{client::BybitWebSocketClient, messages::BybitWsPlaceOrderParams},
+    use nautilus_bitget::{
+        common::enums::{BitgetOrderSide, BitgetProductType},
+        websocket::{client::BitgetWebSocketClient, messages::BitgetWsPlaceOrderParams},
     };
     use nautilus_model::{
         enums::{OrderSide, OrderType, TimeInForce},
@@ -1812,194 +1696,153 @@ mod conditional_order_tests {
 
     #[rstest]
     fn test_buy_stop_market_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::StopMarket,
-            BybitOrderSide::Buy,
+            BitgetOrderSide::Buy,
             Some(Price::from("4500.00")),
             None,
-        );
+        )
+        .unwrap_err();
 
-        // Buy stop should trigger when price rises to trigger price
-        assert_eq!(params.trigger_direction, Some(1)); // RisesTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
-        assert_eq!(params.order_type, BybitOrderType::Market);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_sell_stop_market_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::StopMarket,
-            BybitOrderSide::Sell,
+            BitgetOrderSide::Sell,
             Some(Price::from("4500.00")),
             None,
-        );
+        )
+        .unwrap_err();
 
-        // Sell stop should trigger when price falls to trigger price
-        assert_eq!(params.trigger_direction, Some(2)); // FallsTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
-        assert_eq!(params.order_type, BybitOrderType::Market);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_buy_stop_limit_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::StopLimit,
-            BybitOrderSide::Buy,
+            BitgetOrderSide::Buy,
             Some(Price::from("4500.00")),
             Some(Price::from("4505.00")),
-        );
+        )
+        .unwrap_err();
 
-        // Buy stop-limit should trigger when price rises to trigger price
-        assert_eq!(params.trigger_direction, Some(1)); // RisesTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
-        assert_eq!(params.price.as_ref().unwrap(), "4505.00");
-        assert_eq!(params.order_type, BybitOrderType::Limit);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_sell_stop_limit_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::StopLimit,
-            BybitOrderSide::Sell,
+            BitgetOrderSide::Sell,
             Some(Price::from("4500.00")),
             Some(Price::from("4495.00")),
-        );
+        )
+        .unwrap_err();
 
-        // Sell stop-limit should trigger when price falls to trigger price
-        assert_eq!(params.trigger_direction, Some(2)); // FallsTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
-        assert_eq!(params.price.as_ref().unwrap(), "4495.00");
-        assert_eq!(params.order_type, BybitOrderType::Limit);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_buy_market_if_touched_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::MarketIfTouched,
-            BybitOrderSide::Buy,
+            BitgetOrderSide::Buy,
             Some(Price::from("4500.00")),
             None,
-        );
+        )
+        .unwrap_err();
 
-        // Buy MIT should trigger when price falls to trigger price (buy on pullback)
-        assert_eq!(params.trigger_direction, Some(2)); // FallsTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
-        assert_eq!(params.order_type, BybitOrderType::Market);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_sell_market_if_touched_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::MarketIfTouched,
-            BybitOrderSide::Sell,
+            BitgetOrderSide::Sell,
             Some(Price::from("5500.00")),
             None,
-        );
+        )
+        .unwrap_err();
 
-        // Sell MIT should trigger when price rises to trigger price (sell on rally)
-        assert_eq!(params.trigger_direction, Some(1)); // RisesTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "5500.00");
-        assert_eq!(params.order_type, BybitOrderType::Market);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_buy_limit_if_touched_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::LimitIfTouched,
-            BybitOrderSide::Buy,
+            BitgetOrderSide::Buy,
             Some(Price::from("4500.00")),
             Some(Price::from("4505.00")),
-        );
+        )
+        .unwrap_err();
 
-        // Buy LIT should trigger when price falls to trigger price (buy on pullback)
-        assert_eq!(params.trigger_direction, Some(2)); // FallsTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "4500.00");
-        assert_eq!(params.price.as_ref().unwrap(), "4505.00");
-        assert_eq!(params.order_type, BybitOrderType::Limit);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_sell_limit_if_touched_order_trigger_direction() {
-        let params = create_conditional_order_params_with_side(
+        let error = create_conditional_order_params_with_side(
             OrderType::LimitIfTouched,
-            BybitOrderSide::Sell,
+            BitgetOrderSide::Sell,
             Some(Price::from("5500.00")),
             Some(Price::from("5495.00")),
-        );
+        )
+        .unwrap_err();
 
-        // Sell LIT should trigger when price rises to trigger price (sell on rally)
-        assert_eq!(params.trigger_direction, Some(1)); // RisesTo
-        assert_eq!(params.trigger_price.as_ref().unwrap(), "5500.00");
-        assert_eq!(params.price.as_ref().unwrap(), "5495.00");
-        assert_eq!(params.order_type, BybitOrderType::Limit);
+        assert!(error.contains("strategy-order"), "{error}");
     }
 
     #[rstest]
     fn test_reduce_only_false_omitted() {
         let params = create_conditional_order_params_with_reduce_only(
-            OrderType::StopMarket,
-            Some(Price::from("4500.00")),
+            OrderType::Limit,
             None,
+            Some(Price::from("4500.00")),
             Some(false),
         );
 
-        // reduce_only should be None when false (not sent to Bybit)
+        // reduce_only should be None when false (not sent to Bitget)
         assert!(params.reduce_only.is_none());
     }
 
     #[rstest]
     fn test_reduce_only_explicit_true() {
         let params = create_conditional_order_params_with_reduce_only(
-            OrderType::StopMarket,
-            Some(Price::from("4500.00")),
+            OrderType::Limit,
             None,
+            Some(Price::from("4500.00")),
             Some(true),
         );
 
         // reduce_only should be Some(true)
         assert!(params.reduce_only.is_some());
         assert!(params.reduce_only.unwrap());
+        assert_eq!(serde_json::to_value(&params).unwrap()["reduceOnly"], "YES");
     }
 
     // Create conditional order params through the client logic
     fn create_conditional_order_params_with_side(
         order_type: OrderType,
-        side: BybitOrderSide,
+        side: BitgetOrderSide,
         trigger_price: Option<Price>,
         price: Option<Price>,
-    ) -> BybitWsPlaceOrderParams {
-        let client = BybitWebSocketClient::new_public(None, 20);
-
+    ) -> Result<BitgetWsPlaceOrderParams, String> {
         let nautilus_side = match side {
-            BybitOrderSide::Buy => OrderSide::Buy,
-            BybitOrderSide::Sell => OrderSide::Sell,
-            BybitOrderSide::Unknown => panic!("Unknown side not supported in tests"),
+            BitgetOrderSide::Buy => OrderSide::Buy,
+            BitgetOrderSide::Sell => OrderSide::Sell,
+            BitgetOrderSide::Unknown => {
+                return Err("Unknown side not supported in tests".to_string());
+            }
         };
 
-        client
-            .build_place_order_params(
-                BybitProductType::Linear,
-                InstrumentId::from("ETHUSDT-LINEAR.BYBIT"),
-                ClientOrderId::from("test-order-1"),
-                nautilus_side,
-                order_type,
-                Quantity::from("0.01"),
-                false, // is_quote_quantity
-                Some(TimeInForce::Gtc),
-                price,
-                trigger_price,
-                None,  // trigger_type
-                None,  // post_only
-                None,  // reduce_only
-                false, // is_leverage
-                None,  // take_profit
-                None,  // stop_loss
-                None,  // position_idx
-                None,  // bbo_side_type
-                None,  // bbo_level
-                None,  // smp_type
-            )
-            .unwrap()
+        build_params(order_type, nautilus_side, trigger_price, price, None)
+            .map_err(|e| e.to_string())
     }
 
     fn create_conditional_order_params_with_reduce_only(
@@ -2007,96 +1850,48 @@ mod conditional_order_tests {
         trigger_price: Option<Price>,
         price: Option<Price>,
         reduce_only: Option<bool>,
-    ) -> BybitWsPlaceOrderParams {
-        let is_stop_order = matches!(
+    ) -> BitgetWsPlaceOrderParams {
+        build_params(
             order_type,
-            OrderType::StopMarket
-                | OrderType::StopLimit
-                | OrderType::MarketIfTouched
-                | OrderType::LimitIfTouched
-        );
+            OrderSide::Buy,
+            trigger_price,
+            price,
+            reduce_only,
+        )
+        .unwrap()
+    }
 
-        let bybit_order_type = match order_type {
-            OrderType::Market | OrderType::StopMarket | OrderType::MarketIfTouched => {
-                BybitOrderType::Market
-            }
-            OrderType::Limit | OrderType::StopLimit | OrderType::LimitIfTouched => {
-                BybitOrderType::Limit
-            }
-            _ => panic!("Unsupported order type"),
-        };
+    fn build_params(
+        order_type: OrderType,
+        side: OrderSide,
+        trigger_price: Option<Price>,
+        price: Option<Price>,
+        reduce_only: Option<bool>,
+    ) -> Result<BitgetWsPlaceOrderParams, nautilus_bitget::websocket::error::BitgetWsError> {
+        let client = BitgetWebSocketClient::new_public(None, 20);
 
-        if is_stop_order {
-            BybitWsPlaceOrderParams {
-                category: BybitProductType::Linear,
-                symbol: "ETHUSDT".into(),
-                side: BybitOrderSide::Buy,
-                order_type: bybit_order_type,
-                qty: "0.01".to_string(),
-                is_leverage: None,
-                market_unit: None,
-                price: price.map(|p| p.to_string()),
-                time_in_force: Some(BybitTimeInForce::Gtc),
-                order_link_id: Some("test-order-1".to_string()),
-                reduce_only: reduce_only.filter(|&r| r),
-                close_on_trigger: None,
-                trigger_price: trigger_price.map(|p| p.to_string()),
-                trigger_by: Some(BybitTriggerType::LastPrice),
-                trigger_direction: None,
-                tpsl_mode: None,
-                take_profit: None,
-                stop_loss: None,
-                tp_trigger_by: None,
-                sl_trigger_by: None,
-                sl_trigger_price: None,
-                tp_trigger_price: None,
-                sl_order_type: None,
-                tp_order_type: None,
-                sl_limit_price: None,
-                tp_limit_price: None,
-                order_iv: None,
-                smp_type: None,
-                mmp: None,
-                position_idx: None,
-                bbo_side_type: None,
-                bbo_level: None,
-            }
-        } else {
-            BybitWsPlaceOrderParams {
-                category: BybitProductType::Linear,
-                symbol: "ETHUSDT".into(),
-                side: BybitOrderSide::Buy,
-                order_type: bybit_order_type,
-                qty: "0.01".to_string(),
-                is_leverage: None,
-                market_unit: None,
-                price: price.map(|p| p.to_string()),
-                time_in_force: Some(BybitTimeInForce::Gtc),
-                order_link_id: Some("test-order-1".to_string()),
-                reduce_only: reduce_only.filter(|&r| r),
-                close_on_trigger: None,
-                trigger_price: None,
-                trigger_by: None,
-                trigger_direction: None,
-                tpsl_mode: None,
-                take_profit: None,
-                stop_loss: None,
-                tp_trigger_by: None,
-                sl_trigger_by: None,
-                sl_trigger_price: None,
-                tp_trigger_price: None,
-                sl_order_type: None,
-                tp_order_type: None,
-                sl_limit_price: None,
-                tp_limit_price: None,
-                order_iv: None,
-                smp_type: None,
-                mmp: None,
-                position_idx: None,
-                bbo_side_type: None,
-                bbo_level: None,
-            }
-        }
+        client.build_place_order_params(
+            BitgetProductType::Linear,
+            InstrumentId::from("ETHUSDT-PERP.BITGET"),
+            ClientOrderId::from("test-order-1"),
+            side,
+            order_type,
+            Quantity::from("0.01"),
+            false, // is_quote_quantity
+            Some(TimeInForce::Gtc),
+            price,
+            trigger_price,
+            None, // trigger_type
+            None, // post_only
+            reduce_only,
+            false, // is_leverage
+            None,  // take_profit
+            None,  // stop_loss
+            None,  // position_idx
+            None,  // bbo_side_type
+            None,  // bbo_level
+            None,  // smp_type
+        )
     }
 }
 
@@ -2104,12 +1899,13 @@ mod conditional_order_tests {
 #[tokio::test]
 async fn test_is_active_lifecycle() {
     let (addr, _state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_key".to_string()),
         Some("test_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2142,12 +1938,13 @@ async fn test_is_active_lifecycle() {
 #[tokio::test]
 async fn test_is_active_false_after_close() {
     let (addr, _state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_key".to_string()),
         Some("test_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2179,11 +1976,11 @@ async fn test_is_active_false_after_close() {
 #[tokio::test]
 async fn test_subscribe_after_stream_call() {
     let (addr, _state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2218,12 +2015,13 @@ async fn test_subscribe_after_stream_call() {
 #[tokio::test]
 async fn test_unsubscribed_private_channel_not_resubscribed_after_disconnect() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url.clone()),
         20,
         TransportBackend::default(),
@@ -2232,7 +2030,7 @@ async fn test_unsubscribed_private_channel_not_resubscribed_after_disconnect() {
 
     client.connect().await.unwrap();
 
-    let instrument_id = InstrumentId::from("BTCUSDT.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT.BITGET");
     client.subscribe_trades(instrument_id).await.unwrap();
     client.subscribe_positions().await.unwrap();
 
@@ -2328,11 +2126,11 @@ async fn test_unsubscribed_private_channel_not_resubscribed_after_disconnect() {
 #[tokio::test]
 async fn test_subscribe_after_close_and_connect_resends_topic() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2365,11 +2163,11 @@ async fn test_subscribe_after_close_and_connect_resends_topic() {
 #[tokio::test]
 async fn test_subscribe_failed_before_connect_is_sent_after_connect() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2397,11 +2195,11 @@ async fn test_subscribe_failed_before_connect_is_sent_after_connect() {
 #[tokio::test]
 async fn test_subscribe_failed_during_connect_is_sent_after_connect() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Mainnet,
+    let client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2444,12 +2242,13 @@ async fn test_subscribe_failed_during_connect_is_sent_after_connect() {
 #[tokio::test]
 async fn test_batch_place_orders_with_cache_keys() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2465,38 +2264,28 @@ async fn test_batch_place_orders_with_cache_keys() {
     )
     .await;
 
-    let orders = vec![BybitWsPlaceOrderParams {
-        category: BybitProductType::Linear,
+    let orders = vec![BitgetWsPlaceOrderParams {
+        category: BitgetProductType::Linear,
         symbol: Ustr::from("BTCUSDT"),
-        side: BybitOrderSide::Buy,
-        order_type: BybitOrderType::Limit,
+        side: BitgetOrderSide::Buy,
+        order_type: BitgetOrderType::Limit,
         qty: "0.001".to_string(),
         is_leverage: None,
-        market_unit: None,
         price: Some("50000.0".to_string()),
-        time_in_force: Some(BybitTimeInForce::Gtc),
+        time_in_force: Some(BitgetTimeInForce::Gtc),
         order_link_id: Some("test-order-1".to_string()),
         reduce_only: None,
-        close_on_trigger: None,
-        trigger_price: None,
-        trigger_by: None,
-        trigger_direction: None,
-        tpsl_mode: None,
+        margin_mode: None,
         take_profit: None,
         stop_loss: None,
         tp_trigger_by: None,
         sl_trigger_by: None,
-        sl_trigger_price: None,
-        tp_trigger_price: None,
         sl_order_type: None,
         tp_order_type: None,
         sl_limit_price: None,
         tp_limit_price: None,
-        order_iv: None,
         smp_type: None,
-        mmp: None,
         position_idx: None,
-        bbo_side_type: None,
         bbo_level: None,
     }];
 
@@ -2514,12 +2303,13 @@ async fn test_batch_place_orders_with_cache_keys() {
 #[tokio::test]
 async fn test_batch_amend_orders() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2535,19 +2325,13 @@ async fn test_batch_amend_orders() {
     )
     .await;
 
-    let orders = vec![BybitWsAmendOrderParams {
-        category: BybitProductType::Linear,
+    let orders = vec![BitgetWsAmendOrderParams {
+        category: BitgetProductType::Linear,
         symbol: Ustr::from("BTCUSDT"),
         order_id: None,
         order_link_id: Some("test-order-1".to_string()),
         qty: Some("0.002".to_string()),
         price: Some("51000.0".to_string()),
-        trigger_price: None,
-        take_profit: None,
-        stop_loss: None,
-        tp_trigger_by: None,
-        sl_trigger_by: None,
-        order_iv: None,
     }];
 
     let result = client.batch_amend_orders(orders).await;
@@ -2561,11 +2345,12 @@ async fn test_batch_amend_orders() {
 #[tokio::test]
 async fn test_order_rate_wait_precedes_fresh_websocket_header() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
-    let mut client = BybitWebSocketClient::new_trade(
-        BybitEnvironment::Mainnet,
+    let ws_url = format!("ws://{addr}/v3/ws/private");
+    let mut client = BitgetWebSocketClient::new_trade(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2581,19 +2366,13 @@ async fn test_order_rate_wait_precedes_fresh_websocket_header() {
 
     for index in 0..11 {
         client
-            .amend_order(BybitWsAmendOrderParams {
-                category: BybitProductType::Linear,
+            .amend_order(BitgetWsAmendOrderParams {
+                category: BitgetProductType::Linear,
                 symbol: Ustr::from("BTCUSDT"),
                 order_id: None,
                 order_link_id: Some(format!("fresh-header-{index}")),
                 qty: Some("0.002".to_string()),
                 price: Some("51000.0".to_string()),
-                trigger_price: None,
-                take_profit: None,
-                stop_loss: None,
-                tp_trigger_by: None,
-                sl_trigger_by: None,
-                order_iv: None,
             })
             .await
             .unwrap();
@@ -2608,9 +2387,11 @@ async fn test_order_rate_wait_precedes_fresh_websocket_header() {
     let timestamps = messages
         .iter()
         .map(|message| {
-            let header = message["header"].as_object().unwrap();
-            assert_eq!(header["X-BAPI-RECV-WINDOW"], "250");
-            header["X-BAPI-TIMESTAMP"]
+            // Bitget trade requests carry no receive window, only the envelope `requestTime`
+            assert_eq!(message["op"], "trade");
+            assert_eq!(message["topic"], "modify-order");
+            assert!(message.get("receiveWindow").is_none());
+            message["requestTime"]
                 .as_str()
                 .unwrap()
                 .parse::<i64>()
@@ -2627,11 +2408,12 @@ async fn test_order_rate_wait_precedes_fresh_websocket_header() {
 #[tokio::test]
 async fn test_trade_order_response_preserves_request_id() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
-    let mut client = BybitWebSocketClient::new_trade(
-        BybitEnvironment::Mainnet,
+    let ws_url = format!("ws://{addr}/v3/ws/private");
+    let mut client = BitgetWebSocketClient::new_trade(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2646,26 +2428,20 @@ async fn test_trade_order_response_preserves_request_id() {
     let stream = client.stream();
     tokio::pin!(stream);
     let request_id = client
-        .amend_order(BybitWsAmendOrderParams {
-            category: BybitProductType::Linear,
+        .amend_order(BitgetWsAmendOrderParams {
+            category: BitgetProductType::Linear,
             symbol: Ustr::from("BTCUSDT"),
             order_id: Some("venue-order-1".to_string()),
             order_link_id: Some("client-order-1".to_string()),
             qty: Some("0.002".to_string()),
             price: Some("51000.0".to_string()),
-            trigger_price: None,
-            take_profit: None,
-            stop_loss: None,
-            tp_trigger_by: None,
-            sl_trigger_by: None,
-            order_iv: None,
         })
         .await
         .unwrap();
 
     let response = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(BybitWsMessage::OrderResponse(response)) = stream.next().await {
+            if let Some(BitgetWsMessage::OrderResponse(response)) = stream.next().await {
                 break response;
             }
         }
@@ -2682,12 +2458,13 @@ async fn test_trade_order_response_preserves_request_id() {
 #[tokio::test]
 async fn test_batch_cancel_orders() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2704,14 +2481,14 @@ async fn test_batch_cancel_orders() {
     .await;
 
     let orders = vec![
-        BybitWsCancelOrderParams {
-            category: BybitProductType::Linear,
+        BitgetWsCancelOrderParams {
+            category: BitgetProductType::Linear,
             symbol: Ustr::from("BTCUSDT"),
             order_id: None,
             order_link_id: Some("test-order-1".to_string()),
         },
-        BybitWsCancelOrderParams {
-            category: BybitProductType::Linear,
+        BitgetWsCancelOrderParams {
+            category: BitgetProductType::Linear,
             symbol: Ustr::from("ETHUSDT"),
             order_id: None,
             order_link_id: Some("test-order-2".to_string()),
@@ -2729,12 +2506,13 @@ async fn test_batch_cancel_orders() {
 #[tokio::test]
 async fn test_batch_cancel_orders_chunking_over_20() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2748,10 +2526,10 @@ async fn test_batch_cancel_orders_chunking_over_20() {
     )
     .await;
 
-    // Linear batches split at the default weighted UID quota: 10 + 10 + 5
-    let orders: Vec<BybitWsCancelOrderParams> = (0..25)
-        .map(|i| BybitWsCancelOrderParams {
-            category: BybitProductType::Linear,
+    // Bitget batch requests carry at most 20 orders: 20 + 5
+    let orders: Vec<BitgetWsCancelOrderParams> = (0..25)
+        .map(|i| BitgetWsCancelOrderParams {
+            category: BitgetProductType::Linear,
             symbol: Ustr::from("BTCUSDT"),
             order_id: Some(format!("order-{i}")),
             order_link_id: Some(format!("client-order-{i}")),
@@ -2760,7 +2538,7 @@ async fn test_batch_cancel_orders_chunking_over_20() {
 
     let result = client.batch_cancel_orders(orders).await;
 
-    assert_eq!(result.unwrap().len(), 3);
+    assert_eq!(result.unwrap().len(), 2);
 
     client.close().await.unwrap();
 }
@@ -2769,12 +2547,13 @@ async fn test_batch_cancel_orders_chunking_over_20() {
 #[tokio::test]
 async fn test_batch_cancel_orders_empty_list() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2788,7 +2567,7 @@ async fn test_batch_cancel_orders_empty_list() {
     )
     .await;
 
-    let orders: Vec<BybitWsCancelOrderParams> = vec![];
+    let orders: Vec<BitgetWsCancelOrderParams> = vec![];
 
     let result = client.batch_cancel_orders(orders).await;
 
@@ -2803,9 +2582,9 @@ async fn test_batch_cancel_orders_empty_list() {
 #[rstest]
 #[tokio::test]
 async fn test_option_subscription_limit_rejects_before_state_change() {
-    let client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Option,
-        BybitEnvironment::Mainnet,
+    let client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Option,
+        BitgetEnvironment::Mainnet,
         Some("ws://option-limit.invalid/v5/public/option".to_string()),
         20,
         TransportBackend::default(),
@@ -2825,12 +2604,13 @@ async fn test_option_subscription_limit_rejects_before_state_change() {
 #[tokio::test]
 async fn test_build_cancel_order_params_requires_order_id() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2847,7 +2627,7 @@ async fn test_build_cancel_order_params_requires_order_id() {
     let btcusdt_linear = make_linear_pair("BTCUSDT", "BTC", "USDT");
 
     let result =
-        client.build_cancel_order_params(BybitProductType::Linear, btcusdt_linear.id, None, None);
+        client.build_cancel_order_params(BitgetProductType::Linear, btcusdt_linear.id, None, None);
 
     assert!(result.is_err());
     assert!(
@@ -2866,11 +2646,11 @@ async fn test_option_client_rejects_bar_subscription() {
     let (addr, _state) = start_test_server().await.unwrap();
     // Use the linear route for the mock server; the product_type on the client
     // controls the kline guard, not the URL path.
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Option,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Option,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2881,7 +2661,7 @@ async fn test_option_client_rejects_bar_subscription() {
 
     wait_until_async(|| async { client.is_active() }, Duration::from_secs(5)).await;
 
-    let bar_type = BarType::from("BTC-27MAR26-70000-P-OPTION.BYBIT-1-MINUTE-LAST-EXTERNAL");
+    let bar_type = BarType::from("BTC-27MAR26-70000-P-OPTION.BITGET-1-MINUTE-LAST-EXTERNAL");
     let result = client.subscribe_bars(bar_type).await;
 
     assert!(result.is_err());
@@ -2901,11 +2681,11 @@ async fn test_option_trade_subscription_uses_base_coin_topic() {
     let (addr, state) = start_test_server().await.unwrap();
     // Use the linear route for the mock server; the product_type on the client
     // controls the topic construction, not the URL path.
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Option,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Option,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2915,7 +2695,7 @@ async fn test_option_trade_subscription_uses_base_coin_topic() {
     client.connect().await.unwrap();
     wait_until_async(|| async { client.is_active() }, Duration::from_secs(5)).await;
 
-    let instrument_id = InstrumentId::from("BTC-27MAR26-70000-P-OPTION.BYBIT");
+    let instrument_id = InstrumentId::from("BTC-27MAR26-70000-P-OPTION.BITGET");
     client.subscribe_trades(instrument_id).await.unwrap();
 
     wait_until_async(
@@ -2938,11 +2718,11 @@ async fn test_option_trade_subscription_uses_base_coin_topic() {
 #[tokio::test]
 async fn test_option_trade_unsubscribe_preserves_shared_topic() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/public/linear");
+    let ws_url = format!("ws://{addr}/v3/ws/public");
 
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Option,
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Option,
+        BitgetEnvironment::Mainnet,
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -2953,8 +2733,8 @@ async fn test_option_trade_unsubscribe_preserves_shared_topic() {
     wait_until_async(|| async { client.is_active() }, Duration::from_secs(5)).await;
 
     // Subscribe to two BTC options sharing the same baseCoin topic
-    let opt1 = InstrumentId::from("BTC-27MAR26-70000-P-OPTION.BYBIT");
-    let opt2 = InstrumentId::from("BTC-27MAR26-80000-C-OPTION.BYBIT");
+    let opt1 = InstrumentId::from("BTC-27MAR26-70000-P-OPTION.BITGET");
+    let opt2 = InstrumentId::from("BTC-27MAR26-80000-C-OPTION.BITGET");
     client.subscribe_trades(opt1).await.unwrap();
     client.subscribe_trades(opt2).await.unwrap();
 
@@ -2990,14 +2770,15 @@ async fn test_option_trade_unsubscribe_preserves_shared_topic() {
 
 #[rstest]
 #[tokio::test]
-async fn test_batch_place_order_with_order_iv_and_mmp() {
+async fn test_place_order_with_bbo_serializes_bbo_and_omits_price() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -3012,125 +2793,33 @@ async fn test_batch_place_order_with_order_iv_and_mmp() {
     )
     .await;
 
-    let orders = vec![BybitWsPlaceOrderParams {
-        category: BybitProductType::Option,
-        symbol: Ustr::from("BTC-30JUN25-100000-C"),
-        side: BybitOrderSide::Buy,
-        order_type: BybitOrderType::Limit,
-        qty: "0.1".to_string(),
-        is_leverage: None,
-        market_unit: None,
-        price: Some("500".to_string()),
-        time_in_force: Some(BybitTimeInForce::Gtc),
-        order_link_id: Some("option-test-1".to_string()),
-        reduce_only: None,
-        close_on_trigger: None,
-        trigger_price: None,
-        trigger_by: None,
-        trigger_direction: None,
-        tpsl_mode: None,
-        take_profit: None,
-        stop_loss: None,
-        tp_trigger_by: None,
-        sl_trigger_by: None,
-        sl_trigger_price: None,
-        tp_trigger_price: None,
-        sl_order_type: None,
-        tp_order_type: None,
-        sl_limit_price: None,
-        tp_limit_price: None,
-        order_iv: Some("0.80".to_string()),
-        smp_type: None,
-        mmp: Some(true),
-        position_idx: None,
-        bbo_side_type: None,
-        bbo_level: None,
-    }];
-
-    let result = client.batch_place_orders(orders).await;
-    result.unwrap();
-
-    wait_until_async(
-        || async { !state.captured_messages.lock().await.is_empty() },
-        Duration::from_secs(5),
-    )
-    .await;
-
-    let messages = state.captured_messages.lock().await;
-    assert_eq!(messages.len(), 1);
-
-    let msg = &messages[0];
-    let args = msg.get("args").unwrap().as_array().unwrap();
-    let request = &args[0]["request"][0];
-
-    assert_eq!(request["orderIv"], "0.80");
-    assert_eq!(request["mmp"], true);
-    assert_eq!(request["symbol"], "BTC-30JUN25-100000-C");
-    assert_eq!(request["orderLinkId"], "option-test-1");
-
-    client.close().await.unwrap();
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_batch_place_order_with_bbo_serializes_bbo_and_omits_price() {
-    let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
-
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
-        Some("test_api_key".to_string()),
-        Some("test_api_secret".to_string()),
-        Some(ws_url),
-        20,
-        TransportBackend::default(),
-        None,
-    );
-
-    client.connect().await.unwrap();
-
-    wait_until_async(
-        || async { state.authenticated.load(Ordering::Relaxed) },
-        Duration::from_secs(5),
-    )
-    .await;
-
-    let orders = vec![BybitWsPlaceOrderParams {
-        category: BybitProductType::Linear,
+    // Bitget `batch-place` carries no `bboLevel`, so BBO pricing uses single `place-order`
+    let order = BitgetWsPlaceOrderParams {
+        category: BitgetProductType::Linear,
         symbol: Ustr::from("BTCUSDT"),
-        side: BybitOrderSide::Buy,
-        order_type: BybitOrderType::Limit,
+        side: BitgetOrderSide::Buy,
+        order_type: BitgetOrderType::Limit,
         qty: "0.001".to_string(),
         is_leverage: None,
-        market_unit: None,
         price: None,
-        time_in_force: Some(BybitTimeInForce::Gtc),
+        time_in_force: Some(BitgetTimeInForce::Gtc),
         order_link_id: Some("linear-bbo-1".to_string()),
         reduce_only: None,
-        close_on_trigger: None,
-        trigger_price: None,
-        trigger_by: None,
-        trigger_direction: None,
-        tpsl_mode: None,
+        margin_mode: None,
         take_profit: None,
         stop_loss: None,
         tp_trigger_by: None,
         sl_trigger_by: None,
-        sl_trigger_price: None,
-        tp_trigger_price: None,
         sl_order_type: None,
         tp_order_type: None,
         sl_limit_price: None,
         tp_limit_price: None,
-        order_iv: None,
         smp_type: None,
-        mmp: None,
         position_idx: None,
-        bbo_side_type: Some(BybitBboSideType::Counterparty),
-        bbo_level: Some("5".to_string()),
-    }];
+        bbo_level: Some("counterparty5".to_string()),
+    };
 
-    let result = client.batch_place_orders(orders).await;
+    let result = client.place_order(order).await;
     result.unwrap();
 
     wait_until_async(
@@ -3144,10 +2833,11 @@ async fn test_batch_place_order_with_bbo_serializes_bbo_and_omits_price() {
 
     let msg = &messages[0];
     let args = msg.get("args").unwrap().as_array().unwrap();
-    let request = &args[0]["request"][0];
+    let request = &args[0];
 
-    assert_eq!(request["bboSideType"], "Counterparty");
-    assert_eq!(request["bboLevel"], "5");
+    assert_eq!(msg["topic"], "place-order");
+    assert_eq!(msg["category"], "usdt-futures");
+    assert_eq!(request["bboLevel"], "counterparty5");
     assert!(request.get("price").is_none());
 
     client.close().await.unwrap();
@@ -3155,14 +2845,15 @@ async fn test_batch_place_order_with_bbo_serializes_bbo_and_omits_price() {
 
 #[rstest]
 #[tokio::test]
-async fn test_batch_place_order_omits_order_iv_when_none() {
+async fn test_batch_amend_order_serializes_modify_args() {
     let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
+    let ws_url = format!("ws://{addr}/v3/ws/private");
 
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
+    let mut client = BitgetWebSocketClient::new_private(
+        BitgetEnvironment::Mainnet,
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
+        Some("test_api_passphrase".to_string()),
         Some(ws_url),
         20,
         TransportBackend::default(),
@@ -3177,124 +2868,44 @@ async fn test_batch_place_order_omits_order_iv_when_none() {
     )
     .await;
 
-    let orders = vec![BybitWsPlaceOrderParams {
-        category: BybitProductType::Linear,
-        symbol: Ustr::from("BTCUSDT"),
-        side: BybitOrderSide::Buy,
-        order_type: BybitOrderType::Limit,
-        qty: "0.001".to_string(),
-        is_leverage: None,
-        market_unit: None,
-        price: Some("50000.0".to_string()),
-        time_in_force: Some(BybitTimeInForce::Gtc),
+    let orders = vec![BitgetWsAmendOrderParams {
+        category: BitgetProductType::Linear,
+        symbol: Ustr::from("TSLAUSDT"),
+        order_id: Some("venue-amend".to_string()),
         order_link_id: Some("linear-test-1".to_string()),
-        reduce_only: None,
-        close_on_trigger: None,
-        trigger_price: None,
-        trigger_by: None,
-        trigger_direction: None,
-        tpsl_mode: None,
-        take_profit: None,
-        stop_loss: None,
-        tp_trigger_by: None,
-        sl_trigger_by: None,
-        sl_trigger_price: None,
-        tp_trigger_price: None,
-        sl_order_type: None,
-        tp_order_type: None,
-        sl_limit_price: None,
-        tp_limit_price: None,
-        order_iv: None,
-        smp_type: None,
-        mmp: None,
-        position_idx: None,
-        bbo_side_type: None,
-        bbo_level: None,
-    }];
-
-    let result = client.batch_place_orders(orders).await;
-    result.unwrap();
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let messages = state.captured_messages.lock().await;
-    assert_eq!(messages.len(), 1);
-
-    let msg_str = serde_json::to_string(&messages[0]).unwrap();
-    assert!(!msg_str.contains("orderIv"));
-    assert!(!msg_str.contains("\"mmp\""));
-
-    client.close().await.unwrap();
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_batch_amend_order_with_order_iv() {
-    let (addr, state) = start_test_server().await.unwrap();
-    let ws_url = format!("ws://{addr}/v5/private");
-
-    let mut client = BybitWebSocketClient::new_private(
-        BybitEnvironment::Mainnet,
-        Some("test_api_key".to_string()),
-        Some("test_api_secret".to_string()),
-        Some(ws_url),
-        20,
-        TransportBackend::default(),
-        None,
-    );
-
-    client.connect().await.unwrap();
-
-    wait_until_async(
-        || async { state.authenticated.load(Ordering::Relaxed) },
-        Duration::from_secs(5),
-    )
-    .await;
-
-    let orders = vec![BybitWsAmendOrderParams {
-        category: BybitProductType::Option,
-        symbol: Ustr::from("BTC-30JUN25-100000-C"),
-        order_id: Some("venue-option-amend".to_string()),
-        order_link_id: Some("option-test-1".to_string()),
         qty: Some("0.23".to_string()),
         price: Some("510.5".to_string()),
-        trigger_price: Some("505.5".to_string()),
-        take_profit: Some("530.5".to_string()),
-        stop_loss: Some("490.5".to_string()),
-        tp_trigger_by: Some(BybitTriggerType::MarkPrice),
-        sl_trigger_by: Some(BybitTriggerType::IndexPrice),
-        order_iv: Some("0.91".to_string()),
     }];
 
     let result = client.batch_amend_orders(orders).await;
     result.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_until_async(
+        || async { !state.captured_messages.lock().await.is_empty() },
+        Duration::from_secs(5),
+    )
+    .await;
 
     let messages = state.captured_messages.lock().await;
     assert_eq!(messages.len(), 1);
 
+    // Bitget batch args are the items themselves; the category goes on the envelope
     let msg = &messages[0];
+    assert_eq!(msg["op"], "trade");
+    assert_eq!(msg["topic"], "batch-modify");
+    assert_eq!(msg["category"], "usdt-futures");
     let args = msg.get("args").unwrap().as_array().unwrap();
     assert_eq!(args.len(), 1);
-    assert_eq!(args[0]["category"], "option");
     assert_eq!(
-        args[0]["request"][0],
+        args[0],
         json!({
-            "symbol": "BTC-30JUN25-100000-C",
-            "orderId": "venue-option-amend",
-            "orderLinkId": "option-test-1",
+            "symbol": "TSLAUSDT",
+            "orderId": "venue-amend",
+            "clientOid": "linear-test-1",
             "qty": "0.23",
             "price": "510.5",
-            "triggerPrice": "505.5",
-            "takeProfit": "530.5",
-            "stopLoss": "490.5",
-            "tpTriggerBy": "MarkPrice",
-            "slTriggerBy": "IndexPrice",
-            "orderIv": "0.91",
         })
     );
-    assert!(args[0]["request"][0].get("category").is_none());
 
     client.close().await.unwrap();
 }

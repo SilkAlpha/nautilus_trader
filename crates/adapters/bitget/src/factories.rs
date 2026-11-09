@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Factory functions for creating Bybit clients and components.
+//! Factory functions for creating Bitget clients and components.
 
 use std::{any::Any, cell::RefCell, rc::Rc};
 
@@ -33,53 +33,53 @@ use nautilus_model::{
 
 use crate::{
     common::{
-        consts::{BYBIT, BYBIT_VENUE},
-        enums::BybitProductType,
+        consts::{BITGET, BITGET_VENUE},
+        enums::BitgetProductType,
     },
-    config::{BybitDataClientConfig, BybitExecutionClientConfig},
-    data::BybitDataClient,
-    execution::BybitExecutionClient,
+    config::{BitgetDataClientConfig, BitgetExecutionClientConfig},
+    data::BitgetDataClient,
+    execution::BitgetExecutionClient,
 };
 
-impl ClientConfig for BybitDataClientConfig {
+impl ClientConfig for BitgetDataClientConfig {
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
-impl ClientConfig for BybitExecutionClientConfig {
+impl ClientConfig for BitgetExecutionClientConfig {
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
-/// Factory for creating Bybit data clients.
+/// Factory for creating Bitget data clients.
 #[derive(Debug, Clone)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
-pub struct BybitDataClientFactory;
+pub struct BitgetDataClientFactory;
 
-impl BybitDataClientFactory {
-    /// Creates a new [`BybitDataClientFactory`] instance.
+impl BitgetDataClientFactory {
+    /// Creates a new [`BitgetDataClientFactory`] instance.
     #[must_use]
     pub const fn new() -> Self {
         Self
     }
 }
 
-impl Default for BybitDataClientFactory {
+impl Default for BitgetDataClientFactory {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DataClientFactory for BybitDataClientFactory {
+impl DataClientFactory for BitgetDataClientFactory {
     fn create(
         &self,
         name: &str,
@@ -87,51 +87,51 @@ impl DataClientFactory for BybitDataClientFactory {
         _cache: CacheView,
         _clock: Rc<RefCell<dyn Clock>>,
     ) -> anyhow::Result<Box<dyn DataClient>> {
-        let bybit_config = config
+        let bitget_config = config
             .as_any()
-            .downcast_ref::<BybitDataClientConfig>()
+            .downcast_ref::<BitgetDataClientConfig>()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Invalid config type for BybitDataClientFactory. Expected BybitDataClientConfig, was {config:?}",
+                    "Invalid config type for BitgetDataClientFactory. Expected BitgetDataClientConfig, was {config:?}",
                 )
             })?
             .clone();
 
         let client_id = ClientId::from(name);
-        let client = BybitDataClient::new(client_id, bybit_config)?;
+        let client = BitgetDataClient::new(client_id, bitget_config)?;
         Ok(Box::new(client))
     }
 
     fn name(&self) -> &'static str {
-        BYBIT
+        BITGET
     }
 
     fn config_type(&self) -> &'static str {
-        "BybitDataClientConfig"
+        "BitgetDataClientConfig"
     }
 }
 
-/// Factory for creating Bybit execution clients.
+/// Factory for creating Bitget execution clients.
 #[derive(Debug, Default, Clone)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")
 )]
-pub struct BybitExecutionClientFactory;
+pub struct BitgetExecutionClientFactory;
 
-impl BybitExecutionClientFactory {
-    /// Creates a new [`BybitExecutionClientFactory`] instance.
+impl BitgetExecutionClientFactory {
+    /// Creates a new [`BitgetExecutionClientFactory`] instance.
     #[must_use]
     pub const fn new() -> Self {
         Self
     }
 }
 
-impl ExecutionClientFactory for BybitExecutionClientFactory {
+impl ExecutionClientFactory for BitgetExecutionClientFactory {
     fn create(
         &self,
         trader_id: TraderId,
@@ -140,27 +140,27 @@ impl ExecutionClientFactory for BybitExecutionClientFactory {
         cache: CacheView,
         _clock: Rc<RefCell<dyn Clock>>,
     ) -> anyhow::Result<Box<dyn ExecutionClient>> {
-        let bybit_config = config
+        let bitget_config = config
             .as_any()
-            .downcast_ref::<BybitExecutionClientConfig>()
+            .downcast_ref::<BitgetExecutionClientConfig>()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Invalid config type for BybitExecutionClientFactory. Expected BybitExecutionClientConfig, was {config:?}",
+                    "Invalid config type for BitgetExecutionClientFactory. Expected BitgetExecutionClientConfig, was {config:?}",
                 )
             })?
             .clone();
 
         // Default to Linear if product_types is empty (matches execution client behavior)
-        let product_types = if bybit_config.product_types.is_empty() {
-            vec![BybitProductType::Linear]
+        let product_types = if bitget_config.product_types.is_empty() {
+            vec![BitgetProductType::Linear]
         } else {
-            bybit_config.product_types.clone()
+            bitget_config.product_types.clone()
         };
 
         let has_derivatives = product_types.iter().any(|t| {
             matches!(
                 t,
-                BybitProductType::Linear | BybitProductType::Inverse | BybitProductType::Option
+                BitgetProductType::Linear | BitgetProductType::Inverse | BitgetProductType::Option
             )
         });
 
@@ -170,21 +170,21 @@ impl ExecutionClientFactory for BybitExecutionClientFactory {
             AccountType::Cash
         };
 
-        // Bybit uses netting for derivatives, hedging for spot
+        // Bitget uses netting for derivatives, hedging for spot
         let oms_type = if has_derivatives {
             OmsType::Netting
         } else {
             OmsType::Hedging
         };
 
-        let account_id = bybit_config
+        let account_id = bitget_config
             .account_id
-            .unwrap_or_else(|| AccountId::from("BYBIT-001"));
+            .unwrap_or_else(|| AccountId::from("BITGET-001"));
 
         let core = ExecutionClientCore::new(
             trader_id,
             ClientId::from(name),
-            *BYBIT_VENUE,
+            *BITGET_VENUE,
             oms_type,
             account_id,
             account_type,
@@ -192,17 +192,17 @@ impl ExecutionClientFactory for BybitExecutionClientFactory {
             cache,
         );
 
-        let client = BybitExecutionClient::new(core, bybit_config)?;
+        let client = BitgetExecutionClient::new(core, bitget_config)?;
 
         Ok(Box::new(client))
     }
 
     fn name(&self) -> &'static str {
-        BYBIT
+        BITGET
     }
 
     fn config_type(&self) -> &'static str {
-        "BybitExecutionClientConfig"
+        "BitgetExecutionClientConfig"
     }
 }
 
@@ -218,34 +218,35 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::{common::enums::BybitProductType, config::BybitExecutionClientConfig};
+    use crate::{common::enums::BitgetProductType, config::BitgetExecutionClientConfig};
 
     #[rstest]
-    fn test_bybit_execution_client_factory_creation() {
-        let factory = BybitExecutionClientFactory::new();
-        assert_eq!(factory.name(), BYBIT);
-        assert_eq!(factory.config_type(), "BybitExecutionClientConfig");
+    fn test_bitget_execution_client_factory_creation() {
+        let factory = BitgetExecutionClientFactory::new();
+        assert_eq!(factory.name(), BITGET);
+        assert_eq!(factory.config_type(), "BitgetExecutionClientConfig");
     }
 
     #[rstest]
-    fn test_bybit_exec_client_config_implements_client_config() {
-        let config = BybitExecutionClientConfig::default();
+    fn test_bitget_exec_client_config_implements_client_config() {
+        let config = BitgetExecutionClientConfig::default();
 
         let boxed_config: Box<dyn ClientConfig> = Box::new(config);
         let downcasted = boxed_config
             .as_any()
-            .downcast_ref::<BybitExecutionClientConfig>();
+            .downcast_ref::<BitgetExecutionClientConfig>();
 
         assert!(downcasted.is_some());
     }
 
     #[rstest]
-    fn test_bybit_execution_client_factory_creates_client_for_spot() {
-        let factory = BybitExecutionClientFactory::new();
-        let config = BybitExecutionClientConfig {
-            product_types: vec![BybitProductType::Spot],
+    fn test_bitget_execution_client_factory_creates_client_for_spot() {
+        let factory = BitgetExecutionClientFactory::new();
+        let config = BitgetExecutionClientConfig {
+            product_types: vec![BitgetProductType::Spot],
             api_key: Some("test_key".into()),
             api_secret: Some("test_secret".into()),
+            api_passphrase: Some("test_passphrase".into()),
             ..Default::default()
         };
 
@@ -253,7 +254,7 @@ mod tests {
 
         let result = factory.create(
             TraderId::from("TRADER-001"),
-            "BYBIT-TEST",
+            "BITGET-TEST",
             &config,
             cache.into(),
             Rc::new(RefCell::new(VirtualClock::new())),
@@ -261,16 +262,17 @@ mod tests {
         assert!(result.is_ok());
 
         let client = result.unwrap();
-        assert_eq!(client.client_id(), ClientId::from("BYBIT-TEST"));
+        assert_eq!(client.client_id(), ClientId::from("BITGET-TEST"));
     }
 
     #[rstest]
-    fn test_bybit_execution_client_factory_creates_client_for_derivatives() {
-        let factory = BybitExecutionClientFactory::new();
-        let config = BybitExecutionClientConfig {
-            product_types: vec![BybitProductType::Linear, BybitProductType::Inverse],
+    fn test_bitget_execution_client_factory_creates_client_for_derivatives() {
+        let factory = BitgetExecutionClientFactory::new();
+        let config = BitgetExecutionClientConfig {
+            product_types: vec![BitgetProductType::Linear, BitgetProductType::Inverse],
             api_key: Some("test_key".into()),
             api_secret: Some("test_secret".into()),
+            api_passphrase: Some("test_passphrase".into()),
             ..Default::default()
         };
 
@@ -278,7 +280,7 @@ mod tests {
 
         let result = factory.create(
             TraderId::from("TRADER-001"),
-            "BYBIT-DERIV",
+            "BITGET-DERIV",
             &config,
             cache.into(),
             Rc::new(RefCell::new(VirtualClock::new())),
@@ -287,15 +289,15 @@ mod tests {
     }
 
     #[rstest]
-    fn test_bybit_execution_client_factory_rejects_wrong_config_type() {
-        let factory = BybitExecutionClientFactory::new();
-        let wrong_config = BybitDataClientConfig::default();
+    fn test_bitget_execution_client_factory_rejects_wrong_config_type() {
+        let factory = BitgetExecutionClientFactory::new();
+        let wrong_config = BitgetDataClientConfig::default();
 
         let cache = Rc::new(RefCell::new(Cache::default()));
 
         let result = factory.create(
             TraderId::from("TRADER-001"),
-            "BYBIT-TEST",
+            "BITGET-TEST",
             &wrong_config,
             cache.into(),
             Rc::new(RefCell::new(VirtualClock::new())),

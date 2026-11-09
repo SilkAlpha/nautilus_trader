@@ -13,9 +13,9 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Bybit-specific custom data types.
+//! Bitget-specific custom data types.
 //!
-//! These types carry Bybit domain data through the Nautilus data engine as
+//! These types carry Bitget domain data through the Nautilus data engine as
 //! [`CustomData`](nautilus_model::data::CustomData).
 
 use nautilus_core::UnixNanos;
@@ -28,23 +28,23 @@ use nautilus_model::{
 #[cfg(feature = "arrow")]
 use nautilus_serialization::arrow_custom_data;
 
-/// Bybit public liquidation from the `allLiquidation` WebSocket stream.
+/// Bitget public liquidation from the `liquidation` WebSocket stream.
 ///
-/// Bybit publishes this stream for linear and inverse contracts only.
+/// Bitget publishes this stream for futures (`usdt-futures`, `coin-futures`) only.
 #[cfg_attr(
     feature = "arrow",
-    arrow_custom_data(pyo3, stub_module = "nautilus_trader.adapters.bybit")
+    arrow_custom_data(pyo3, stub_module = "nautilus_trader.adapters.bitget")
 )]
-#[custom_data(pyo3, stub_module = "nautilus_trader.adapters.bybit")]
-pub struct BybitLiquidation {
+#[custom_data(pyo3, stub_module = "nautilus_trader.adapters.bitget")]
+pub struct BitgetLiquidation {
     /// The instrument for this liquidation event.
     pub instrument_id: InstrumentId,
-    /// The side of the liquidated position (Bybit `Buy` means a long position was liquidated).
+    /// The side of the liquidated position (Bitget `side`, mapped like the order side).
     #[custom_data_field(native_enum)]
     pub position_side: PositionSide,
-    /// The bankruptcy price of the liquidated position.
+    /// The liquidation price (Bitget `price`).
     pub bankruptcy_price: Price,
-    /// The executed liquidation size.
+    /// The liquidated size (Bitget `amount`).
     pub quantity: Quantity,
     /// UNIX timestamp (nanoseconds) when the data event occurred.
     pub ts_event: UnixNanos,
@@ -52,18 +52,18 @@ pub struct BybitLiquidation {
     pub ts_init: UnixNanos,
 }
 
-/// Registers Bybit custom data types.
+/// Registers Bitget custom data types.
 ///
 /// Safe to call multiple times (idempotent via internal `Once` guards).
-pub fn register_bybit_custom_data() {
+pub fn register_bitget_custom_data() {
     #[cfg(feature = "arrow")]
     {
-        nautilus_serialization::ensure_custom_data_registered::<BybitLiquidation>();
+        nautilus_serialization::ensure_custom_data_registered::<BitgetLiquidation>();
     }
 
     #[cfg(not(feature = "arrow"))]
     {
-        let _ = nautilus_model::data::ensure_custom_data_json_registered::<BybitLiquidation>();
+        let _ = nautilus_model::data::ensure_custom_data_json_registered::<BitgetLiquidation>();
     }
 }
 
@@ -74,9 +74,9 @@ mod tests {
 
     use super::*;
 
-    fn liquidation() -> BybitLiquidation {
-        BybitLiquidation::new(
-            InstrumentId::from("BTCUSDT-LINEAR.BYBIT"),
+    fn liquidation() -> BitgetLiquidation {
+        BitgetLiquidation::new(
+            InstrumentId::from("BTCUSDT-PERP.BITGET"),
             PositionSide::Short,
             Price::from("97410.5"),
             Quantity::from("1.250"),
@@ -86,32 +86,32 @@ mod tests {
     }
 
     #[rstest]
-    fn test_register_bybit_custom_data_is_idempotent() {
-        register_bybit_custom_data();
-        register_bybit_custom_data();
+    fn test_register_bitget_custom_data_is_idempotent() {
+        register_bitget_custom_data();
+        register_bitget_custom_data();
     }
 
     #[rstest]
-    fn test_register_bybit_custom_data_registers_json_deserializer() {
-        register_bybit_custom_data();
+    fn test_register_bitget_custom_data_registers_json_deserializer() {
+        register_bitget_custom_data();
 
-        let err = register_custom_data_json::<BybitLiquidation>().unwrap_err();
+        let err = register_custom_data_json::<BitgetLiquidation>().unwrap_err();
 
         assert_eq!(
             err.to_string(),
-            "Custom data type \"BybitLiquidation\" is already registered for JSON",
+            "Custom data type \"BitgetLiquidation\" is already registered for JSON",
         );
     }
 
     #[rstest]
-    fn test_bybit_liquidation_json_round_trip() {
+    fn test_bitget_liquidation_json_round_trip() {
         let original = liquidation();
 
         let value: serde_json::Value = serde_json::from_str(&original.to_json().unwrap()).unwrap();
-        let restored = <BybitLiquidation as CustomDataTrait>::from_json(value).unwrap();
+        let restored = <BitgetLiquidation as CustomDataTrait>::from_json(value).unwrap();
         let restored = restored
             .as_any()
-            .downcast_ref::<BybitLiquidation>()
+            .downcast_ref::<BitgetLiquidation>()
             .unwrap();
 
         assert_eq!(restored, &original);
@@ -125,11 +125,11 @@ mod tests {
 
     #[cfg(feature = "arrow")]
     #[rstest]
-    fn test_bybit_liquidation_arrow_schema_uses_native_types() {
+    fn test_bitget_liquidation_arrow_schema_uses_native_types() {
         use arrow::datatypes::DataType;
         use nautilus_serialization::arrow::ArrowSchemaProvider;
 
-        let schema = BybitLiquidation::get_schema(None);
+        let schema = BitgetLiquidation::get_schema(None);
         let names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
 
         assert_eq!(

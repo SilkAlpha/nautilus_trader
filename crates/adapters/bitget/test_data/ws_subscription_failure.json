@@ -1,6 +1,6 @@
 {
-  "success": false,
-  "ret_msg": "Invalid topic: invalid.topic.BTCUSDT",
-  "conn_id": "cejreaspqfm9se7usbrg-2xh",
-  "op": "subscribe"
+  "event": "error",
+  "code": 30001,
+  "msg": "{\"instType\":\"usdt-futures\",\"symbol\":\"NOSUCHUSDT\",\"topic\":\"ticker\"} doesn't exist",
+  "connId": "0aa7eefffe582cd1-00004966-00c18c83-2ceed3a4cbf67452-ad107b60"
 }

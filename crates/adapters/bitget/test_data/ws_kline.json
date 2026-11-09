@@ -1,20 +1,21 @@
 {
-  "topic": "kline.5.BTCUSDT",
+  "action": "update",
+  "arg": {
+    "instType": "usdt-futures",
+    "topic": "kline",
+    "symbol": "BTCUSDT",
+    "interval": "1m"
+  },
   "data": [
     {
-      "start": 1672324800000,
-      "end": 1672325099999,
-      "interval": "5",
-      "open": "16649.5",
-      "close": "16677",
-      "high": "16677",
-      "low": "16608",
-      "volume": "2.081",
-      "turnover": "34666.4005",
-      "confirm": false,
-      "timestamp": 1672324988882
+      "start": "1794192840000",
+      "open": "75228.8",
+      "close": "75242.8",
+      "high": "75249.6",
+      "low": "75228.8",
+      "volume": "7.7891",
+      "turnover": "586035.02579"
     }
   ],
-  "ts": 1672324988882,
-  "type": "snapshot"
+  "ts": 1794192891284
 }

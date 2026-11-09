@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! HTTP client bindings for the Bybit adapter.
+//! HTTP client bindings for the Bitget adapter.
 
 pub mod client;
 pub mod error;

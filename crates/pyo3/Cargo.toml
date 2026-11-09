@@ -25,6 +25,7 @@ default = []
 arrow = [
   "nautilus-betfair?/arrow",
   "nautilus-binance/arrow",
+  "nautilus-bitget/arrow",
   "nautilus-bybit/arrow",
   "nautilus-deribit/arrow",
   "nautilus-hyperliquid/arrow",
@@ -47,6 +48,7 @@ extension-module = [
   "nautilus-coinapi?/extension-module",
   "nautilus-coinbase/extension-module",
   "nautilus-blockchain?/extension-module",
+  "nautilus-bitget/extension-module",
   "nautilus-bybit/extension-module",
   "nautilus-common/extension-module",
   "nautilus-core/extension-module",
@@ -84,6 +86,7 @@ high-precision = [
   "nautilus-betfair?/high-precision",
   "nautilus-binance/high-precision",
   "nautilus-coinbase/high-precision",
+  "nautilus-bitget/high-precision",
   "nautilus-bybit/high-precision",
   "nautilus-databento/high-precision",
   "nautilus-deribit/high-precision",
@@ -144,6 +147,7 @@ nautilus-binance = { workspace = true, features = ["python"] }
 nautilus-blockchain = { workspace = true, features = [
   "python",
 ], optional = true }
+nautilus-bitget = { workspace = true, features = ["python"] }
 nautilus-bybit = { workspace = true, features = ["python"] }
 nautilus-coinapi = { workspace = true, optional = true }
 nautilus-coinbase = { workspace = true, features = ["python"] }

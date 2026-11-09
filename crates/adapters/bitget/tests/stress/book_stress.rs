@@ -16,7 +16,7 @@
 //! Mainnet market-data fault injection with an independent decimal order book oracle.
 //!
 //! Run with adapter credentials unset:
-//! `cargo test -p nautilus-bybit --features examples --test bybit-book-stress -- --timeout 10 --rounds 21`
+//! `cargo test -p nautilus-bitget --features examples --test bitget-book-stress -- --timeout 10 --rounds 21`
 //!
 //! Scenarios, selected with `--scenario`:
 //!
@@ -26,7 +26,8 @@
 //! - `boundaries`: probes replacement cuts, retry exhaustion, rejected subscriptions, and shutdown
 //!   during reconnect.
 //!
-//! No orders are submitted. Books use the linear socket at the default depth of 50. Every emitted
+//! No orders are submitted. Books use the `usdt-futures` public socket on the full-depth `books`
+//! channel, Bitget's only sequenced incremental book (`books50` is a snapshot per push). Every emitted
 //! batch passes through the shared `BookStreamChecker` and is verified against a reference book
 //! rebuilt from the raw frames the proxy relays; a session fails unless every snapshot episode
 //! was verified.
@@ -37,21 +38,25 @@ mod stress;
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    num::NonZeroUsize,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use nautilus_bybit::{
-    common::{consts::BYBIT_CLIENT_ID, enums::BybitProductType, parse::extract_raw_symbol},
-    config::BybitDataClientConfig,
-    data::BybitDataClient,
+use nautilus_bitget::{
+    common::{consts::BITGET_CLIENT_ID, enums::BitgetProductType, parse::extract_raw_symbol},
+    config::BitgetDataClientConfig,
+    data::BitgetDataClient,
 };
-use nautilus_common::clients::DataClient;
+use nautilus_common::{
+    clients::DataClient,
+    messages::data::{SubscribeBookDeltas, UnsubscribeBookDeltas},
+};
 use nautilus_live::book::conformance::BookStreamChecker;
 use nautilus_model::{
     data::OrderBookDeltas,
-    identifiers::{ClientId, InstrumentId},
+    identifiers::{ClientId, InstrumentId, Venue},
 };
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -62,23 +67,27 @@ use stress::{
 use tokio_tungstenite::tungstenite::Message;
 
 const SYMBOLS: [&str; 6] = [
-    "BTCUSDT-LINEAR",
-    "ETHUSDT-LINEAR",
-    "SOLUSDT-LINEAR",
-    "XRPUSDT-LINEAR",
-    "DOGEUSDT-LINEAR",
-    "BNBUSDT-LINEAR",
+    "BTCUSDT-PERP",
+    "ETHUSDT-PERP",
+    "SOLUSDT-PERP",
+    "XRPUSDT-PERP",
+    "DOGEUSDT-PERP",
+    "BNBUSDT-PERP",
 ];
 
 const LINEAR: &str = "linear";
-const LINEAR_ENDPOINT: &str = "bybit-linear-data-streams";
-const DEPTH: usize = 50;
+const LINEAR_ENDPOINT: &str = "bitget-linear-data-streams";
+// Full-depth `books` channel (snapshot, then `update` frames chained by `seq`/`pseq`)
+const DEPTH: usize = 1000;
+// Levels compared with the oracle: deep `books` levels can sit off the price tick (DOGEUSDT
+// 0.063754 with a 0.00001 tick), which the adapter rounds to instrument precision
+const VERIFY_DEPTH: usize = 50;
 
-type BybitSession = Session<Bybit>;
+type BitgetSession = Session<Bitget>;
 
 fn main() {
-    stress::run::<Bybit, _, _>(|args| async move {
-        let ids = SYMBOLS.map(|s| InstrumentId::from(format!("{s}.BYBIT")));
+    stress::run::<Bitget, _, _>(|args| async move {
+        let ids = SYMBOLS.map(|s| InstrumentId::from(format!("{s}.BITGET")));
 
         match args.scenario() {
             "churn" => churn(&args, &ids).await,
@@ -92,7 +101,7 @@ fn main() {
 
 async fn churn(args: &StressArgs, ids: &[InstrumentId; 6]) -> String {
     let mut total = 0;
-    let mut session = BybitSession::connect(args).await;
+    let mut session = BitgetSession::connect(args).await;
     subscribe_all(&mut session, ids).await;
     recover_without_reconnect(&mut session, ids, usize::from(args.timeout_secs() > 0)).await;
 
@@ -146,7 +155,7 @@ async fn initial(args: &StressArgs, ids: &[InstrumentId; 6]) -> String {
     let mut total = 0;
 
     for round in 0..args.rounds() {
-        let mut session = BybitSession::connect(args).await;
+        let mut session = BitgetSession::connect(args).await;
 
         for id in ids {
             let mut fault = session.fault(id);
@@ -202,7 +211,7 @@ async fn initial(args: &StressArgs, ids: &[InstrumentId; 6]) -> String {
 
 async fn turnover(args: &StressArgs, ids: &[InstrumentId; 6]) -> String {
     let timeout = args.timeout_secs();
-    let mut session = BybitSession::connect(args).await;
+    let mut session = BitgetSession::connect(args).await;
     silence_initial_snapshots(&mut session, ids, [ids[0], ids[3]], timeout).await;
 
     for round in 0..args.rounds() {
@@ -266,7 +275,7 @@ async fn turnover(args: &StressArgs, ids: &[InstrumentId; 6]) -> String {
 
 async fn boundaries(args: &StressArgs, ids: &[InstrumentId; 6]) -> String {
     let timeout = args.timeout_secs();
-    let mut session = BybitSession::connect(args).await;
+    let mut session = BitgetSession::connect(args).await;
 
     for id in ids {
         session.subscribe(*id);
@@ -417,13 +426,13 @@ async fn boundaries(args: &StressArgs, ids: &[InstrumentId; 6]) -> String {
 }
 
 // Forces a gap on every book whose replacement snapshot is dropped, then reconnects
-async fn reconnect_during_recoveries(session: &mut BybitSession, ids: &[InstrumentId]) {
+async fn reconnect_during_recoveries(session: &mut BitgetSession, ids: &[InstrumentId]) {
     drop_recovery_snapshots(session, ids, 1, "simultaneous recoveries lose snapshots").await;
     reconnect(session);
     session.healthy(ids).await;
 }
 
-async fn reconnect_while_held(session: &mut BybitSession, ids: &[InstrumentId]) {
+async fn reconnect_while_held(session: &mut BitgetSession, ids: &[InstrumentId]) {
     for id in ids {
         session.fault(id).hold = true;
     }
@@ -442,7 +451,7 @@ async fn reconnect_while_held(session: &mut BybitSession, ids: &[InstrumentId]) 
 
 // Unsubscribes two books while their replacement snapshots are held, then resubscribes them
 async fn unsubscribe_during_recovery(
-    session: &mut BybitSession,
+    session: &mut BitgetSession,
     ids: &[InstrumentId],
     targets: [InstrumentId; 2],
 ) {
@@ -503,7 +512,7 @@ async fn unsubscribe_during_recovery(
 }
 
 // Cuts the first two connections after a reconnect before their snapshots arrive
-async fn cut_reconnects(session: &mut BybitSession, ids: &[InstrumentId]) {
+async fn cut_reconnects(session: &mut BitgetSession, ids: &[InstrumentId]) {
     session.proxy().cut(Some(LINEAR), FrameKind::Snapshot, 2);
     let cuts = session.proxy().cuts();
     reconnect(session);
@@ -518,7 +527,7 @@ async fn cut_reconnects(session: &mut BybitSession, ids: &[InstrumentId]) {
 }
 
 // Without deadlines, each book recovers from the first update after its dropped replay snapshot
-async fn drop_replay_snapshots(session: &mut BybitSession, ids: &[InstrumentId]) {
+async fn drop_replay_snapshots(session: &mut BitgetSession, ids: &[InstrumentId]) {
     let before = ids
         .iter()
         .map(|id| {
@@ -541,7 +550,7 @@ async fn drop_replay_snapshots(session: &mut BybitSession, ids: &[InstrumentId])
 }
 
 // Freezes traffic without closing the socket, then requires every book to stream again
-async fn freeze_traffic(session: &mut BybitSession, ids: &[InstrumentId]) {
+async fn freeze_traffic(session: &mut BitgetSession, ids: &[InstrumentId]) {
     let freeze = Duration::from_secs(40);
     let before = ids
         .iter()
@@ -561,7 +570,7 @@ async fn freeze_traffic(session: &mut BybitSession, ids: &[InstrumentId]) {
 
 // Forces a gap on every book and drops its next `drops` snapshots
 async fn drop_recovery_snapshots(
-    session: &mut BybitSession,
+    session: &mut BitgetSession,
     ids: &[InstrumentId],
     drops: usize,
     label: &str,
@@ -585,7 +594,7 @@ async fn drop_recovery_snapshots(
         .await;
 }
 
-async fn subscribe_all(session: &mut BybitSession, ids: &[InstrumentId]) {
+async fn subscribe_all(session: &mut BitgetSession, ids: &[InstrumentId]) {
     for id in ids {
         session.subscribe(*id);
     }
@@ -596,7 +605,7 @@ async fn subscribe_all(session: &mut BybitSession, ids: &[InstrumentId]) {
 // Holds two books' initial snapshots past the snapshot deadline, which starts recovery unless
 // deadlines are disabled
 async fn silence_initial_snapshots(
-    session: &mut BybitSession,
+    session: &mut BitgetSession,
     ids: &[InstrumentId],
     quiet: [InstrumentId; 2],
     timeout: u64,
@@ -638,7 +647,11 @@ async fn silence_initial_snapshots(
 
 // Forces gaps whose replacement snapshots are dropped `drops` times, then checks that each book
 // recovered through its own resubscribes without a reconnect
-async fn recover_without_reconnect(session: &mut BybitSession, ids: &[InstrumentId], drops: usize) {
+async fn recover_without_reconnect(
+    session: &mut BitgetSession,
+    ids: &[InstrumentId],
+    drops: usize,
+) {
     let connections_before = session.proxy().connections(LINEAR);
 
     let before = ids
@@ -687,21 +700,21 @@ async fn recover_without_reconnect(session: &mut BybitSession, ids: &[Instrument
 // Reconnects the linear socket, requiring every book to resync from its successor, or from the
 // connection after any pending cuts. A venue closure can leave a reconnect in flight; the request
 // then joins it, and the proxy counts that connection only once it reaches the venue.
-fn reconnect(session: &mut BybitSession) {
+fn reconnect(session: &mut BitgetSession) {
     let pending = session.proxy().cuts_pending();
     let expected = session.proxy().connections(LINEAR) + 1 + pending;
     session.venue_mut().expected_epoch = expected;
     session.reconnect(LINEAR_ENDPOINT);
 }
 
-struct Bybit {
-    wire: BybitWire,
+struct Bitget {
+    wire: BitgetWire,
     expected_epoch: usize,
     epochs: HashMap<InstrumentId, usize>,
 }
 
-impl StressVenue for Bybit {
-    const NAME: &'static str = "bybit";
+impl StressVenue for Bitget {
+    const NAME: &'static str = "bitget";
     const SCENARIOS: &'static [&'static str] = &["churn", "initial", "turnover", "boundaries"];
     const ROUNDS: usize = 21;
     const SEQUENCED: bool = true;
@@ -714,21 +727,21 @@ impl StressVenue for Bybit {
 
     fn new(_args: &StressArgs) -> Self {
         Self {
-            wire: BybitWire::default(),
+            wire: BitgetWire::default(),
             expected_epoch: 1,
             epochs: HashMap::new(),
         }
     }
 
     fn client_id(&self) -> ClientId {
-        *BYBIT_CLIENT_ID
+        *BITGET_CLIENT_ID
     }
 
     fn routes(&self) -> Vec<Route> {
         vec![Route {
             name: LINEAR,
-            path: "/v5/public/linear",
-            upstream: "wss://stream.bybit.com/v5/public/linear".to_string(),
+            path: "/v3/ws/public",
+            upstream: "wss://ws.bitget.com/v3/ws/public".to_string(),
             endpoint: LINEAR_ENDPOINT,
             headers: &[],
         }]
@@ -739,16 +752,19 @@ impl StressVenue for Bybit {
     }
 
     fn client(&self, proxy: SocketAddr, args: &StressArgs) -> anyhow::Result<Box<dyn DataClient>> {
-        let config = BybitDataClientConfig {
-            product_types: vec![BybitProductType::Linear],
-            base_url_ws_public: Some(format!("ws://{proxy}/v5/public/linear")),
+        let config = BitgetDataClientConfig {
+            product_types: vec![BitgetProductType::Linear],
+            base_url_ws_public: Some(format!("ws://{proxy}/v3/ws/public")),
             update_instruments_interval_mins: None,
             instrument_poll_interval_secs: None,
             book_snapshot_timeout_secs: args.timeout_secs(),
-            ..BybitDataClientConfig::default()
+            ..BitgetDataClientConfig::default()
         };
 
-        Ok(Box::new(BybitDataClient::new(*BYBIT_CLIENT_ID, config)?))
+        Ok(Box::new(FullDepth(BitgetDataClient::new(
+            *BITGET_CLIENT_ID,
+            config,
+        )?)))
     }
 
     fn key(&self, instrument_id: &InstrumentId) -> String {
@@ -763,7 +779,7 @@ impl StressVenue for Bybit {
             .find(&self.key(&id), deltas.sequence, deltas.ts_event.as_u64())
             .expect("wire oracle at emitted sequence and timestamp");
 
-        if let Err(violation) = checker.verify(id, DEPTH, &view.book.bids, &view.book.asks) {
+        if let Err(violation) = checker.verify(id, VERIFY_DEPTH, &view.book.bids, &view.book.asks) {
             panic!(
                 "wire oracle mismatch {id} seq={} ts={}: {violation}",
                 deltas.sequence, deltas.ts_event
@@ -781,13 +797,13 @@ impl StressVenue for Bybit {
 }
 
 #[derive(Clone, Default)]
-struct BybitWire {
+struct BitgetWire {
     views: WireViews,
 }
 
-impl WireCodec for BybitWire {
+impl WireCodec for BitgetWire {
     fn open(&self, route: &Route, number: usize) -> Box<dyn WireConnection> {
-        Box::new(BybitConnection {
+        Box::new(BitgetConnection {
             views: self.views.clone(),
             route: route.name,
             epoch: number,
@@ -796,14 +812,14 @@ impl WireCodec for BybitWire {
     }
 }
 
-struct BybitConnection {
+struct BitgetConnection {
     views: WireViews,
     route: &'static str,
     epoch: usize,
     books: HashMap<String, WireBook>,
 }
 
-impl WireConnection for BybitConnection {
+impl WireConnection for BitgetConnection {
     fn upstream(&mut self, message: &Message) -> Upstream {
         let Message::Text(text) = message else {
             return Upstream::Other;
@@ -813,32 +829,37 @@ impl WireConnection for BybitConnection {
             return Upstream::Other;
         };
 
-        if frame["success"] == false {
+        if frame["event"] == "error" {
             eprintln!("Venue error on route {}: {frame}", self.route);
         }
 
-        if frame["op"] == "unsubscribe"
-            && frame["success"] == true
-            && let Some(key) = frame["req_id"].as_str().and_then(book_key)
+        if frame["event"] == "unsubscribe"
+            && let Some(key) = book_key(&frame["arg"])
         {
             return Upstream::Unsubscribed(key.to_string());
         }
 
-        let Some(key) = frame["topic"].as_str().and_then(book_key) else {
+        if frame.get("event").is_some() {
+            return Upstream::Other;
+        }
+
+        let Some(key) = book_key(&frame["arg"]) else {
             return Upstream::Other;
         };
 
+        // Bitget sends book data as a one-item list
         let key = key.to_string();
-        let snapshot = frame["type"] == "snapshot";
+        let data = &frame["data"][0];
+        let snapshot = frame["action"] == "snapshot";
         let book = self.books.entry(key.clone()).or_default();
-        apply(book, &frame["data"], snapshot);
+        apply(book, data, snapshot);
         self.views.record(
             &key,
             WireView {
                 epoch: self.epoch,
-                sequence: frame["data"]["seq"].as_u64().unwrap(),
-                timestamp: frame["ts"].as_u64().unwrap() * 1_000_000,
-                book: book.top(DEPTH),
+                sequence: data["seq"].as_u64().unwrap(),
+                timestamp: data["ts"].as_str().unwrap().parse::<u64>().unwrap() * 1_000_000,
+                book: book.top(VERIFY_DEPTH),
             },
         );
 
@@ -862,7 +883,7 @@ impl WireConnection for BybitConnection {
             .and_then(|frame| {
                 frame["args"].as_array().map(|args| {
                     args.iter()
-                        .filter_map(|arg| arg.as_str().and_then(book_key))
+                        .filter_map(book_key)
                         .map(ToString::to_string)
                         .collect()
                 })
@@ -881,20 +902,20 @@ impl WireConnection for BybitConnection {
             return None;
         }
 
-        let topic = frame["args"][0].as_str()?;
-        let key = book_key(topic)?.to_string();
+        let arg = &frame["args"][0];
+        let key = book_key(arg)?.to_string();
+        // Bitget rejects a subscription with an error frame echoing the arg inside `msg`
         let reply = json!({
-            "success": false,
-            "ret_msg": format!("error:handler not found,topic:{topic}"),
-            "conn_id": "stress",
-            "req_id": frame["req_id"],
-            "op": "subscribe",
+            "event": "error",
+            "code": 30001,
+            "msg": format!("{arg} doesn't exist"),
+            "connId": "stress",
         });
 
         Some((key, Message::Text(reply.to_string().into())))
     }
 
-    // Moves a delta's update ID off its successor, which the adapter must treat as a gap
+    // Moves an update's `pseq` off its predecessor's `seq`, which the adapter must treat as a gap
     fn corrupt(&mut self, message: &mut Message, _key: &str, kind: FrameKind) -> bool {
         let Message::Text(text) = message else {
             return false;
@@ -905,18 +926,74 @@ impl WireConnection for BybitConnection {
         }
 
         let mut frame = serde_json::from_str::<Value>(text).unwrap();
-        frame["data"]["u"] = json!(i64::MAX);
+        frame["data"][0]["pseq"] = json!(i64::MAX);
         *message = Message::Text(frame.to_string().into());
         true
     }
 }
 
-// Returns the symbol of an order book topic, such as `BTCUSDT` for `orderbook.50.BTCUSDT`
-fn book_key(topic: &str) -> Option<&str> {
-    topic
-        .strip_prefix("orderbook.")
-        .and_then(|rest| rest.split_once('.'))
-        .map(|(_, symbol)| symbol)
+// Subscribes every book on the full-depth `books` channel: Bitget's `books50` default is a
+// snapshot per push and carries no `seq`/`pseq` chain to break
+struct FullDepth(BitgetDataClient);
+
+#[async_trait::async_trait(?Send)]
+impl DataClient for FullDepth {
+    fn client_id(&self) -> ClientId {
+        self.0.client_id()
+    }
+
+    fn venue(&self) -> Option<Venue> {
+        self.0.venue()
+    }
+
+    fn start(&mut self) -> anyhow::Result<()> {
+        self.0.start()
+    }
+
+    fn stop(&mut self) -> anyhow::Result<()> {
+        self.0.stop()
+    }
+
+    fn reset(&mut self) -> anyhow::Result<()> {
+        self.0.reset()
+    }
+
+    fn dispose(&mut self) -> anyhow::Result<()> {
+        self.0.dispose()
+    }
+
+    fn is_connected(&self) -> bool {
+        self.0.is_connected()
+    }
+
+    fn is_disconnected(&self) -> bool {
+        self.0.is_disconnected()
+    }
+
+    async fn connect(&mut self) -> anyhow::Result<()> {
+        self.0.connect().await
+    }
+
+    async fn disconnect(&mut self) -> anyhow::Result<()> {
+        self.0.disconnect().await
+    }
+
+    fn subscribe_book_deltas(&mut self, mut cmd: SubscribeBookDeltas) -> anyhow::Result<()> {
+        cmd.depth = NonZeroUsize::new(DEPTH);
+        self.0.subscribe_book_deltas(cmd)
+    }
+
+    fn unsubscribe_book_deltas(&mut self, cmd: &UnsubscribeBookDeltas) -> anyhow::Result<()> {
+        self.0.unsubscribe_book_deltas(cmd)
+    }
+}
+
+// Returns the symbol of a full-depth book `arg`, such as `BTCUSDT` for
+// `{"instType":"usdt-futures","topic":"books","symbol":"BTCUSDT"}`
+fn book_key(arg: &Value) -> Option<&str> {
+    (arg["topic"] == "books")
+        .then(|| arg["symbol"].as_str())
+        .flatten()
 }
 
 fn apply(book: &mut WireBook, data: &Value, snapshot: bool) {
@@ -980,11 +1057,11 @@ fn check_wire_oracle() {
     }
 
     {
-        let wire = BybitWire::default();
+        let wire = BitgetWire::default();
 
         let route = Route {
             name: LINEAR,
-            path: "/v5/public/linear",
+            path: "/v3/ws/public",
             upstream: String::new(),
             endpoint: LINEAR_ENDPOINT,
             headers: &[],
@@ -993,29 +1070,27 @@ fn check_wire_oracle() {
         let mut connection = wire.open(&route, 3);
         let text = |value: Value| Message::Text(value.to_string().into());
 
+        let arg = |topic: &str, symbol: &str| json!({"instType": "usdt-futures", "topic": topic, "symbol": symbol});
         let snapshot = text(json!({
-            "topic": "orderbook.50.BTCUSDT",
-            "type": "snapshot",
+            "action": "snapshot",
+            "arg": arg("books", "BTCUSDT"),
+            "data": [{"a": [["11", "4"]], "b": [["10", "2"]], "seq": 70, "pseq": 0, "ts": "5"}],
             "ts": 5,
-            "data": {"s": "BTCUSDT", "b": [["10", "2"]], "a": [["11", "4"]], "u": 7, "seq": 70},
         }));
         let mut update = text(json!({
-            "topic": "orderbook.50.BTCUSDT",
-            "type": "delta",
+            "action": "update",
+            "arg": arg("books", "BTCUSDT"),
+            "data": [{"a": [], "b": [["10", "0"]], "seq": 80, "pseq": 70, "ts": "6"}],
             "ts": 6,
-            "data": {"s": "BTCUSDT", "b": [["10", "0"]], "a": [], "u": 8, "seq": 80},
         }));
         let ack = text(json!({
-            "success": true,
-            "ret_msg": "",
-            "conn_id": "test",
-            "req_id": "orderbook.50.BTCUSDT",
-            "op": "unsubscribe",
+            "event": "unsubscribe",
+            "arg": arg("books", "BTCUSDT"),
+            "connId": "test",
         }));
         let command = text(json!({
             "op": "unsubscribe",
-            "args": ["orderbook.50.BTCUSDT", "orderbook.1.ETHUSDT", "publicTrade.BTCUSDT"],
-            "req_id": "orderbook.50.BTCUSDT",
+            "args": [arg("books", "BTCUSDT"), arg("books", "ETHUSDT"), arg("publicTrade", "BTCUSDT")],
         }));
 
         let book = |key: &str, kind| Upstream::Book {
@@ -1041,15 +1116,19 @@ fn check_wire_oracle() {
 
         let subscribe = text(json!({
             "op": "subscribe",
-            "args": ["orderbook.50.BTCUSDT"],
-            "req_id": "orderbook.50.BTCUSDT",
+            "args": [arg("books", "BTCUSDT")],
         }));
         let (key, reply) = connection.reject(&subscribe).unwrap();
         let reply = serde_json::from_str::<Value>(reply.to_text().unwrap()).unwrap();
         assert_eq!(key, "BTCUSDT");
-        assert_eq!(reply["success"], json!(false));
-        assert_eq!(reply["op"], json!("subscribe"));
-        assert_eq!(reply["req_id"], json!("orderbook.50.BTCUSDT"));
+        assert_eq!(reply["event"], json!("error"));
+        assert_eq!(reply["code"], json!(30001));
+        assert!(
+            reply["msg"]
+                .as_str()
+                .unwrap()
+                .contains("\"symbol\":\"BTCUSDT\"")
+        );
         assert!(connection.reject(&command).is_none());
 
         assert_eq!(
@@ -1084,6 +1163,6 @@ fn check_wire_oracle() {
         assert_eq!(unchanged, snapshot);
         assert!(connection.corrupt(&mut update, "BTCUSDT", FrameKind::Update));
         let corrupted = serde_json::from_str::<Value>(update.to_text().unwrap()).unwrap();
-        assert_eq!(corrupted["data"]["u"], json!(i64::MAX));
+        assert_eq!(corrupted["data"][0]["pseq"], json!(i64::MAX));
     }
 }

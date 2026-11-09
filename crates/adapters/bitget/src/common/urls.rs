@@ -13,65 +13,61 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Runtime resolution of Bybit REST and WebSocket base URLs.
+//! Runtime resolution of Bitget REST and WebSocket base URLs.
 
-use super::enums::{BybitEnvironment, BybitProductType};
+use super::enums::{BitgetEnvironment, BitgetProductType};
 
-const STREAM_MAINNET: &str = "stream";
-const STREAM_TESTNET: &str = "stream-testnet";
+const HOST_MAINNET: &str = "ws.bitget.com";
+// Bitget has no testnet: demo (paper) trading is the only sandbox
+const HOST_DEMO: &str = "wspap.bitget.com";
 
-/// Returns the base HTTP endpoint for the given environment.
+/// Returns the REST base URL; demo trading uses the same host with the `paptrading: 1` header.
 #[must_use]
-pub const fn bybit_http_base_url(environment: BybitEnvironment) -> &'static str {
+pub const fn bitget_http_base_url(environment: BitgetEnvironment) -> &'static str {
     match environment {
-        BybitEnvironment::Mainnet => "https://api.bybit.com",
-        BybitEnvironment::Demo => "https://api-demo.bybit.com",
-        BybitEnvironment::Testnet => "https://api-testnet.bybit.com",
+        BitgetEnvironment::Mainnet | BitgetEnvironment::Demo | BitgetEnvironment::Testnet => {
+            "https://api.bitget.com"
+        }
     }
 }
 
-fn ws_public_subdomain(environment: BybitEnvironment) -> &'static str {
+fn ws_host(environment: BitgetEnvironment) -> &'static str {
     match environment {
-        BybitEnvironment::Mainnet => STREAM_MAINNET,
-        // Bybit demo trading uses mainnet public market data streams
-        BybitEnvironment::Demo => STREAM_MAINNET,
-        BybitEnvironment::Testnet => STREAM_TESTNET,
+        BitgetEnvironment::Mainnet => HOST_MAINNET,
+        BitgetEnvironment::Demo | BitgetEnvironment::Testnet => HOST_DEMO,
     }
 }
 
-/// Builds the public WebSocket endpoint for the given product/environment pair.
-#[must_use]
-pub fn bybit_ws_public_url(
-    product_type: BybitProductType,
-    environment: BybitEnvironment,
-) -> String {
-    let subdomain = ws_public_subdomain(environment);
-    format!(
-        "wss://{subdomain}.bybit.com/v5/public/{}",
-        product_type.as_str()
-    )
-}
-
-/// Returns the private WebSocket endpoint for the given environment.
-#[must_use]
-pub const fn bybit_ws_private_url(environment: BybitEnvironment) -> &'static str {
-    match environment {
-        BybitEnvironment::Testnet => "wss://stream-testnet.bybit.com/v5/private",
-        BybitEnvironment::Demo => "wss://stream-demo.bybit.com/v5/private",
-        BybitEnvironment::Mainnet => "wss://stream.bybit.com/v5/private",
-    }
-}
-
-/// Returns the trade WebSocket endpoint for order operations.
+/// Returns the public WebSocket URL.
 ///
-/// Note: Bybit demo environment does not support the WebSocket Trade API.
-/// Demo trading must use HTTP REST API for order operations.
+/// Bitget serves every product type on one public endpoint (selected per subscription by
+/// `instType`), so `product_type` does not change the URL.
 #[must_use]
-pub const fn bybit_ws_trade_url(environment: BybitEnvironment) -> &'static str {
+pub fn bitget_ws_public_url(
+    product_type: BitgetProductType,
+    environment: BitgetEnvironment,
+) -> String {
+    let _ = product_type;
+    format!("wss://{}/v3/ws/public", ws_host(environment))
+}
+
+/// Returns the private WebSocket URL.
+#[must_use]
+pub const fn bitget_ws_private_url(environment: BitgetEnvironment) -> &'static str {
     match environment {
-        BybitEnvironment::Testnet => "wss://stream-testnet.bybit.com/v5/trade",
-        BybitEnvironment::Mainnet | BybitEnvironment::Demo => "wss://stream.bybit.com/v5/trade",
+        BitgetEnvironment::Mainnet => "wss://ws.bitget.com/v3/ws/private",
+        BitgetEnvironment::Demo | BitgetEnvironment::Testnet => {
+            "wss://wspap.bitget.com/v3/ws/private"
+        }
     }
+}
+
+/// Returns the WebSocket URL used for order entry.
+///
+/// Bitget has no separate trade endpoint: `op:"trade"` requests go on a logged-in private socket.
+#[must_use]
+pub const fn bitget_ws_trade_url(environment: BitgetEnvironment) -> &'static str {
+    bitget_ws_private_url(environment)
 }
 
 #[cfg(test)]
@@ -83,64 +79,64 @@ mod tests {
     #[rstest]
     fn resolves_public_urls() {
         assert_eq!(
-            bybit_ws_public_url(BybitProductType::Linear, BybitEnvironment::Mainnet),
-            "wss://stream.bybit.com/v5/public/linear"
+            bitget_ws_public_url(BitgetProductType::Linear, BitgetEnvironment::Mainnet),
+            "wss://ws.bitget.com/v3/ws/public"
         );
         assert_eq!(
-            bybit_ws_public_url(BybitProductType::Option, BybitEnvironment::Demo),
-            "wss://stream.bybit.com/v5/public/option"
+            bitget_ws_public_url(BitgetProductType::Spot, BitgetEnvironment::Demo),
+            "wss://wspap.bitget.com/v3/ws/public"
         );
         assert_eq!(
-            bybit_ws_public_url(BybitProductType::Inverse, BybitEnvironment::Testnet),
-            "wss://stream-testnet.bybit.com/v5/public/inverse"
+            bitget_ws_public_url(BitgetProductType::Inverse, BitgetEnvironment::Testnet),
+            "wss://wspap.bitget.com/v3/ws/public"
         );
     }
 
     #[rstest]
     fn resolves_private_urls() {
         assert_eq!(
-            bybit_ws_private_url(BybitEnvironment::Mainnet),
-            "wss://stream.bybit.com/v5/private"
+            bitget_ws_private_url(BitgetEnvironment::Mainnet),
+            "wss://ws.bitget.com/v3/ws/private"
         );
         assert_eq!(
-            bybit_ws_private_url(BybitEnvironment::Demo),
-            "wss://stream-demo.bybit.com/v5/private"
+            bitget_ws_private_url(BitgetEnvironment::Demo),
+            "wss://wspap.bitget.com/v3/ws/private"
         );
         assert_eq!(
-            bybit_ws_private_url(BybitEnvironment::Testnet),
-            "wss://stream-testnet.bybit.com/v5/private"
+            bitget_ws_private_url(BitgetEnvironment::Testnet),
+            "wss://wspap.bitget.com/v3/ws/private"
         );
     }
 
     #[rstest]
     fn resolves_trade_urls() {
         assert_eq!(
-            bybit_ws_trade_url(BybitEnvironment::Mainnet),
-            "wss://stream.bybit.com/v5/trade"
+            bitget_ws_trade_url(BitgetEnvironment::Mainnet),
+            "wss://ws.bitget.com/v3/ws/private"
         );
         assert_eq!(
-            bybit_ws_trade_url(BybitEnvironment::Demo),
-            "wss://stream.bybit.com/v5/trade"
+            bitget_ws_trade_url(BitgetEnvironment::Demo),
+            "wss://wspap.bitget.com/v3/ws/private"
         );
         assert_eq!(
-            bybit_ws_trade_url(BybitEnvironment::Testnet),
-            "wss://stream-testnet.bybit.com/v5/trade"
+            bitget_ws_trade_url(BitgetEnvironment::Testnet),
+            "wss://wspap.bitget.com/v3/ws/private"
         );
     }
 
     #[rstest]
     fn resolves_http_urls() {
         assert_eq!(
-            bybit_http_base_url(BybitEnvironment::Mainnet),
-            "https://api.bybit.com"
+            bitget_http_base_url(BitgetEnvironment::Mainnet),
+            "https://api.bitget.com"
         );
         assert_eq!(
-            bybit_http_base_url(BybitEnvironment::Demo),
-            "https://api-demo.bybit.com"
+            bitget_http_base_url(BitgetEnvironment::Demo),
+            "https://api.bitget.com"
         );
         assert_eq!(
-            bybit_http_base_url(BybitEnvironment::Testnet),
-            "https://api-testnet.bybit.com"
+            bitget_http_base_url(BitgetEnvironment::Testnet),
+            "https://api.bitget.com"
         );
     }
 }

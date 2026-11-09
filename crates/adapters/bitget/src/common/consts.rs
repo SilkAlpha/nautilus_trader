@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Core constants shared across the Bybit adapter components.
+//! Core constants shared across the Bitget adapter components.
 
 use std::sync::LazyLock;
 
@@ -21,21 +21,30 @@ use nautilus_model::identifiers::{ClientId, Venue};
 use ustr::Ustr;
 
 /// Venue identifier string.
-pub const BYBIT: &str = "BYBIT";
+pub const BITGET: &str = "BITGET";
 
 /// Static venue instance.
-pub static BYBIT_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(BYBIT)));
+pub static BITGET_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(BITGET)));
 
 /// Static client ID instance.
-pub static BYBIT_CLIENT_ID: LazyLock<ClientId> = LazyLock::new(|| ClientId::new(Ustr::from(BYBIT)));
+pub static BITGET_CLIENT_ID: LazyLock<ClientId> =
+    LazyLock::new(|| ClientId::new(Ustr::from(BITGET)));
 
-// See <https://www.bybit.com/en/broker> for further details.
-pub(crate) const BYBIT_NAUTILUS_BROKER_ID: &str = "Qy000878";
+pub(crate) const BITGET_WS_TOPIC_DELIMITER: char = '.';
 
-pub(crate) const BYBIT_WS_TOPIC_DELIMITER: char = '.';
+pub(crate) const BITGET_DEFAULT_ORDERBOOK_DEPTH: u32 = 50;
+pub(crate) const BITGET_QUOTE_DEPTH: u32 = 1;
 
-pub(crate) const BYBIT_DEFAULT_ORDERBOOK_DEPTH: u32 = 50;
-pub(crate) const BYBIT_QUOTE_DEPTH: u32 = 1;
+// `books1`, `books5`, `books50` and full-depth `books`; see
+// <https://www.bitget.com/docs/uta/websocket/public/Order-Book-Channel>.
+pub(crate) const BITGET_BOOK_DEPTHS: [u32; 4] = [1, 5, 50, 1000];
 
-// See <https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook>.
-pub(crate) const BYBIT_BOOK_DEPTHS: [u32; 4] = [1, 50, 200, 1000];
+/// Text heartbeat sent every 30 seconds; the venue answers with `pong`.
+pub(crate) const BITGET_WS_HEARTBEAT_PAYLOAD: &str = "ping";
+pub(crate) const BITGET_WS_PONG_PAYLOAD: &str = "pong";
+
+/// Path signed by the WebSocket login (`timestamp + "GET" + "/user/verify"`).
+pub(crate) const BITGET_WS_LOGIN_PATH: &str = "/user/verify";
+
+/// Header that routes REST requests to demo (paper) trading.
+pub(crate) const BITGET_DEMO_HEADER: &str = "paptrading";

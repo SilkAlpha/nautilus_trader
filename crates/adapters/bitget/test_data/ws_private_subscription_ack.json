@@ -1,0 +1,8 @@
+{
+  "event": "subscribe",
+  "arg": {
+    "instType": "UTA",
+    "topic": "order"
+  },
+  "connId": "068b4afffe0ebff5-00003912-00207636-3f38547f12f362d9-556f6561"
+}

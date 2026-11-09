@@ -13,23 +13,24 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Example demonstrating live execution testing with the Bybit adapter.
+//! Example demonstrating live execution testing with the Bitget adapter.
 //!
 //! Edit the constants below to change the environment, target instrument, and order size.
 //!
-//! Run with: `cargo run --example bybit-exec-tester --package nautilus-bybit --features examples`
+//! Run with: `cargo run --example bitget-exec-tester --package nautilus-bitget --features examples`
 //!
-//! Required credential environment variables:
-//! - `BYBIT_API_KEY`
-//! - `BYBIT_API_SECRET`
+//! Required credential environment variables (demo):
+//! - `BITGET_DEMO_API_KEY`
+//! - `BITGET_DEMO_API_SECRET`
+//! - `BITGET_DEMO_API_PASSPHRASE`
 
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::{
-        consts::BYBIT_CLIENT_ID,
-        enums::{BybitEnvironment, BybitProductType},
+        consts::BITGET_CLIENT_ID,
+        enums::{BitgetEnvironment, BitgetProductType},
     },
-    config::{BybitDataClientConfig, BybitExecutionClientConfig},
-    factories::{BybitDataClientFactory, BybitExecutionClientFactory},
+    config::{BitgetDataClientConfig, BitgetExecutionClientConfig},
+    factories::{BitgetDataClientFactory, BitgetExecutionClientFactory},
 };
 use nautilus_common::enums::Environment;
 use nautilus_live::{config::LiveExecutionEngineConfig, node::LiveNode};
@@ -44,45 +45,49 @@ use nautilus_trading::strategy::StrategyConfig;
 // environment and may use real funds. Set `DRY_RUN = true` to connect without
 // submitting orders or sending shutdown cancel/close commands.
 const DRY_RUN: bool = false;
-const BYBIT_ENVIRONMENT: BybitEnvironment = BybitEnvironment::Testnet;
+// Bitget has no testnet; demo trading (`paptrading: 1`) is the sandbox
+const BITGET_ENVIRONMENT: BitgetEnvironment = BitgetEnvironment::Demo;
 const TRADER_ID: &str = "TESTER-001";
-const ACCOUNT_ID: &str = "BYBIT-001";
-const NODE_NAME: &str = "BYBIT-EXEC-TESTER-001";
+const ACCOUNT_ID: &str = "BITGET-001";
+const NODE_NAME: &str = "BITGET-EXEC-TESTER-001";
 const STRATEGY_ID: &str = "EXEC_TESTER-001";
-const INSTRUMENT_ID: &str = "ETHUSDT-LINEAR.BYBIT";
-const ORDER_QTY: &str = "0.01";
+// Demo lists a subset of symbols; TSLAUSDT is one, and 0.02 clears the 5 USDT minimum notional
+const INSTRUMENT_ID: &str = "TSLAUSDT-PERP.BITGET";
+const ORDER_QTY: &str = "0.02";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let bybit_environment = BYBIT_ENVIRONMENT;
+    let bitget_environment = BITGET_ENVIRONMENT;
     let environment = Environment::Live;
     let trader_id = TraderId::from(TRADER_ID);
     let account_id = AccountId::from(ACCOUNT_ID);
     let node_name = NODE_NAME.to_string();
-    let client_id = *BYBIT_CLIENT_ID;
+    let client_id = *BITGET_CLIENT_ID;
     let instrument_id = InstrumentId::from(INSTRUMENT_ID);
 
-    let data_config = BybitDataClientConfig {
-        environment: bybit_environment,
-        api_key: None,    // Will use 'BYBIT_API_KEY' env var
-        api_secret: None, // Will use 'BYBIT_API_SECRET' env var
-        product_types: vec![BybitProductType::Spot, BybitProductType::Linear],
+    let data_config = BitgetDataClientConfig {
+        environment: bitget_environment,
+        api_key: None,        // Will use 'BITGET_DEMO_API_KEY' env var
+        api_secret: None,     // Will use 'BITGET_DEMO_API_SECRET' env var
+        api_passphrase: None, // Will use 'BITGET_DEMO_API_PASSPHRASE' env var
+        product_types: vec![BitgetProductType::Spot, BitgetProductType::Linear],
         ..Default::default()
     };
 
-    let exec_config = BybitExecutionClientConfig {
-        environment: bybit_environment,
-        api_key: None,    // Will use 'BYBIT_API_KEY' env var
-        api_secret: None, // Will use 'BYBIT_API_SECRET' env var
-        product_types: vec![BybitProductType::Spot, BybitProductType::Linear],
+    let exec_config = BitgetExecutionClientConfig {
+        environment: bitget_environment,
+        api_key: None,        // Will use 'BITGET_DEMO_API_KEY' env var
+        api_secret: None,     // Will use 'BITGET_DEMO_API_SECRET' env var
+        api_passphrase: None, // Will use 'BITGET_DEMO_API_PASSPHRASE' env var
+        product_types: vec![BitgetProductType::Spot, BitgetProductType::Linear],
         account_id: Some(account_id),
         ..Default::default()
     };
 
-    let data_factory = BybitDataClientFactory::new();
-    let exec_factory = BybitExecutionClientFactory::new();
+    let data_factory = BitgetDataClientFactory::new();
+    let exec_factory = BitgetExecutionClientFactory::new();
     let exec_engine_config = LiveExecutionEngineConfig {
         open_check_interval_secs: Some(10.0),
         position_check_interval_secs: Some(30.0),

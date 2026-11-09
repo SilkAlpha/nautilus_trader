@@ -13,22 +13,23 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Bybit HTTP retry classification.
+//! Bitget HTTP retry classification.
 
-use crate::http::error::BybitHttpError;
+use crate::http::error::BitgetHttpError;
 
-pub(crate) fn should_retry_http(error: &BybitHttpError) -> bool {
+pub(crate) fn should_retry_http(error: &BitgetHttpError) -> bool {
     match error {
-        BybitHttpError::NetworkError(_) => true,
-        BybitHttpError::UnexpectedStatus { status, .. } => {
+        BitgetHttpError::NetworkError(_) => true,
+        BitgetHttpError::UnexpectedStatus { status, .. } => {
             is_retryable_status(*status) || *status >= 600
         }
-        BybitHttpError::BybitError { error_code, .. } => *error_code == 10006,
-        BybitHttpError::MissingCredentials
-        | BybitHttpError::JsonError(_)
-        | BybitHttpError::ValidationError(_)
-        | BybitHttpError::BuildError(_)
-        | BybitHttpError::Canceled(_) => false,
+        // 25004 "Operation too frequent", 40015 "System is abnormal, please try again later"
+        BitgetHttpError::BitgetError { error_code, .. } => matches!(*error_code, 25004 | 40015),
+        BitgetHttpError::MissingCredentials
+        | BitgetHttpError::JsonError(_)
+        | BitgetHttpError::ValidationError(_)
+        | BitgetHttpError::BuildError(_)
+        | BitgetHttpError::Canceled(_) => false,
     }
 }
 
@@ -51,7 +52,7 @@ mod tests {
     #[case(600, true)]
     #[case(404, false)]
     fn http_status_classification(#[case] status: u16, #[case] expected: bool) {
-        let error = BybitHttpError::UnexpectedStatus {
+        let error = BitgetHttpError::UnexpectedStatus {
             status,
             body: String::new(),
         };
@@ -60,10 +61,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(10006, true)]
-    #[case(10001, false)]
+    #[case(25004, true)]
+    #[case(40015, true)]
+    #[case(25204, false)]
+    #[case(40010, false)]
     fn http_error_code_classification(#[case] error_code: i32, #[case] expected: bool) {
-        let error = BybitHttpError::BybitError {
+        let error = BitgetHttpError::BitgetError {
             error_code,
             message: String::new(),
         };
@@ -72,10 +75,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(BybitHttpError::NetworkError(String::new()), true)]
-    #[case(BybitHttpError::MissingCredentials, false)]
-    #[case(BybitHttpError::Canceled(String::new()), false)]
-    fn http_error_classification(#[case] error: BybitHttpError, #[case] expected: bool) {
+    #[case(BitgetHttpError::NetworkError(String::new()), true)]
+    #[case(BitgetHttpError::MissingCredentials, false)]
+    #[case(BitgetHttpError::Canceled(String::new()), false)]
+    fn http_error_classification(#[case] error: BitgetHttpError, #[case] expected: bool) {
         assert_eq!(should_retry_http(&error), expected);
     }
 }

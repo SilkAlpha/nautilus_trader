@@ -17,10 +17,10 @@ use pyo3::prelude::*;
 
 use crate::{
     common::{
-        enums::BybitProductType,
+        enums::BitgetProductType,
         parse::{parse_tp_sl_order_type, parse_tpsl_mode, parse_trigger_type},
     },
-    http::query::BybitNativeTpSlParams as RustNativeTpSlParams,
+    http::query::BitgetNativeTpSlParams as RustNativeTpSlParams,
 };
 
 #[cfg(test)]
@@ -28,11 +28,11 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::common::enums::{BybitOrderType, BybitTpSlMode, BybitTriggerType};
+    use crate::common::enums::{BitgetOrderType, BitgetTpSlMode, BitgetTriggerType};
 
     #[rstest]
     fn test_native_tp_sl_params_try_from_accepts_valid_enums() {
-        let params = BybitNativeTpSlParams {
+        let params = BitgetNativeTpSlParams {
             take_profit: Some("55000".to_string()),
             stop_loss: Some("47000".to_string()),
             tp_trigger_by: Some("LastPrice".to_string()),
@@ -45,11 +45,11 @@ mod tests {
 
         let native = RustNativeTpSlParams::try_from(params).unwrap();
 
-        assert_eq!(native.tp_trigger_by, Some(BybitTriggerType::LastPrice));
-        assert_eq!(native.sl_trigger_by, Some(BybitTriggerType::MarkPrice));
-        assert_eq!(native.tp_order_type, Some(BybitOrderType::Limit));
-        assert_eq!(native.sl_order_type, Some(BybitOrderType::Market));
-        assert_eq!(native.tpsl_mode, Some(BybitTpSlMode::Partial));
+        assert_eq!(native.tp_trigger_by, Some(BitgetTriggerType::LastPrice));
+        assert_eq!(native.sl_trigger_by, Some(BitgetTriggerType::MarkPrice));
+        assert_eq!(native.tp_order_type, Some(BitgetOrderType::Limit));
+        assert_eq!(native.sl_order_type, Some(BitgetOrderType::Market));
+        assert_eq!(native.tpsl_mode, Some(BitgetTpSlMode::Partial));
     }
 
     #[rstest]
@@ -59,7 +59,7 @@ mod tests {
     #[case("sl_order_type")]
     #[case("tpsl_mode")]
     fn test_native_tp_sl_params_try_from_rejects_invalid_enum(#[case] field: &str) {
-        let mut params = BybitNativeTpSlParams::default();
+        let mut params = BitgetNativeTpSlParams::default();
         match field {
             "tp_trigger_by" => params.tp_trigger_by = Some("garbage".to_string()),
             "sl_trigger_by" => params.sl_trigger_by = Some("garbage".to_string()),
@@ -75,25 +75,25 @@ mod tests {
 
     #[rstest]
     fn test_native_tp_sl_params_try_from_rejects_unknown_tpsl_mode() {
-        // `BybitTpSlMode` has a `#[serde(other)] Unknown` variant; a raw deserialize would
+        // `BitgetTpSlMode` has a `#[serde(other)] Unknown` variant; a raw deserialize would
         // silently accept "Unknown". The validated parser must reject it.
-        let params = BybitNativeTpSlParams {
+        let params = BitgetNativeTpSlParams {
             tpsl_mode: Some("Unknown".to_string()),
             ..Default::default()
         };
 
         let err = RustNativeTpSlParams::try_from(params).unwrap_err();
-        assert!(err.to_string().contains("invalid Bybit TP/SL mode"));
+        assert!(err.to_string().contains("invalid Bitget TP/SL mode"));
     }
 }
 
 /// Parameters for fetching tickers via HTTP API.
 #[pyclass(from_py_object)]
-#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")]
 #[derive(Clone, Debug)]
-pub struct BybitTickersParams {
+pub struct BitgetTickersParams {
     #[pyo3(get, set)]
-    pub category: BybitProductType,
+    pub category: BitgetProductType,
     #[pyo3(get, set)]
     pub symbol: Option<String>,
     #[pyo3(get, set)]
@@ -104,15 +104,15 @@ pub struct BybitTickersParams {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitTickersParams {
-    /// Query parameters for `GET /v5/market/tickers`.
+impl BitgetTickersParams {
+    /// Query parameters for `GET /api/v3/market/tickers`.
     ///
     /// # References
-    /// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     #[new]
     #[pyo3(signature = (category, symbol=None, base_coin=None, exp_date=None))]
     fn py_new(
-        category: BybitProductType,
+        category: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<String>,
         exp_date: Option<String>,
@@ -126,8 +126,8 @@ impl BybitTickersParams {
     }
 }
 
-impl From<BybitTickersParams> for crate::http::query::BybitTickersParams {
-    fn from(params: BybitTickersParams) -> Self {
+impl From<BitgetTickersParams> for crate::http::query::BitgetTickersParams {
+    fn from(params: BitgetTickersParams) -> Self {
         Self {
             category: params.category,
             symbol: params.symbol,
@@ -137,14 +137,14 @@ impl From<BybitTickersParams> for crate::http::query::BybitTickersParams {
     }
 }
 
-/// Native TP/SL and option-specific fields for `POST /v5/order/create` (used by the demo HTTP
+/// Native TP/SL and option-specific fields for `POST /api/v3/trade/place-order` (used by the demo HTTP
 /// path, since demo does not expose the mainnet WS Trade API).
 ///
 /// Enum-typed fields are accepted as strings and parsed at the binding boundary.
 #[pyclass(from_py_object)]
-#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bitget")]
 #[derive(Debug, Clone, Default)]
-pub struct BybitNativeTpSlParams {
+pub struct BitgetNativeTpSlParams {
     #[pyo3(get, set)]
     pub take_profit: Option<String>,
     #[pyo3(get, set)]
@@ -173,12 +173,12 @@ pub struct BybitNativeTpSlParams {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitNativeTpSlParams {
-    /// Native TP/SL and option-specific fields that map onto the `POST /v5/order/create` entry.
+impl BitgetNativeTpSlParams {
+    /// Native TP/SL and option-specific fields that map onto the `POST /api/v3/trade/place-order` entry.
     ///
     /// Bundled to keep the `submit_order` signature manageable, and to give the demo HTTP path
     /// access to the same fields the mainnet WS path supports via
-    /// `crate.websocket.messages.BybitWsPlaceOrderParams`. All fields are optional; populated
+    /// `crate.websocket.messages.BitgetWsPlaceOrderParams`. All fields are optional; populated
     /// fields are written onto the entry builder as-is. `tpsl_mode` defaults to `Full` upstream when
     /// only `take_profit` / `stop_loss` are set without an explicit mode.
     ///
@@ -231,10 +231,10 @@ impl BybitNativeTpSlParams {
     }
 }
 
-impl TryFrom<BybitNativeTpSlParams> for RustNativeTpSlParams {
+impl TryFrom<BitgetNativeTpSlParams> for RustNativeTpSlParams {
     type Error = anyhow::Error;
 
-    fn try_from(params: BybitNativeTpSlParams) -> anyhow::Result<Self> {
+    fn try_from(params: BitgetNativeTpSlParams) -> anyhow::Result<Self> {
         Ok(Self {
             take_profit: params.take_profit,
             stop_loss: params.stop_loss,

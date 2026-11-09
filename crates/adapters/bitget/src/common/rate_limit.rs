@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Shared Bybit IP and UID rate-limit coordination.
+//! Shared Bitget IP and UID rate-limit coordination.
 
 use std::{
     collections::VecDeque,
@@ -30,21 +30,24 @@ use nautilus_network::ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Q
 use parking_lot::Mutex;
 use ustr::Ustr;
 
-use super::enums::BybitProductType;
+use super::enums::BitgetProductType;
 
 const WS_CONNECTION_KEY: &str = "connection";
 
-const HTTP_IP_LIMIT: u32 = 600;
-const HTTP_IP_WINDOW: Duration = Duration::from_secs(5);
+// "The overall rate limit for the common domain name is 6000 requests/IP/min"
+const HTTP_IP_LIMIT: u32 = 6_000;
+const HTTP_IP_WINDOW: Duration = Duration::from_secs(60);
+// Bitget documents no IP cap for WebSocket trade requests (they share the UID quotas); this
+// only guards against runaway loops
 const WS_ORDER_IP_LIMIT: u32 = 3_000;
 const WS_ORDER_IP_WINDOW: Duration = Duration::from_secs(1);
-const WS_CONNECTION_PERIOD: Duration = Duration::from_millis(600);
+// 300 connection requests per IP per 5 minutes
+const WS_CONNECTION_PERIOD: Duration = Duration::from_secs(1);
 
-pub(crate) const BYBIT_RATE_LIMIT_HEADER: &str = "X-Bapi-Limit";
-pub(crate) const BYBIT_RATE_LIMIT_STATUS_HEADER: &str = "X-Bapi-Limit-Status";
-pub(crate) const BYBIT_RATE_LIMIT_RESET_HEADER: &str = "X-Bapi-Limit-Reset-Timestamp";
-pub(crate) const BYBIT_HTTP_IP_COOLDOWN: Duration = Duration::from_secs(10 * 60);
-pub(crate) const BYBIT_OPTION_SUBSCRIPTION_LIMIT: usize = 2_000;
+/// Remaining quota of the requested endpoint (Bitget sends no limit or reset header).
+pub(crate) const BITGET_RATE_LIMIT_STATUS_HEADER: &str = "x-mbx-used-remain-limit";
+pub(crate) const BITGET_HTTP_IP_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+pub(crate) const BITGET_OPTION_SUBSCRIPTION_LIMIT: usize = 2_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TransportScope {
@@ -157,7 +160,7 @@ impl SlidingWindows {
                     let limit = window.limit();
                     if reservation.weight > limit {
                         return Err(format!(
-                            "Bybit request weight {} exceeds quota {} for {}",
+                            "Bitget request weight {} exceeds quota {} for {}",
                             reservation.weight,
                             limit,
                             reservation.key.label(),
@@ -177,7 +180,7 @@ impl SlidingWindows {
                     for reservation in reservations {
                         let window = windows
                             .get_mut(reservation.key)
-                            .expect("Bybit rate-limit window missing after planning");
+                            .expect("Bitget rate-limit window missing after planning");
                         window
                             .timestamps
                             .extend(std::iter::repeat_n(now, reservation.weight as usize));
@@ -266,16 +269,16 @@ static HTTP_SESSION_GENERATIONS: LazyLock<SessionRegistry> =
 static WS_CONNECTION_LIMITERS: LazyLock<ConnectionRegistry> =
     LazyLock::new(|| Mutex::new(AHashMap::new()));
 
-/// Coordinates all Bybit quotas visible to one adapter process.
+/// Coordinates all Bitget quotas visible to one adapter process.
 #[derive(Clone, Debug)]
-pub(crate) struct BybitRateLimiter {
+pub(crate) struct BitgetRateLimiter {
     limits: Arc<SlidingWindows>,
     ip_key: LimitKey,
     account_scope: Option<AccountScope>,
     http_session_generation: Option<Arc<AtomicU64>>,
 }
 
-impl BybitRateLimiter {
+impl BitgetRateLimiter {
     #[must_use]
     pub(crate) fn for_http(base_url: &str, api_key: Option<&str>, proxy_url: Option<&str>) -> Self {
         let transport_scope = transport_scope(base_url, proxy_url);
@@ -301,7 +304,7 @@ impl BybitRateLimiter {
     pub(crate) async fn acquire_http(
         &self,
         endpoint: &str,
-        category: Option<BybitProductType>,
+        category: Option<BitgetProductType>,
         weight: u32,
         authenticated: bool,
     ) -> Result<(), String> {
@@ -326,7 +329,7 @@ impl BybitRateLimiter {
     pub(crate) async fn acquire_ws_order(
         &self,
         endpoint: &str,
-        category: BybitProductType,
+        category: BitgetProductType,
         weight: u32,
     ) -> Result<(), String> {
         let account_reservation = self.account_reservation(endpoint, Some(category), weight);
@@ -346,7 +349,7 @@ impl BybitRateLimiter {
     pub(crate) fn observe_account(
         &self,
         endpoint: &str,
-        category: Option<BybitProductType>,
+        category: Option<BitgetProductType>,
         limit: u32,
         remaining: u32,
         reset_timestamp_ms: Option<i64>,
@@ -367,12 +370,24 @@ impl BybitRateLimiter {
         }
     }
 
+    /// Feeds the `x-mbx-used-remain-limit` header of a REST response into the account window,
+    /// using the documented endpoint quota as the limit.
+    pub(crate) fn observe_remaining(
+        &self,
+        endpoint: &str,
+        category: Option<BitgetProductType>,
+        remaining: u32,
+    ) {
+        let (_, limit) = account_limit(endpoint, category);
+        self.observe_account(endpoint, category, limit, remaining, None);
+    }
+
     pub(crate) fn block_http_ip(&self) {
         self.limits.block(
             &self.ip_key,
             HTTP_IP_LIMIT,
             HTTP_IP_WINDOW,
-            BYBIT_HTTP_IP_COOLDOWN,
+            BITGET_HTTP_IP_COOLDOWN,
         );
     }
 
@@ -395,7 +410,7 @@ impl BybitRateLimiter {
     fn account_reservation(
         &self,
         endpoint: &str,
-        category: Option<BybitProductType>,
+        category: Option<BitgetProductType>,
         weight: u32,
     ) -> Option<OwnedReservation> {
         let scope = self.account_scope.clone()?;
@@ -453,51 +468,43 @@ pub(crate) fn websocket_connection_key() -> Ustr {
     Ustr::from(WS_CONNECTION_KEY)
 }
 
+// Bitget batch endpoints take up to 20 orders for every category (options are not listed)
 #[must_use]
-pub(crate) const fn batch_call_limit(category: BybitProductType) -> usize {
+pub(crate) const fn batch_call_limit(category: BitgetProductType) -> usize {
+    batch_endpoint_limit(category)
+}
+
+#[must_use]
+pub(crate) const fn batch_endpoint_limit(category: BitgetProductType) -> usize {
     match category {
-        BybitProductType::Option => 20,
-        _ => batch_endpoint_limit(category),
+        BitgetProductType::Spot | BitgetProductType::Linear | BitgetProductType::Inverse => 20,
+        BitgetProductType::Option => 5,
     }
 }
 
 #[must_use]
-pub(crate) const fn batch_endpoint_limit(category: BybitProductType) -> usize {
-    match category {
-        BybitProductType::Spot => 10,
-        BybitProductType::Linear | BybitProductType::Inverse => 20,
-        BybitProductType::Option => 5,
-    }
+pub(crate) const fn batch_send_limit(category: BitgetProductType) -> usize {
+    batch_endpoint_limit(category)
+}
+
+// A Bitget batch request counts once against its batch endpoint quota
+#[must_use]
+pub(crate) fn batch_weight(category: BitgetProductType, order_count: usize) -> u32 {
+    let _ = (category, order_count);
+    1
 }
 
 #[must_use]
-pub(crate) const fn batch_send_limit(category: BybitProductType) -> usize {
-    match category {
-        BybitProductType::Spot => 10,
-        BybitProductType::Linear | BybitProductType::Inverse => 10,
-        BybitProductType::Option => 5,
-    }
-}
-
-#[must_use]
-pub(crate) fn batch_weight(category: BybitProductType, order_count: usize) -> u32 {
-    match category {
-        BybitProductType::Option => 1,
-        BybitProductType::Spot | BybitProductType::Linear | BybitProductType::Inverse => {
-            u32::try_from(order_count).unwrap_or(u32::MAX)
-        }
-    }
-}
-
-#[must_use]
-pub(crate) fn category_from_payload(payload: Option<&str>) -> Option<BybitProductType> {
+pub(crate) fn category_from_payload(payload: Option<&str>) -> Option<BitgetProductType> {
     let payload = payload?;
-    let category = if payload.trim_start().starts_with('{') {
-        serde_json::from_str::<serde_json::Value>(payload)
-            .ok()?
-            .get("category")?
-            .as_str()?
-            .to_string()
+    let trimmed = payload.trim_start();
+    let category = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        // Batch bodies are arrays whose entries all carry the same category
+        let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+        let entry = value
+            .as_array()
+            .map_or(Some(&value), |entries| entries.first())?;
+        entry.get("category")?.as_str()?.to_string()
     } else {
         serde_urlencoded::from_str::<Vec<(String, String)>>(payload)
             .ok()?
@@ -505,13 +512,7 @@ pub(crate) fn category_from_payload(payload: Option<&str>) -> Option<BybitProduc
             .find_map(|(key, value)| (key == "category").then_some(value))?
     };
 
-    match category.as_str() {
-        "spot" => Some(BybitProductType::Spot),
-        "linear" => Some(BybitProductType::Linear),
-        "inverse" => Some(BybitProductType::Inverse),
-        "option" => Some(BybitProductType::Option),
-        _ => None,
-    }
+    BitgetProductType::from_category(&category)
 }
 
 fn shared_session_generation(scope: &TransportScope) -> Arc<AtomicU64> {
@@ -557,53 +558,46 @@ fn host(url: &str) -> String {
 
 fn environment_scope(url: &str) -> String {
     match host(url).as_str() {
-        "api.bybit.com" | "stream.bybit.com" => "mainnet".to_string(),
-        "api-testnet.bybit.com" | "stream-testnet.bybit.com" => "testnet".to_string(),
-        "api-demo.bybit.com" | "stream-demo.bybit.com" => "demo".to_string(),
+        // Demo REST shares `api.bitget.com` (selected by header); demo keys differ, so the
+        // account digest keeps the scopes apart
+        "api.bitget.com" | "ws.bitget.com" => "mainnet".to_string(),
+        "wspap.bitget.com" => "demo".to_string(),
         custom => format!("custom:{custom}"),
     }
 }
 
-fn account_limit(endpoint: &str, category: Option<BybitProductType>) -> (String, u32) {
+fn account_limit(endpoint: &str, category: Option<BitgetProductType>) -> (String, u32) {
     let endpoint = endpoint.split('?').next().unwrap_or(endpoint);
-    let category_name = category.map_or("all", BybitProductType::as_str);
+    let category_name = category.map_or("all", BitgetProductType::as_str);
     let key = format!("{endpoint}:{category_name}");
+    // Per-UID quotas from the "Rate limit" line of each v3 endpoint page
     let limit = match endpoint {
-        "/v5/account/borrow" | "/v5/account/no-convert-repay" | "/v5/account/repay" => 1,
-        "/v5/account/fee-rate"
-        | "/v5/account/set-margin-mode"
-        | "/v5/user/escrow_sub_members"
-        | "/v5/user/submembers"
-        | "/v5/user/update-api"
-        | "/v5/user/update-sub-api" => 5,
-        "/v5/account/info"
-        | "/v5/account/wallet-balance"
-        | "/v5/execution/list"
-        | "/v5/order/history"
-        | "/v5/order/realtime"
-        | "/v5/position/list" => 50,
-        "/v5/order/create" | "/v5/order/cancel" => match category {
-            Some(BybitProductType::Spot) => 20,
-            _ => 10,
-        },
-        "/v5/order/cancel-all" => match category {
-            Some(BybitProductType::Spot) => 20,
-            Some(BybitProductType::Option) => 1,
-            _ => 10,
-        },
-        "/v5/order/amend" => 10,
-        "/v5/order/amend-batch" | "/v5/order/cancel-batch" | "/v5/order/create-batch" => {
-            match category {
-                Some(BybitProductType::Spot) => 20,
-                _ => 10,
-            }
-        }
-        "/v5/position/set-leverage"
-        | "/v5/position/switch-mode"
-        | "/v5/position/trading-stop"
-        | "/v5/user/query-api"
-        | "/v5/user/query-sub-members"
-        | "/v5/user/sub-apikeys" => 10,
+        "/api/v3/account/adjust-account-mode"
+        | "/api/v3/account/borrow"
+        | "/api/v3/account/repay"
+        | "/api/v3/trade/countdown-cancel-all" => 1,
+        "/api/v3/account/fee-rate" | "/api/v3/account/all-fee-rate" => 3,
+        "/api/v3/trade/place-batch"
+        | "/api/v3/trade/cancel-batch"
+        | "/api/v3/trade/cancel-symbol-order"
+        | "/api/v3/trade/close-positions" => 5,
+        "/api/v3/account/assets"
+        | "/api/v3/account/settings"
+        | "/api/v3/account/financial-records"
+        | "/api/v3/trade/unfilled-orders"
+        | "/api/v3/trade/history-orders"
+        | "/api/v3/trade/order-info"
+        | "/api/v3/trade/fills"
+        | "/api/v3/trade/unfilled-strategy-orders"
+        | "/api/v3/trade/history-strategy-orders"
+        | "/api/v3/position/current-position"
+        | "/api/v3/position/history-position" => 20,
+        "/api/v3/trade/place-order"
+        | "/api/v3/trade/cancel-order"
+        | "/api/v3/trade/modify-order"
+        | "/api/v3/trade/batch-modify-order"
+        | "/api/v3/account/set-leverage"
+        | "/api/v3/account/set-hold-mode" => 10,
         _ => 10,
     };
     (key, limit)
@@ -622,10 +616,10 @@ mod tests {
     #[rstest]
     fn transport_scope_does_not_retain_proxy_url() {
         let proxy_url = "http://user:password@proxy.example:8080";
-        let scope = transport_scope("https://api.bybit.com", Some(proxy_url));
-        let matching = transport_scope("https://api.bybit.com", Some(proxy_url));
+        let scope = transport_scope("https://api.bitget.com", Some(proxy_url));
+        let matching = transport_scope("https://api.bitget.com", Some(proxy_url));
         let different = transport_scope(
-            "https://api.bybit.com",
+            "https://api.bitget.com",
             Some("http://other:password@proxy.example:8080"),
         );
 
@@ -717,7 +711,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "Bybit request weight 11 exceeds quota 10 for oversized"
+            "Bitget request weight 11 exceeds quota 10 for oversized"
         );
         windows
             .acquire(&[Reservation {
@@ -758,60 +752,50 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case("/v5/account/borrow", None, 1)]
-    #[case("/v5/account/no-convert-repay", None, 1)]
-    #[case("/v5/account/repay", None, 1)]
-    #[case("/v5/account/fee-rate", None, 5)]
-    #[case("/v5/account/set-margin-mode", None, 5)]
-    #[case("/v5/user/escrow_sub_members", None, 5)]
-    #[case("/v5/user/submembers", None, 5)]
-    #[case("/v5/user/update-api", None, 5)]
-    #[case("/v5/user/update-sub-api", None, 5)]
-    #[case("/v5/account/info", None, 50)]
-    #[case("/v5/account/wallet-balance", None, 50)]
-    #[case("/v5/execution/list", None, 50)]
-    #[case("/v5/order/history", None, 50)]
-    #[case("/v5/order/realtime", None, 50)]
-    #[case("/v5/position/list", None, 50)]
-    #[case("/v5/order/create", Some(BybitProductType::Spot), 20)]
-    #[case("/v5/order/create", Some(BybitProductType::Linear), 10)]
-    #[case("/v5/order/cancel", Some(BybitProductType::Spot), 20)]
-    #[case("/v5/order/cancel", Some(BybitProductType::Inverse), 10)]
-    #[case("/v5/order/cancel-all", Some(BybitProductType::Spot), 20)]
-    #[case("/v5/order/cancel-all", Some(BybitProductType::Option), 1)]
-    #[case("/v5/order/cancel-all", Some(BybitProductType::Linear), 10)]
-    #[case("/v5/order/amend", Some(BybitProductType::Spot), 10)]
-    #[case("/v5/order/amend-batch", Some(BybitProductType::Linear), 10)]
-    #[case("/v5/order/amend-batch", Some(BybitProductType::Option), 10)]
-    #[case("/v5/order/amend-batch", Some(BybitProductType::Spot), 20)]
-    #[case("/v5/order/cancel-batch", Some(BybitProductType::Inverse), 10)]
-    #[case("/v5/order/cancel-batch", Some(BybitProductType::Option), 10)]
-    #[case("/v5/order/cancel-batch", Some(BybitProductType::Spot), 20)]
-    #[case("/v5/order/create-batch", Some(BybitProductType::Linear), 10)]
-    #[case("/v5/order/create-batch", Some(BybitProductType::Option), 10)]
-    #[case("/v5/order/create-batch", Some(BybitProductType::Spot), 20)]
-    #[case("/v5/position/set-leverage", Some(BybitProductType::Linear), 10)]
-    #[case("/v5/position/switch-mode", Some(BybitProductType::Inverse), 10)]
-    #[case("/v5/position/trading-stop", Some(BybitProductType::Linear), 10)]
-    #[case("/v5/user/query-api", None, 10)]
-    #[case("/v5/user/query-sub-members", None, 10)]
-    #[case("/v5/user/sub-apikeys", None, 10)]
-    #[case("/v5/unknown", None, 10)]
+    #[case("/api/v3/account/repay", None, 1)]
+    #[case("/api/v3/account/adjust-account-mode", None, 1)]
+    #[case("/api/v3/account/all-fee-rate", None, 3)]
+    #[case("/api/v3/account/fee-rate", None, 3)]
+    #[case("/api/v3/account/assets", None, 20)]
+    #[case("/api/v3/account/settings", None, 20)]
+    #[case("/api/v3/trade/fills", None, 20)]
+    #[case("/api/v3/trade/history-orders", None, 20)]
+    #[case("/api/v3/trade/unfilled-orders", None, 20)]
+    #[case("/api/v3/position/current-position", None, 20)]
+    #[case("/api/v3/trade/place-order", Some(BitgetProductType::Spot), 10)]
+    #[case("/api/v3/trade/place-order", Some(BitgetProductType::Linear), 10)]
+    #[case("/api/v3/trade/cancel-order", Some(BitgetProductType::Inverse), 10)]
+    #[case("/api/v3/trade/modify-order", Some(BitgetProductType::Linear), 10)]
+    #[case(
+        "/api/v3/trade/cancel-symbol-order",
+        Some(BitgetProductType::Linear),
+        5
+    )]
+    #[case("/api/v3/trade/place-batch", Some(BitgetProductType::Linear), 5)]
+    #[case("/api/v3/trade/cancel-batch", Some(BitgetProductType::Spot), 5)]
+    #[case(
+        "/api/v3/trade/batch-modify-order",
+        Some(BitgetProductType::Linear),
+        10
+    )]
+    #[case("/api/v3/account/set-leverage", Some(BitgetProductType::Linear), 10)]
+    #[case("/api/v3/account/set-hold-mode", None, 10)]
+    #[case("/api/v3/unknown", None, 10)]
     fn resolves_documented_endpoint_limits(
         #[case] endpoint: &str,
-        #[case] category: Option<BybitProductType>,
+        #[case] category: Option<BitgetProductType>,
         #[case] expected: u32,
     ) {
         assert_eq!(account_limit(endpoint, category).1, expected);
     }
 
     #[rstest::rstest]
-    #[case(BybitProductType::Spot, 10, 10, 10, 10)]
-    #[case(BybitProductType::Linear, 20, 20, 10, 10)]
-    #[case(BybitProductType::Inverse, 20, 20, 10, 10)]
-    #[case(BybitProductType::Option, 20, 5, 5, 1)]
+    #[case(BitgetProductType::Spot, 20, 20, 20, 1)]
+    #[case(BitgetProductType::Linear, 20, 20, 20, 1)]
+    #[case(BitgetProductType::Inverse, 20, 20, 20, 1)]
+    #[case(BitgetProductType::Option, 5, 5, 5, 1)]
     fn batch_limits_match_product_rules(
-        #[case] category: BybitProductType,
+        #[case] category: BitgetProductType,
         #[case] call_limit: usize,
         #[case] endpoint_limit: usize,
         #[case] send_limit: usize,
@@ -824,16 +808,27 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(Some("category=linear&symbol=BTCUSDT"), Some(BybitProductType::Linear))]
     #[case(
-        Some(r#"{"category":"option","symbol":"BTC-30AUG26-100000-C"}"#),
-        Some(BybitProductType::Option)
+        Some("category=USDT-FUTURES&symbol=BTCUSDT"),
+        Some(BitgetProductType::Linear)
     )]
-    #[case(Some(r#"{"orderLinkId":"category=spot"}"#), None)]
+    #[case(
+        Some(r#"{"category":"usdt-futures","symbol":"BTCUSDT"}"#),
+        Some(BitgetProductType::Linear)
+    )]
+    #[case(
+        Some(r#"{"category":"SPOT","symbol":"BTCUSDT"}"#),
+        Some(BitgetProductType::Spot)
+    )]
+    #[case(
+        Some(r#"[{"category":"USDT-FUTURES","symbol":"BTCUSDT"}]"#),
+        Some(BitgetProductType::Linear)
+    )]
+    #[case(Some(r#"{"clientOid":"category=SPOT"}"#), None)]
     #[case(None, None)]
     fn parses_category_from_request_payload(
         #[case] payload: Option<&str>,
-        #[case] expected: Option<BybitProductType>,
+        #[case] expected: Option<BitgetProductType>,
     ) {
         assert_eq!(category_from_payload(payload), expected);
     }
@@ -841,20 +836,26 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn http_and_websocket_share_uid_state() {
         let http =
-            BybitRateLimiter::for_http("https://shared-uid.invalid", Some("shared-key"), None);
-        let websocket = BybitRateLimiter::for_websocket(
-            "wss://shared-uid.invalid/v5/trade",
+            BitgetRateLimiter::for_http("https://shared-uid.invalid", Some("shared-key"), None);
+        let websocket = BitgetRateLimiter::for_websocket(
+            "wss://shared-uid.invalid/v3/ws/private",
             Some("shared-key"),
             None,
         );
 
         for _ in 0..10 {
-            http.acquire_http("/v5/order/amend", Some(BybitProductType::Linear), 1, true)
-                .await
-                .unwrap();
+            http.acquire_http(
+                "/api/v3/trade/modify-order",
+                Some(BitgetProductType::Linear),
+                1,
+                true,
+            )
+            .await
+            .unwrap();
         }
 
-        let waiting = websocket.acquire_ws_order("/v5/order/amend", BybitProductType::Linear, 1);
+        let waiting =
+            websocket.acquire_ws_order("/api/v3/trade/modify-order", BitgetProductType::Linear, 1);
         tokio::pin!(waiting);
         assert!(futures_util::poll!(&mut waiting).is_pending());
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -863,19 +864,19 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn account_and_ip_reservations_are_atomic() {
-        let http = Arc::new(BybitRateLimiter::for_http(
+        let http = Arc::new(BitgetRateLimiter::for_http(
             "https://atomic-scopes.invalid",
             Some("atomic-key"),
             None,
         ));
-        let websocket = BybitRateLimiter::for_websocket(
-            "wss://atomic-scopes.invalid/v5/trade",
+        let websocket = BitgetRateLimiter::for_websocket(
+            "wss://atomic-scopes.invalid/v3/ws/private",
             Some("atomic-key"),
             None,
         );
 
         for _ in 0..HTTP_IP_LIMIT {
-            http.acquire_http("/v5/market/time", None, 1, false)
+            http.acquire_http("/api/v3/market/time", None, 1, false)
                 .await
                 .unwrap();
         }
@@ -883,9 +884,14 @@ mod tests {
         let waiting = {
             let http = Arc::clone(&http);
             tokio::spawn(async move {
-                http.acquire_http("/v5/order/amend", Some(BybitProductType::Linear), 1, true)
-                    .await
-                    .unwrap();
+                http.acquire_http(
+                    "/api/v3/trade/modify-order",
+                    Some(BitgetProductType::Linear),
+                    1,
+                    true,
+                )
+                .await
+                .unwrap();
             })
         };
         tokio::task::yield_now().await;
@@ -893,7 +899,7 @@ mod tests {
 
         for _ in 0..10 {
             websocket
-                .acquire_ws_order("/v5/order/amend", BybitProductType::Linear, 1)
+                .acquire_ws_order("/api/v3/trade/modify-order", BitgetProductType::Linear, 1)
                 .await
                 .unwrap();
         }
@@ -905,14 +911,14 @@ mod tests {
     #[rstest::rstest]
     fn shared_state_survives_client_recreation() {
         let generation = {
-            let first = BybitRateLimiter::for_http(
+            let first = BitgetRateLimiter::for_http(
                 "https://retained-scope.invalid",
                 Some("retained-key"),
                 None,
             );
             first.reset_http_sessions()
         };
-        let second = BybitRateLimiter::for_http(
+        let second = BitgetRateLimiter::for_http(
             "https://retained-scope.invalid",
             Some("retained-key"),
             None,
@@ -924,17 +930,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn rate_limit_403_blocks_shared_http_scope_for_ten_minutes() {
         let first =
-            BybitRateLimiter::for_http("https://cooldown-test.invalid", Some("first-key"), None);
+            BitgetRateLimiter::for_http("https://cooldown-test.invalid", Some("first-key"), None);
         let second =
-            BybitRateLimiter::for_http("https://cooldown-test.invalid", Some("second-key"), None);
+            BitgetRateLimiter::for_http("https://cooldown-test.invalid", Some("second-key"), None);
         let generation = first.reset_http_sessions();
         assert_eq!(second.http_session_generation(), generation);
 
         let waiting = tokio::spawn(async move {
             second
                 .acquire_http(
-                    "/v5/order/realtime",
-                    Some(BybitProductType::Linear),
+                    "/api/v3/trade/unfilled-orders",
+                    Some(BitgetProductType::Linear),
                     1,
                     true,
                 )
@@ -944,7 +950,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
         tokio::time::advance(
-            BYBIT_HTTP_IP_COOLDOWN
+            BITGET_HTTP_IP_COOLDOWN
                 .checked_sub(Duration::from_millis(1))
                 .unwrap(),
         )
@@ -956,8 +962,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn websocket_connection_attempts_share_domain_budget() {
-        let first = websocket_connection_limiter("wss://connection-test.invalid/v5/trade", None);
-        let second = websocket_connection_limiter("wss://connection-test.invalid/v5/private", None);
+        let first =
+            websocket_connection_limiter("wss://connection-test.invalid/v3/ws/private", None);
+        let second =
+            websocket_connection_limiter("wss://connection-test.invalid/v3/ws/private-2", None);
         assert!(Arc::ptr_eq(&first, &second));
         let key = websocket_connection_key();
         first.await_keys_ready(Some(&[key])).await;

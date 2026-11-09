@@ -13,32 +13,103 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Shared data transfer objects used across Bybit HTTP and WebSocket payloads.
+//! Shared data transfer objects used across Bitget HTTP and WebSocket payloads.
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::enums::BybitProductType;
+use crate::common::{
+    enums::BitgetProductType,
+    parse::{deserialize_code, deserialize_null_default, deserialize_optional_cursor},
+};
 
-/// Generic wrapper that contains a list payload returned by Bybit.
+/// Generic wrapper that contains a list payload returned by Bitget.
+///
+/// Bitget returns most lists as a bare JSON array in `data` and some as `{"list": [...]}`;
+/// both forms (and `null`) decode into this wrapper.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitList<T> {
-    /// Collection returned by the endpoint.
+#[serde(
+    rename_all = "camelCase",
+    bound(deserialize = "T: Deserialize<'de>"),
+    from = "ListPayload<T>"
+)]
+pub struct BitgetList<T> {
+    /// Collection returned by the endpoint (`null` when empty).
     pub list: Vec<T>,
+}
+
+impl<T> From<ListPayload<T>> for BitgetList<T> {
+    fn from(payload: ListPayload<T>) -> Self {
+        let page = BitgetCursorList::from(payload);
+        Self { list: page.list }
+    }
+}
+
+/// Wire forms of a Bitget list payload: a bare array, a `{list, cursor}` object, or `null`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged, bound(deserialize = "T: Deserialize<'de>"))]
+#[doc(hidden)]
+pub enum ListPayload<T> {
+    Array(Vec<T>),
+    Page(PagePayload<T>),
+    Null(()),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", bound(deserialize = "T: Deserialize<'de>"))]
+#[doc(hidden)]
+pub struct PagePayload<T> {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    list: Vec<T>,
+    #[serde(default, deserialize_with = "deserialize_optional_cursor")]
+    cursor: Option<String>,
+    #[serde(default)]
+    category: Option<BitgetProductType>,
+}
+
+impl<T> From<ListPayload<T>> for BitgetCursorList<T> {
+    fn from(payload: ListPayload<T>) -> Self {
+        match payload {
+            ListPayload::Array(list) => Self {
+                list,
+                next_page_cursor: None,
+                category: None,
+            },
+            ListPayload::Page(page) => Self {
+                list: page.list,
+                next_page_cursor: page.cursor,
+                category: page.category,
+            },
+            ListPayload::Null(()) => Self {
+                list: Vec::new(),
+                next_page_cursor: None,
+                category: None,
+            },
+        }
+    }
 }
 
 /// Generic list result that also carries pagination cursor information.
+///
+/// Bitget returns `"list": null` for empty pages (e.g. `/api/v3/trade/fills`), decoded as empty.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitCursorList<T> {
-    /// Collection returned by the endpoint.
+#[serde(
+    rename_all = "camelCase",
+    bound(deserialize = "T: Deserialize<'de>"),
+    from = "ListPayload<T>"
+)]
+pub struct BitgetCursorList<T> {
+    /// Collection returned by the endpoint (`null` when empty).
     pub list: Vec<T>,
-    /// Pagination cursor for the next page, when provided.
+    /// Pagination cursor for the next page, when provided (the smallest id of this page).
+    #[serde(rename = "cursor")]
     pub next_page_cursor: Option<String>,
     /// Optional product category when the API includes it.
     #[serde(default)]
-    pub category: Option<BybitProductType>,
+    pub category: Option<BitgetProductType>,
 }
+
+// Bitget instruments are flat; the filter structs below are built from the flat fields by the
+// instrument models (`price_filter()`, `lot_size_filter()`, ...) so parsing mirrors the other venues.
 
 /// Common leverage filter that describes leverage bounds and step.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -123,46 +194,53 @@ pub struct OptionLotSizeFilter {
     pub qty_step: String,
 }
 
-/// Trait for Bybit response types that contain ret_code and ret_msg fields.
-pub trait BybitResponseCheck {
-    /// Returns the response code (0 = success).
+/// Trait for Bitget response types that contain `code` and `msg` fields.
+pub trait BitgetResponseCheck {
+    /// Returns the response code (0 = success, decoded from `"00000"`).
     fn ret_code(&self) -> i64;
     /// Returns the response message.
     fn ret_msg(&self) -> &str;
 }
 
-/// Lightweight struct for checking Bybit API errors without deserializing result.
+/// Lightweight struct for checking Bitget API errors without deserializing result.
 ///
-/// Bybit error responses often have `result: null` which would fail deserialization
+/// Bitget error responses often have `result: null` which would fail deserialization
 /// into typed response structs. This struct ignores the result field entirely.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitErrorCheck {
-    /// Return code (0 = success).
+pub struct BitgetErrorCheck {
+    /// Return code (0 = success, decoded from `"00000"`).
+    #[serde(rename = "code", deserialize_with = "deserialize_code")]
     pub ret_code: i64,
     /// Textual message accompanying the response.
+    #[serde(rename = "msg", default)]
     pub ret_msg: String,
 }
 
-/// Top-level response envelope returned by Bybit HTTP endpoints.
+/// Top-level response envelope returned by Bitget HTTP endpoints.
+///
+/// Bitget envelope: `{"code":"00000","msg":"success","requestTime":<ms>,"data":<payload>}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BybitResponse<T> {
-    /// Return code (0 = success).
+pub struct BitgetResponse<T> {
+    /// Return code (0 = success, decoded from `"00000"`).
+    #[serde(rename = "code", deserialize_with = "deserialize_code")]
     pub ret_code: i64,
     /// Textual message accompanying the response.
+    #[serde(rename = "msg", default)]
     pub ret_msg: String,
     /// Actual payload returned by the endpoint.
+    #[serde(rename = "data")]
     pub result: T,
-    /// Additional metadata returned by some endpoints.
+    /// Additional metadata (Bitget sends none; kept for parity).
     #[serde(default)]
     pub ret_ext_info: Option<serde_json::Value>,
     /// Server time in milliseconds when the response was produced.
-    #[serde(default)]
+    #[serde(rename = "requestTime", default)]
     pub time: Option<i64>,
 }
 
-impl<T> BybitResponseCheck for BybitResponse<T> {
+impl<T> BitgetResponseCheck for BitgetResponse<T> {
     fn ret_code(&self) -> i64 {
         self.ret_code
     }
@@ -173,7 +251,64 @@ impl<T> BybitResponseCheck for BybitResponse<T> {
 }
 
 /// Convenience alias for responses that return a simple list.
-pub type BybitListResponse<T> = BybitResponse<BybitList<T>>;
+pub type BitgetListResponse<T> = BitgetResponse<BitgetList<T>>;
 
 /// Convenience alias for responses that return a cursor-based list.
-pub type BybitCursorListResponse<T> = BybitResponse<BybitCursorList<T>>;
+pub type BitgetCursorListResponse<T> = BitgetResponse<BitgetCursorList<T>>;
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    fn test_cursor_list_null_is_empty() {
+        let page: BitgetCursorList<String> =
+            serde_json::from_str(r#"{"list":null,"cursor":null}"#).unwrap();
+        assert!(page.list.is_empty());
+        assert!(page.next_page_cursor.is_none());
+    }
+
+    #[rstest]
+    fn test_cursor_list_numeric_cursor() {
+        let page: BitgetCursorList<String> =
+            serde_json::from_str(r#"{"list":["a"],"cursor":1235058132196622336}"#).unwrap();
+        assert_eq!(page.list, vec!["a".to_string()]);
+        assert_eq!(
+            page.next_page_cursor.as_deref(),
+            Some("1235058132196622336")
+        );
+    }
+
+    #[rstest]
+    fn test_list_missing_is_empty() {
+        let page: BitgetList<String> = serde_json::from_str("{}").unwrap();
+        assert!(page.list.is_empty());
+    }
+
+    #[rstest]
+    #[case(r#"["a","b"]"#, 2)]
+    #[case(r#"{"list":["a","b"]}"#, 2)]
+    #[case("null", 0)]
+    fn test_list_wire_forms(#[case] raw: &str, #[case] expected: usize) {
+        let list: BitgetList<String> = serde_json::from_str(raw).unwrap();
+        assert_eq!(list.list.len(), expected);
+        let page: BitgetCursorList<String> = serde_json::from_str(raw).unwrap();
+        assert_eq!(page.list.len(), expected);
+    }
+
+    #[rstest]
+    #[case(r#"{"code":"00000","msg":"success","requestTime":1,"data":null}"#, 0)]
+    #[case(
+        r#"{"code":"25204","msg":"Order does not exist","requestTime":1,"data":null}"#,
+        25204
+    )]
+    #[case(r#"{"code":0,"msg":"","data":null}"#, 0)]
+    fn test_response_code_forms(#[case] raw: &str, #[case] expected: i64) {
+        let response: BitgetResponse<Option<String>> = serde_json::from_str(raw).unwrap();
+        assert_eq!(response.ret_code, expected);
+        let check: BitgetErrorCheck = serde_json::from_str(raw).unwrap();
+        assert_eq!(check.ret_code, expected);
+    }
+}

@@ -1,15 +1,15 @@
-# nautilus-bybit
+# nautilus-bitget
 
 [![build](https://github.com/nautechsystems/nautilus_trader/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/nautechsystems/nautilus_trader/actions/workflows/build.yml)
-[![Documentation](https://img.shields.io/docsrs/nautilus-bybit)](https://docs.rs/nautilus-bybit/latest/nautilus_bybit/)
-[![crates.io version](https://img.shields.io/crates/v/nautilus-bybit.svg)](https://crates.io/crates/nautilus-bybit)
+[![Documentation](https://img.shields.io/docsrs/nautilus-bitget)](https://docs.rs/nautilus-bitget/latest/nautilus_bitget/)
+[![crates.io version](https://img.shields.io/crates/v/nautilus-bitget.svg)](https://crates.io/crates/nautilus-bitget)
 ![license](https://img.shields.io/github/license/nautechsystems/nautilus_trader?color=blue)
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/NautilusTrader)
 
-[NautilusTrader](https://nautilustrader.io) adapter for the [Bybit](https://www.bybit.com) exchange.
+[NautilusTrader](https://nautilustrader.io) adapter for the [Bitget](https://www.bitget.com) exchange.
 
-The `nautilus-bybit` crate provides client bindings (HTTP & WebSocket) and data models
-for the official **Bybit API**.
+The `nautilus-bitget` crate provides client bindings (HTTP & WebSocket) and data models
+for the official **Bitget API**.
 
 ## NautilusTrader
 
@@ -33,7 +33,7 @@ This crate provides feature flags to control source code inclusion during compil
 
 ## Documentation
 
-See [the docs](https://docs.rs/nautilus-bybit) for more detailed usage.
+See [the docs](https://docs.rs/nautilus-bitget) for more detailed usage.
 
 ## License
 

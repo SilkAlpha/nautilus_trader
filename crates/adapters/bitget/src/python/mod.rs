@@ -33,219 +33,225 @@ use pyo3::prelude::*;
 
 use crate::{
     common::{
-        consts::{BYBIT, BYBIT_CLIENT_ID, BYBIT_VENUE},
-        enums::{BybitOrderSide, BybitPositionIdx, BybitPositionMode},
-        parse::{bar_spec_to_bybit_interval, extract_raw_symbol, resolve_position_idx},
-        symbol::BybitSymbol,
+        consts::{BITGET, BITGET_CLIENT_ID, BITGET_VENUE},
+        enums::{BitgetOrderSide, BitgetPositionIdx, BitgetPositionMode},
+        parse::{bar_spec_to_bitget_interval, extract_raw_symbol, resolve_position_idx},
+        symbol::BitgetSymbol,
     },
-    config::{BybitDataClientConfig, BybitExecutionClientConfig},
-    data_types::{BybitLiquidation, register_bybit_custom_data},
-    factories::{BybitDataClientFactory, BybitExecutionClientFactory},
+    config::{BitgetDataClientConfig, BitgetExecutionClientConfig},
+    data_types::{BitgetLiquidation, register_bitget_custom_data},
+    factories::{BitgetDataClientFactory, BitgetExecutionClientFactory},
 };
 
-/// Extracts the raw symbol from a Bybit symbol by removing the product type suffix.
+/// Extracts the raw symbol from a Bitget symbol by removing the product type suffix.
 ///
 /// # Examples
 /// - `"ETHUSDT-LINEAR"` → `"ETHUSDT"`
 /// - `"BTCUSDT-SPOT"` → `"BTCUSDT"`
 /// - `"ETHUSDT"` → `"ETHUSDT"` (no suffix)
 #[pyfunction]
-#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bybit")]
-#[pyo3(name = "bybit_extract_raw_symbol")]
-fn py_bybit_extract_raw_symbol(symbol: &str) -> &str {
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bitget")]
+#[pyo3(name = "bitget_extract_raw_symbol")]
+fn py_bitget_extract_raw_symbol(symbol: &str) -> &str {
     extract_raw_symbol(symbol)
 }
 
-/// Converts a Nautilus bar aggregation and step to a Bybit kline interval string.
+/// Converts a Nautilus bar aggregation and step to a Bitget kline interval string.
 ///
 /// # Errors
 ///
-/// Returns an error if the aggregation type or step is not supported by Bybit.
+/// Returns an error if the aggregation type or step is not supported by Bitget.
 #[pyfunction]
-#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bybit")]
-#[pyo3(name = "bybit_bar_spec_to_interval")]
-fn py_bybit_bar_spec_to_interval(aggregation: BarAggregation, step: u64) -> PyResult<String> {
-    let interval = bar_spec_to_bybit_interval(aggregation, step).map_err(to_pyvalue_err)?;
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bitget")]
+#[pyo3(name = "bitget_bar_spec_to_interval")]
+fn py_bitget_bar_spec_to_interval(aggregation: BarAggregation, step: u64) -> PyResult<String> {
+    let interval = bar_spec_to_bitget_interval(aggregation, step).map_err(to_pyvalue_err)?;
     Ok(interval.to_string())
 }
 
-/// Extracts the product type from a Bybit symbol.
+/// Extracts the product type from a Bitget symbol.
 ///
 /// # Examples
-/// - `"ETHUSDT-LINEAR"` → `BybitProductType.LINEAR`
-/// - `"BTCUSDT-SPOT"` → `BybitProductType.SPOT`
-/// - `"BTCUSD-INVERSE"` → `BybitProductType.INVERSE`
-/// - `"ETH-26JUN26-16000-P-OPTION"` → `BybitProductType.OPTION`
+/// - `"ETHUSDT-LINEAR"` → `BitgetProductType.LINEAR`
+/// - `"BTCUSDT-SPOT"` → `BitgetProductType.SPOT`
+/// - `"BTCUSD-INVERSE"` → `BitgetProductType.INVERSE`
+/// - `"ETH-26JUN26-16000-P-OPTION"` → `BitgetProductType.OPTION`
 ///
 /// # Errors
 ///
-/// Returns an error if the symbol does not contain a valid Bybit product type suffix.
+/// Returns an error if the symbol does not contain a valid Bitget product type suffix.
 #[pyfunction]
-#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bybit")]
-#[pyo3(name = "bybit_product_type_from_symbol")]
-fn py_bybit_product_type_from_symbol(
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bitget")]
+#[pyo3(name = "bitget_product_type_from_symbol")]
+fn py_bitget_product_type_from_symbol(
     symbol: &str,
-) -> PyResult<crate::common::enums::BybitProductType> {
-    let bybit_symbol = BybitSymbol::new(symbol).map_err(to_pyvalue_err)?;
-    Ok(bybit_symbol.product_type())
+) -> PyResult<crate::common::enums::BitgetProductType> {
+    let bitget_symbol = BitgetSymbol::new(symbol).map_err(to_pyvalue_err)?;
+    Ok(bitget_symbol.product_type())
 }
 
-/// Resolves the Bybit `positionIdx` for an outgoing order.
+/// Resolves the Bitget `positionIdx` for an outgoing order.
 ///
 /// Returns `None` when no position mode is configured. Otherwise returns the
 /// hedge-mode index for the position being affected (long or short), accounting
 /// for `is_reduce_only`. A `manual_override` always wins.
 #[pyfunction]
-#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bybit")]
-#[pyo3(name = "bybit_resolve_position_idx")]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.bitget")]
+#[pyo3(name = "bitget_resolve_position_idx")]
 #[pyo3(signature = (position_mode, order_side, is_reduce_only, manual_override=None))]
-fn py_bybit_resolve_position_idx(
-    position_mode: Option<BybitPositionMode>,
+fn py_bitget_resolve_position_idx(
+    position_mode: Option<BitgetPositionMode>,
     order_side: OrderSide,
     is_reduce_only: bool,
-    manual_override: Option<BybitPositionIdx>,
-) -> Option<BybitPositionIdx> {
-    let bybit_side = BybitOrderSide::from(order_side);
-    resolve_position_idx(position_mode, bybit_side, is_reduce_only, manual_override)
+    manual_override: Option<BitgetPositionIdx>,
+) -> Option<BitgetPositionIdx> {
+    let bitget_side = BitgetOrderSide::from(order_side);
+    resolve_position_idx(position_mode, bitget_side, is_reduce_only, manual_override)
 }
 
 #[expect(clippy::needless_pass_by_value)]
-fn extract_bybit_data_factory(
+fn extract_bitget_data_factory(
     py: Python<'_>,
     factory: Py<PyAny>,
 ) -> PyResult<Box<dyn DataClientFactory>> {
-    match factory.extract::<BybitDataClientFactory>(py) {
+    match factory.extract::<BitgetDataClientFactory>(py) {
         Ok(f) => Ok(Box::new(f)),
         Err(e) => Err(to_pyvalue_err(format!(
-            "Failed to extract BybitDataClientFactory: {e}"
+            "Failed to extract BitgetDataClientFactory: {e}"
         ))),
     }
 }
 
 #[expect(clippy::needless_pass_by_value)]
-fn extract_bybit_exec_factory(
+fn extract_bitget_exec_factory(
     py: Python<'_>,
     factory: Py<PyAny>,
 ) -> PyResult<Box<dyn ExecutionClientFactory>> {
-    match factory.extract::<BybitExecutionClientFactory>(py) {
+    match factory.extract::<BitgetExecutionClientFactory>(py) {
         Ok(f) => Ok(Box::new(f)),
         Err(e) => Err(to_pyvalue_err(format!(
-            "Failed to extract BybitExecutionClientFactory: {e}"
+            "Failed to extract BitgetExecutionClientFactory: {e}"
         ))),
     }
 }
 
 #[expect(clippy::needless_pass_by_value)]
-fn extract_bybit_data_config(py: Python<'_>, config: Py<PyAny>) -> PyResult<Box<dyn ClientConfig>> {
-    match config.extract::<BybitDataClientConfig>(py) {
+fn extract_bitget_data_config(
+    py: Python<'_>,
+    config: Py<PyAny>,
+) -> PyResult<Box<dyn ClientConfig>> {
+    match config.extract::<BitgetDataClientConfig>(py) {
         Ok(c) => Ok(Box::new(c)),
         Err(e) => Err(to_pyvalue_err(format!(
-            "Failed to extract BybitDataClientConfig: {e}"
+            "Failed to extract BitgetDataClientConfig: {e}"
         ))),
     }
 }
 
 #[expect(clippy::needless_pass_by_value)]
-fn extract_bybit_exec_config(py: Python<'_>, config: Py<PyAny>) -> PyResult<Box<dyn ClientConfig>> {
-    match config.extract::<BybitExecutionClientConfig>(py) {
+fn extract_bitget_exec_config(
+    py: Python<'_>,
+    config: Py<PyAny>,
+) -> PyResult<Box<dyn ClientConfig>> {
+    match config.extract::<BitgetExecutionClientConfig>(py) {
         Ok(c) => Ok(Box::new(c)),
         Err(e) => Err(to_pyvalue_err(format!(
-            "Failed to extract BybitExecutionClientConfig: {e}"
+            "Failed to extract BitgetExecutionClientConfig: {e}"
         ))),
     }
 }
 
-/// Exposed through `nautilus_trader.adapters.bybit`.
+/// Exposed through `nautilus_trader.adapters.bitget`.
 ///
 /// # Errors
 ///
 /// Returns an error if any bindings fail to register with the Python module.
 #[pymodule]
 #[rustfmt::skip]
-pub fn bybit(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add(stringify!(BYBIT), BYBIT)?;
-    m.add(stringify!(BYBIT_CLIENT_ID), *BYBIT_CLIENT_ID)?;
-    m.add(stringify!(BYBIT_VENUE), *BYBIT_VENUE)?;
-    m.add_class::<crate::common::enums::BybitAccountType>()?;
-    m.add_class::<crate::common::enums::BybitCancelType>()?;
-    m.add_class::<crate::common::enums::BybitEnvironment>()?;
-    m.add_class::<crate::common::enums::BybitMarginAction>()?;
-    m.add_class::<crate::common::enums::BybitMarginMode>()?;
-    m.add_class::<crate::common::enums::BybitOpenOnly>()?;
-    m.add_class::<crate::common::enums::BybitOrderFilter>()?;
-    m.add_class::<crate::common::enums::BybitOrderSide>()?;
-    m.add_class::<crate::common::enums::BybitOrderStatus>()?;
-    m.add_class::<crate::common::enums::BybitOrderType>()?;
-    m.add_class::<crate::common::enums::BybitPositionIdx>()?;
-    m.add_class::<crate::common::enums::BybitPositionMode>()?;
-    m.add_class::<crate::common::enums::BybitProductType>()?;
-    m.add_class::<crate::common::enums::BybitStopOrderType>()?;
-    m.add_class::<crate::common::enums::BybitTimeInForce>()?;
-    m.add_class::<crate::common::enums::BybitTpSlMode>()?;
-    m.add_class::<crate::common::enums::BybitTriggerDirection>()?;
-    m.add_class::<crate::common::enums::BybitTriggerType>()?;
-    m.add_class::<crate::http::client::BybitHttpClient>()?;
-    m.add_class::<crate::http::client::BybitRawHttpClient>()?;
-    m.add_class::<crate::http::models::BybitServerTime>()?;
-    m.add_class::<crate::http::models::BybitAccountDetails>()?;
-    m.add_class::<crate::http::models::BybitApiKeyPermissions>()?;
-    m.add_class::<crate::http::models::BybitFeeRate>()?;
-    m.add_class::<crate::http::models::BybitOrder>()?;
-    m.add_class::<crate::http::models::BybitOrderCursorList>()?;
-    m.add_class::<crate::http::models::BybitTickerData>()?;
-    m.add_class::<crate::common::types::BybitMarginBorrowResult>()?;
-    m.add_class::<crate::common::types::BybitMarginRepayResult>()?;
-    m.add_class::<crate::common::types::BybitMarginStatusResult>()?;
-    m.add_class::<params::BybitTickersParams>()?;
-    m.add_class::<params::BybitNativeTpSlParams>()?;
-    m.add_class::<BybitLiquidation>()?;
-    m.add_class::<BybitDataClientConfig>()?;
-    m.add_class::<BybitDataClientFactory>()?;
-    m.add_class::<BybitExecutionClientConfig>()?;
-    m.add_class::<BybitExecutionClientFactory>()?;
-    m.add_function(wrap_pyfunction!(py_bybit_extract_raw_symbol, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bybit_bar_spec_to_interval, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bybit_product_type_from_symbol, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bybit_resolve_position_idx, m)?)?;
+pub fn bitget(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add(stringify!(BITGET), BITGET)?;
+    m.add(stringify!(BITGET_CLIENT_ID), *BITGET_CLIENT_ID)?;
+    m.add(stringify!(BITGET_VENUE), *BITGET_VENUE)?;
+    m.add_class::<crate::common::enums::BitgetAccountType>()?;
+    m.add_class::<crate::common::enums::BitgetCancelType>()?;
+    m.add_class::<crate::common::enums::BitgetEnvironment>()?;
+    m.add_class::<crate::common::enums::BitgetMarginAction>()?;
+    m.add_class::<crate::common::enums::BitgetMarginMode>()?;
+    m.add_class::<crate::common::enums::BitgetOpenOnly>()?;
+    m.add_class::<crate::common::enums::BitgetOrderFilter>()?;
+    m.add_class::<crate::common::enums::BitgetOrderSide>()?;
+    m.add_class::<crate::common::enums::BitgetOrderStatus>()?;
+    m.add_class::<crate::common::enums::BitgetOrderType>()?;
+    m.add_class::<crate::common::enums::BitgetPositionIdx>()?;
+    m.add_class::<crate::common::enums::BitgetPositionMode>()?;
+    m.add_class::<crate::common::enums::BitgetProductType>()?;
+    m.add_class::<crate::common::enums::BitgetStopOrderType>()?;
+    m.add_class::<crate::common::enums::BitgetTimeInForce>()?;
+    m.add_class::<crate::common::enums::BitgetTpSlMode>()?;
+    m.add_class::<crate::common::enums::BitgetTriggerDirection>()?;
+    m.add_class::<crate::common::enums::BitgetTriggerType>()?;
+    m.add_class::<crate::http::client::BitgetHttpClient>()?;
+    m.add_class::<crate::http::client::BitgetRawHttpClient>()?;
+    m.add_class::<crate::http::models::BitgetServerTime>()?;
+    m.add_class::<crate::http::models::BitgetAccountDetails>()?;
+    m.add_class::<crate::http::models::BitgetApiKeyPermissions>()?;
+    m.add_class::<crate::http::models::BitgetFeeRate>()?;
+    m.add_class::<crate::http::models::BitgetOrder>()?;
+    m.add_class::<crate::http::models::BitgetOrderCursorList>()?;
+    m.add_class::<crate::http::models::BitgetTickerData>()?;
+    m.add_class::<crate::common::types::BitgetMarginBorrowResult>()?;
+    m.add_class::<crate::common::types::BitgetMarginRepayResult>()?;
+    m.add_class::<crate::common::types::BitgetMarginStatusResult>()?;
+    m.add_class::<params::BitgetTickersParams>()?;
+    m.add_class::<params::BitgetNativeTpSlParams>()?;
+    m.add_class::<BitgetLiquidation>()?;
+    m.add_class::<BitgetDataClientConfig>()?;
+    m.add_class::<BitgetDataClientFactory>()?;
+    m.add_class::<BitgetExecutionClientConfig>()?;
+    m.add_class::<BitgetExecutionClientFactory>()?;
+    m.add_function(wrap_pyfunction!(py_bitget_extract_raw_symbol, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bitget_bar_spec_to_interval, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bitget_product_type_from_symbol, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bitget_resolve_position_idx, m)?)?;
 
     let registry = get_global_pyo3_registry();
 
     if let Err(e) =
-        registry.register_factory_extractor(BYBIT.to_string(), extract_bybit_data_factory)
+        registry.register_factory_extractor(BITGET.to_string(), extract_bitget_data_factory)
     {
         return Err(to_pyruntime_err(format!(
-            "Failed to register Bybit data factory extractor: {e}"
+            "Failed to register Bitget data factory extractor: {e}"
         )));
     }
 
     if let Err(e) = registry
-        .register_exec_factory_extractor(BYBIT.to_string(), extract_bybit_exec_factory)
+        .register_exec_factory_extractor(BITGET.to_string(), extract_bitget_exec_factory)
     {
         return Err(to_pyruntime_err(format!(
-            "Failed to register Bybit exec factory extractor: {e}"
+            "Failed to register Bitget exec factory extractor: {e}"
         )));
     }
 
     if let Err(e) = registry.register_config_extractor(
-        "BybitDataClientConfig".to_string(),
-        extract_bybit_data_config,
+        "BitgetDataClientConfig".to_string(),
+        extract_bitget_data_config,
     ) {
         return Err(to_pyruntime_err(format!(
-            "Failed to register Bybit data config extractor: {e}"
+            "Failed to register Bitget data config extractor: {e}"
         )));
     }
 
     if let Err(e) = registry.register_config_extractor(
-        "BybitExecutionClientConfig".to_string(),
-        extract_bybit_exec_config,
+        "BitgetExecutionClientConfig".to_string(),
+        extract_bitget_exec_config,
     ) {
         return Err(to_pyruntime_err(format!(
-            "Failed to register Bybit exec config extractor: {e}"
+            "Failed to register Bitget exec config extractor: {e}"
         )));
     }
 
-    register_bybit_custom_data();
-    let _result = ensure_rust_extractor_registered::<BybitLiquidation>();
+    register_bitget_custom_data();
+    let _result = ensure_rust_extractor_registered::<BitgetLiquidation>();
 
     Ok(())
 }

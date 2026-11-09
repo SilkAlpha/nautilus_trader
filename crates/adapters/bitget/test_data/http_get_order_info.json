@@ -1,0 +1,48 @@
+{
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794193103249,
+  "data": {
+    "orderId": "1503520323393708032",
+    "clientOid": "tdcapioc93099",
+    "category": "USDT-FUTURES",
+    "symbol": "TSLAUSDT",
+    "orderType": "limit",
+    "side": "buy",
+    "price": "361.44",
+    "qty": "0.02",
+    "amount": "0",
+    "cumExecQty": "0.02",
+    "cumExecValue": "7.2144",
+    "avgPrice": "360.72",
+    "timeInForce": "ioc",
+    "orderStatus": "filled",
+    "posSide": "long",
+    "tradeSide": "buy_single",
+    "holdMode": "one_way_mode",
+    "reduceOnly": "NO",
+    "feeDetail": [
+      {
+        "feeCoin": "USDT",
+        "fee": "0.00288576"
+      }
+    ],
+    "createdTime": "1794193099830",
+    "updatedTime": "1794193099832",
+    "cancelReason": "",
+    "execType": "normal",
+    "stpMode": "none",
+    "tpTriggerBy": null,
+    "slTriggerBy": null,
+    "takeProfit": null,
+    "stopLoss": null,
+    "tpOrderType": null,
+    "slOrderType": null,
+    "tpLimitPrice": null,
+    "slLimitPrice": null,
+    "marginMode": "crossed",
+    "delegateType": "normal",
+    "venue": "",
+    "rTokenTimeInForce": ""
+  }
+}

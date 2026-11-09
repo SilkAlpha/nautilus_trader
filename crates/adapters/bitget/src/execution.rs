@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Live execution client implementation for the Bybit adapter.
+//! Live execution client implementation for the Bitget adapter.
 
 use std::{
     future::Future,
@@ -60,50 +60,49 @@ use ustr::Ustr;
 
 use crate::{
     common::{
-        consts::BYBIT_VENUE,
+        consts::BITGET_VENUE,
         credential::credential_env_vars,
         enums::{
-            BybitAccountType, BybitEnvironment, BybitOrderSide, BybitOrderSmpType, BybitOrderType,
-            BybitPositionIdx, BybitPositionMode, BybitProductType, BybitTimeInForce, BybitTpSlMode,
-            resolve_trigger_type,
+            BitgetAccountType, BitgetBboSideType, BitgetEnvironment, BitgetOrderSide,
+            BitgetOrderSmpType, BitgetOrderType, BitgetPositionIdx, BitgetPositionMode,
+            BitgetProductType, BitgetTimeInForce, resolve_trigger_type,
         },
         parse::{
-            BybitTpSlParams, bybit_rejection_due_post_only, extract_raw_symbol, get_price_str,
-            make_hedge_venue_position_id, nanos_to_millis, parse_bybit_tp_sl_params,
-            resolve_position_idx as resolve_bybit_position_idx, spot_leverage, spot_market_unit,
-            trigger_direction,
+            BitgetTpSlParams, bitget_rejection_due_post_only, extract_raw_symbol,
+            make_hedge_venue_position_id, nanos_to_millis, parse_bitget_tp_sl_params,
+            resolve_position_idx as resolve_bitget_position_idx, spot_leverage,
         },
         rate_limit::batch_send_limit,
-        symbol::BybitSymbol,
+        symbol::BitgetSymbol,
     },
-    config::BybitExecutionClientConfig,
+    config::BitgetExecutionClientConfig,
     http::{
-        client::BybitHttpClient,
+        client::BitgetHttpClient,
         error::{
-            BybitCancelOrderError, BybitHttpError, BybitModifyOrderError, BybitSubmitOrderError,
-            is_bybit_ambiguous_order_error_code,
+            BitgetCancelOrderError, BitgetHttpError, BitgetModifyOrderError,
+            BitgetSubmitOrderError, is_bitget_ambiguous_order_error_code,
         },
     },
     websocket::{
-        client::BybitWebSocketClient,
+        client::BitgetWebSocketClient,
         dispatch::{
             OrderIdentity, OrderStateSnapshot, PendingOperation, WsDispatchState,
             dispatch_ws_message,
         },
-        messages::{BybitWsAmendOrderParams, BybitWsCancelOrderParams, BybitWsPlaceOrderParams},
+        messages::{BitgetWsAmendOrderParams, BitgetWsCancelOrderParams, BitgetWsPlaceOrderParams},
     },
 };
 
-/// Live execution client for Bybit.
+/// Live execution client for Bitget.
 #[derive(Debug)]
-pub struct BybitExecutionClient {
+pub struct BitgetExecutionClient {
     core: ExecutionClientCore,
     clock: &'static AtomicTime,
-    config: BybitExecutionClientConfig,
+    config: BitgetExecutionClientConfig,
     emitter: ExecutionEventEmitter,
-    http_client: BybitHttpClient,
-    ws_private: BybitWebSocketClient,
-    ws_trade: BybitWebSocketClient,
+    http_client: BitgetHttpClient,
+    ws_private: BitgetWebSocketClient,
+    ws_trade: BitgetWebSocketClient,
     session_tasks: TaskGroup,
     pending_tasks: TaskGroup,
     shutdown_errors: Vec<String>,
@@ -111,17 +110,17 @@ pub struct BybitExecutionClient {
     dispatch_state: Arc<WsDispatchState>,
 }
 
-impl BybitExecutionClient {
-    /// Creates a new [`BybitExecutionClient`].
+impl BitgetExecutionClient {
+    /// Creates a new [`BitgetExecutionClient`].
     ///
     /// # Errors
     ///
     /// Returns an error if the client fails to initialize.
     pub fn new(
         core: ExecutionClientCore,
-        config: BybitExecutionClientConfig,
+        config: BitgetExecutionClientConfig,
     ) -> anyhow::Result<Self> {
-        let (key_var, secret_var) = credential_env_vars(config.environment);
+        let (key_var, secret_var, passphrase_var) = credential_env_vars(config.environment);
         let api_key = get_or_env_var(
             config.api_key.clone().map(SecretString::into_inner),
             key_var,
@@ -130,14 +129,19 @@ impl BybitExecutionClient {
             config.api_secret.clone().map(SecretString::into_inner),
             secret_var,
         )?;
+        let api_passphrase = get_or_env_var(
+            config.api_passphrase.clone().map(SecretString::into_inner),
+            passphrase_var,
+        )?;
         let proxy_url = config
             .proxy_url
             .as_ref()
             .map(|value| value.expose_secret().to_owned());
 
-        let http_client = BybitHttpClient::with_credentials(
+        let http_client = BitgetHttpClient::with_credentials(
             api_key.clone(),
             api_secret.clone(),
+            api_passphrase.clone(),
             Some(config.http_base_url()),
             config.http_timeout_secs,
             config.max_retries,
@@ -147,11 +151,14 @@ impl BybitExecutionClient {
             proxy_url.clone(),
         )?;
         http_client.set_use_spot_position_reports(config.use_spot_position_reports);
+        // Bitget demo trading shares the mainnet REST host and is selected by header
+        http_client.set_demo_trading(config.environment != BitgetEnvironment::Mainnet);
 
-        let mut ws_private = BybitWebSocketClient::new_private(
+        let mut ws_private = BitgetWebSocketClient::new_private(
             config.environment,
             Some(api_key.clone()),
             Some(api_secret.clone()),
+            Some(api_passphrase.clone()),
             Some(config.ws_private_url()),
             config.heartbeat_interval_secs,
             config.transport_backend,
@@ -159,18 +166,19 @@ impl BybitExecutionClient {
         )
         .with_socket_control(SocketControl::new(
             core.client_id,
-            Some(*BYBIT_VENUE),
-            "bybit-user-streams",
+            Some(*BITGET_VENUE),
+            "bitget-user-streams",
         ));
 
         if let Some(secs) = config.auth_timeout_secs {
             ws_private.set_auth_wait_timeout(Duration::from_secs(secs));
         }
 
-        let mut ws_trade = BybitWebSocketClient::new_trade(
+        let mut ws_trade = BitgetWebSocketClient::new_trade(
             config.environment,
             Some(api_key),
             Some(api_secret),
+            Some(api_passphrase),
             Some(config.ws_trade_url()),
             config.heartbeat_interval_secs,
             config.transport_backend,
@@ -178,8 +186,8 @@ impl BybitExecutionClient {
         )
         .with_socket_control(SocketControl::new(
             core.client_id,
-            Some(*BYBIT_VENUE),
-            "bybit-trading",
+            Some(*BITGET_VENUE),
+            "bitget-trading",
         ));
 
         if let Some(secs) = config.auth_timeout_secs {
@@ -215,9 +223,9 @@ impl BybitExecutionClient {
         })
     }
 
-    fn product_types(&self) -> Vec<BybitProductType> {
+    fn product_types(&self) -> Vec<BitgetProductType> {
         if self.config.product_types.is_empty() {
-            vec![BybitProductType::Linear]
+            vec![BitgetProductType::Linear]
         } else {
             self.config.product_types.clone()
         }
@@ -230,9 +238,9 @@ impl BybitExecutionClient {
 
         self.spawn_task("query_account", async move {
             let account_state = http_client
-                .request_account_state(BybitAccountType::Unified, account_id)
+                .request_account_state(BitgetAccountType::Unified, account_id)
                 .await
-                .context("failed to request Bybit account state")?;
+                .context("failed to request Bitget account state")?;
             emitter.send_account_state(account_state);
             Ok(())
         });
@@ -249,7 +257,7 @@ impl BybitExecutionClient {
         };
 
         if let Err(e) = self.pending_tasks.spawn(future) {
-            log::warn!("Skipping Bybit {description} after shutdown began: {e}");
+            log::warn!("Skipping Bitget {description} after shutdown began: {e}");
         }
     }
 
@@ -266,7 +274,7 @@ impl BybitExecutionClient {
         self.pending_tasks
             .finish_shutdown(Duration::from_secs(1), Duration::from_secs(2))
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to terminate Bybit execution tasks: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to terminate Bitget execution tasks: {e}"))?;
         Ok(())
     }
 
@@ -276,7 +284,7 @@ impl BybitExecutionClient {
             .finish_shutdown(Duration::from_secs(1), Duration::from_secs(2))
             .await
             .map_err(|e| {
-                anyhow::anyhow!("Failed to terminate Bybit execution session tasks: {e}")
+                anyhow::anyhow!("Failed to terminate Bitget execution session tasks: {e}")
             })?;
         Ok(())
     }
@@ -312,7 +320,7 @@ impl BybitExecutionClient {
             Ok(())
         } else {
             let errors = std::mem::take(&mut self.shutdown_errors);
-            anyhow::bail!("Bybit execution shutdown failed: {}", errors.join("; "))
+            anyhow::bail!("Bitget execution shutdown failed: {}", errors.join("; "))
         }
     }
 
@@ -345,22 +353,22 @@ impl BybitExecutionClient {
         }
     }
 
-    fn get_product_type_for_instrument(&self, instrument_id: InstrumentId) -> BybitProductType {
-        BybitProductType::from_suffix(instrument_id.symbol.as_str()).unwrap_or_else(|| {
+    fn get_product_type_for_instrument(&self, instrument_id: InstrumentId) -> BitgetProductType {
+        BitgetProductType::from_suffix(instrument_id.symbol.as_str()).unwrap_or_else(|| {
             log::warn!("No product-type suffix on {instrument_id}, defaulting to Linear");
-            BybitProductType::Linear
+            BitgetProductType::Linear
         })
     }
 
     const fn provides_bulk_position_coverage_for_product_type(
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
     ) -> bool {
-        !matches!(product_type, BybitProductType::Spot)
+        !matches!(product_type, BitgetProductType::Spot)
     }
 
     async fn generate_bulk_position_status_reports(
         &self,
-        product_types: Vec<BybitProductType>,
+        product_types: Vec<BitgetProductType>,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
         let mut reports = Vec::new();
 
@@ -382,14 +390,14 @@ impl BybitExecutionClient {
     fn resolve_position_idx(
         &self,
         instrument_id: InstrumentId,
-        order_side: BybitOrderSide,
+        order_side: BitgetOrderSide,
         is_reduce_only: bool,
-        manual_override: Option<BybitPositionIdx>,
-    ) -> Option<BybitPositionIdx> {
+        manual_override: Option<BitgetPositionIdx>,
+    ) -> Option<BitgetPositionIdx> {
         let product_type = self.get_product_type_for_instrument(instrument_id);
         if !matches!(
             product_type,
-            BybitProductType::Linear | BybitProductType::Inverse
+            BitgetProductType::Linear | BitgetProductType::Inverse
         ) {
             return None;
         }
@@ -398,13 +406,13 @@ impl BybitExecutionClient {
             .position_mode
             .as_ref()
             .and_then(|map| map.get(instrument_id.symbol.as_str()).copied());
-        resolve_bybit_position_idx(mode, order_side, is_reduce_only, manual_override)
+        resolve_bitget_position_idx(mode, order_side, is_reduce_only, manual_override)
     }
 
     fn resolve_smp_type(
         &self,
-        manual_override: Option<BybitOrderSmpType>,
-    ) -> Option<BybitOrderSmpType> {
+        manual_override: Option<BitgetOrderSmpType>,
+    ) -> Option<BitgetOrderSmpType> {
         manual_override.or(self.config.smp_type)
     }
 
@@ -453,7 +461,7 @@ impl BybitExecutionClient {
         }
     }
 
-    async fn apply_position_mode_entry(&self, symbol_str: &str, mode: BybitPositionMode) {
+    async fn apply_position_mode_entry(&self, symbol_str: &str, mode: BitgetPositionMode) {
         let Some(symbol) = Self::parse_derivative_symbol(symbol_str) else {
             return;
         };
@@ -500,8 +508,8 @@ impl BybitExecutionClient {
         }
     }
 
-    fn parse_derivative_symbol(symbol_str: &str) -> Option<BybitSymbol> {
-        let symbol = match BybitSymbol::new(symbol_str) {
+    fn parse_derivative_symbol(symbol_str: &str) -> Option<BitgetSymbol> {
+        let symbol = match BitgetSymbol::new(symbol_str) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Failed to parse symbol {symbol_str}: {e}");
@@ -510,7 +518,7 @@ impl BybitExecutionClient {
         };
         matches!(
             symbol.product_type(),
-            BybitProductType::Linear | BybitProductType::Inverse
+            BitgetProductType::Linear | BitgetProductType::Inverse
         )
         .then_some(symbol)
     }
@@ -528,35 +536,45 @@ impl BybitExecutionClient {
             .contains("needs to be equal to or greater than")
     }
 
-    fn map_order_type(order_type: OrderType) -> anyhow::Result<(BybitOrderType, bool)> {
+    // Bitget `op:"trade"` covers plain orders only; conditional (strategy) orders use REST
+    fn is_conditional_order(&self, client_order_id: &ClientOrderId) -> bool {
+        self.core
+            .cache()
+            .order(client_order_id)
+            .is_some_and(|order| {
+                Self::map_order_type(order.order_type()).is_ok_and(|(_, conditional)| conditional)
+            })
+    }
+
+    fn map_order_type(order_type: OrderType) -> anyhow::Result<(BitgetOrderType, bool)> {
         match order_type {
-            OrderType::Market => Ok((BybitOrderType::Market, false)),
-            OrderType::Limit => Ok((BybitOrderType::Limit, false)),
+            OrderType::Market => Ok((BitgetOrderType::Market, false)),
+            OrderType::Limit => Ok((BitgetOrderType::Limit, false)),
             OrderType::StopMarket | OrderType::MarketIfTouched => {
-                Ok((BybitOrderType::Market, true))
+                Ok((BitgetOrderType::Market, true))
             }
-            OrderType::StopLimit | OrderType::LimitIfTouched => Ok((BybitOrderType::Limit, true)),
-            _ => anyhow::bail!("unsupported order type for Bybit: {order_type}"),
+            OrderType::StopLimit | OrderType::LimitIfTouched => Ok((BitgetOrderType::Limit, true)),
+            _ => anyhow::bail!("unsupported order type for Bitget: {order_type}"),
         }
     }
 
-    fn map_time_in_force(tif: TimeInForce, is_post_only: bool) -> BybitTimeInForce {
+    fn map_time_in_force(tif: TimeInForce, is_post_only: bool) -> BitgetTimeInForce {
         if is_post_only {
-            return BybitTimeInForce::PostOnly;
+            return BitgetTimeInForce::PostOnly;
         }
 
         match tif {
-            TimeInForce::Gtc => BybitTimeInForce::Gtc,
-            TimeInForce::Ioc => BybitTimeInForce::Ioc,
-            TimeInForce::Fok => BybitTimeInForce::Fok,
-            _ => BybitTimeInForce::Gtc,
+            TimeInForce::Gtc => BitgetTimeInForce::Gtc,
+            TimeInForce::Ioc => BitgetTimeInForce::Ioc,
+            TimeInForce::Fok => BitgetTimeInForce::Fok,
+            _ => BitgetTimeInForce::Gtc,
         }
     }
 
     fn validate_bbo_params(
         order: &OrderAny,
-        product_type: BybitProductType,
-        tp_sl: &BybitTpSlParams,
+        product_type: BitgetProductType,
+        tp_sl: &BitgetTpSlParams,
     ) -> anyhow::Result<()> {
         if !tp_sl.has_bbo() {
             return Ok(());
@@ -565,9 +583,9 @@ impl BybitExecutionClient {
         anyhow::ensure!(
             matches!(
                 product_type,
-                BybitProductType::Linear | BybitProductType::Inverse
+                BitgetProductType::Linear | BitgetProductType::Inverse
             ),
-            "`bbo_side_type` and `bbo_level` are only supported for Bybit linear and inverse products"
+            "`bbo_side_type` and `bbo_level` are only supported for Bitget linear and inverse products"
         );
 
         let order_type = order.order_type();
@@ -584,35 +602,43 @@ impl BybitExecutionClient {
 
     fn build_ws_place_params(
         order: &OrderAny,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         raw_symbol: &str,
-        tp_sl: &BybitTpSlParams,
-        position_idx: Option<BybitPositionIdx>,
-        smp_type: Option<BybitOrderSmpType>,
-    ) -> anyhow::Result<BybitWsPlaceOrderParams> {
-        let bybit_side = BybitOrderSide::from(order.order_side());
-        let (bybit_order_type, is_conditional) = Self::map_order_type(order.order_type())?;
-        let has_tp_sl = tp_sl.has_tp_sl();
-        let trigger_dir = trigger_direction(order.order_type(), order.order_side(), is_conditional);
+        tp_sl: &BitgetTpSlParams,
+        position_idx: Option<BitgetPositionIdx>,
+        smp_type: Option<BitgetOrderSmpType>,
+    ) -> anyhow::Result<BitgetWsPlaceOrderParams> {
+        let bitget_side = BitgetOrderSide::from(order.order_side());
+        let (bitget_order_type, is_conditional) = Self::map_order_type(order.order_type())?;
+        // Bitget `op:"trade"` places plain orders only; conditional orders go over REST
+        anyhow::ensure!(
+            !is_conditional,
+            "Bitget WebSocket trade does not support {:?} orders",
+            order.order_type()
+        );
 
-        Ok(BybitWsPlaceOrderParams {
+        // Bitget combines the BBO side and level into one `bboLevel` value (`queue1`)
+        let bbo_level = match (tp_sl.bbo_side_type, tp_sl.bbo_level.as_deref()) {
+            (Some(BitgetBboSideType::Queue), Some(level)) => Some(format!("queue{level}")),
+            (Some(BitgetBboSideType::Counterparty), Some(level)) => {
+                Some(format!("counterparty{level}"))
+            }
+            _ => None,
+        };
+
+        Ok(BitgetWsPlaceOrderParams {
             category: product_type,
             symbol: Ustr::from(raw_symbol),
-            side: bybit_side,
-            order_type: bybit_order_type,
+            side: bitget_side,
+            order_type: bitget_order_type,
             qty: order.quantity().to_string(),
             is_leverage: spot_leverage(product_type, tp_sl.is_leverage),
-            market_unit: spot_market_unit(
-                product_type,
-                bybit_order_type,
-                order.is_quote_quantity(),
-            ),
-            price: if tp_sl.has_bbo() {
+            price: if bbo_level.is_some() {
                 None
             } else {
                 order.price().map(|p: Price| p.to_string())
             },
-            time_in_force: if bybit_order_type == BybitOrderType::Market {
+            time_in_force: if bitget_order_type == BitgetOrderType::Market {
                 None
             } else {
                 Some(Self::map_time_in_force(
@@ -626,15 +652,8 @@ impl BybitExecutionClient {
             } else {
                 None
             },
-            close_on_trigger: tp_sl.close_on_trigger,
-            trigger_price: order.trigger_price().map(|p: Price| p.to_string()),
-            trigger_by: if is_conditional {
-                Some(resolve_trigger_type(order.trigger_type()))
-            } else {
-                None
-            },
-            trigger_direction: trigger_dir.map(|d| d as i32),
-            tpsl_mode: tp_sl.tpsl_mode.or(has_tp_sl.then_some(BybitTpSlMode::Full)),
+            // Verified account setup is crossed margin; spot takes no margin mode
+            margin_mode: (!product_type.is_spot()).then(|| "crossed".to_string()),
             take_profit: tp_sl.take_profit.map(|p| p.to_string()),
             stop_loss: tp_sl.stop_loss.map(|p| p.to_string()),
             tp_trigger_by: tp_sl.tp_trigger_by.or(tp_sl
@@ -643,37 +662,32 @@ impl BybitExecutionClient {
             sl_trigger_by: tp_sl.sl_trigger_by.or(tp_sl
                 .stop_loss
                 .map(|_| resolve_trigger_type(order.trigger_type()))),
-            sl_trigger_price: tp_sl.sl_trigger_price.clone(),
-            tp_trigger_price: tp_sl.tp_trigger_price.clone(),
             sl_order_type: tp_sl.sl_order_type,
             tp_order_type: tp_sl.tp_order_type,
             sl_limit_price: tp_sl.sl_limit_price.clone(),
             tp_limit_price: tp_sl.tp_limit_price.clone(),
-            order_iv: tp_sl.order_iv.clone(),
             smp_type,
-            mmp: tp_sl.mmp,
             position_idx,
-            bbo_side_type: tp_sl.bbo_side_type,
-            bbo_level: tp_sl.bbo_level.clone(),
+            bbo_level,
         })
     }
 }
 
 fn submit_rejection_reason(error: &anyhow::Error) -> Option<&str> {
     for cause in error.chain() {
-        if let Some(submit_error) = cause.downcast_ref::<BybitSubmitOrderError>() {
+        if let Some(submit_error) = cause.downcast_ref::<BitgetSubmitOrderError>() {
             return match submit_error {
-                BybitSubmitOrderError::Rejected { reason } => Some(reason.as_str()),
-                BybitSubmitOrderError::MissingOrderId
-                | BybitSubmitOrderError::PostSubmitLookup { .. } => None,
+                BitgetSubmitOrderError::Rejected { reason } => Some(reason.as_str()),
+                BitgetSubmitOrderError::MissingOrderId
+                | BitgetSubmitOrderError::PostSubmitLookup { .. } => None,
             };
         }
 
-        if let Some(BybitHttpError::BybitError {
+        if let Some(BitgetHttpError::BitgetError {
             error_code,
             message,
         }) = cause.downcast_ref()
-            && !is_bybit_ambiguous_order_error_code(i64::from(*error_code))
+            && !is_bitget_ambiguous_order_error_code(i64::from(*error_code))
         {
             return Some(message.as_str());
         }
@@ -682,7 +696,7 @@ fn submit_rejection_reason(error: &anyhow::Error) -> Option<&str> {
 }
 
 #[async_trait(?Send)]
-impl ExecutionClient for BybitExecutionClient {
+impl ExecutionClient for BitgetExecutionClient {
     fn is_connected(&self) -> bool {
         self.core.is_connected()
     }
@@ -696,7 +710,7 @@ impl ExecutionClient for BybitExecutionClient {
     }
 
     fn venue(&self) -> Venue {
-        *BYBIT_VENUE
+        *BITGET_VENUE
     }
 
     fn oms_type(&self) -> OmsType {
@@ -712,7 +726,7 @@ impl ExecutionClient for BybitExecutionClient {
         // Linear fallback would claim coverage for an identifier this adapter cannot classify. A
         // recognized derivative suffix is still uncovered when its product type is unconfigured,
         // since the bulk loop only queries `product_types()`.
-        let Some(product_type) = BybitProductType::from_suffix(instrument_id.symbol.as_str())
+        let Some(product_type) = BitgetProductType::from_suffix(instrument_id.symbol.as_str())
         else {
             return false;
         };
@@ -735,14 +749,14 @@ impl ExecutionClient for BybitExecutionClient {
             self.await_pending_tasks().await?;
             self.pending_tasks
                 .start_generation()
-                .map_err(|e| anyhow::anyhow!("Failed to start Bybit task generation: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("Failed to start Bitget task generation: {e}"))?;
         }
 
         if !self.session_tasks.is_open() {
             self.await_session_tasks().await?;
             self.session_tasks
                 .start_generation()
-                .map_err(|e| anyhow::anyhow!("Failed to start Bybit session generation: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("Failed to start Bitget session generation: {e}"))?;
         }
         let http_client = self.http_client.clone();
         let ws_private = self.ws_private.clone();
@@ -769,7 +783,7 @@ impl ExecutionClient for BybitExecutionClient {
                         .request_instruments(*product_type, None, None)
                         .await
                         .with_context(|| {
-                            format!("failed to request Bybit instruments for {product_type:?}")
+                            format!("failed to request Bitget instruments for {product_type:?}")
                         })?;
 
                     if instruments.is_empty() {
@@ -821,35 +835,31 @@ impl ExecutionClient for BybitExecutionClient {
                 }
             })?;
 
-            // Demo environment does not support Trade WebSocket API
-            if self.config.environment == BybitEnvironment::Demo {
-                log::info!("Demo mode: Trade WebSocket not available, orders use HTTP REST API");
-            } else {
-                self.ws_trade.connect().await?;
-                self.ws_trade.wait_until_active(10.0).await?;
-                log::debug!("Connected to trade WebSocket");
+            // Bitget order entry (`op:"trade"`) runs on a second logged-in private socket
+            self.ws_trade.connect().await?;
+            self.ws_trade.wait_until_active(10.0).await?;
+            log::debug!("Connected to trade WebSocket");
 
-                let stream = self.ws_trade.stream();
-                let emitter = self.emitter.clone();
-                let account_id = self.core.account_id;
-                let instruments = Arc::clone(&self.instruments_cache);
-                let state = Arc::clone(&self.dispatch_state);
-                let clock = self.clock;
+            let stream = self.ws_trade.stream();
+            let emitter = self.emitter.clone();
+            let account_id = self.core.account_id;
+            let instruments = Arc::clone(&self.instruments_cache);
+            let state = Arc::clone(&self.dispatch_state);
+            let clock = self.clock;
 
-                self.session_tasks.spawn(async move {
-                    pin_mut!(stream);
-                    while let Some(message) = stream.next().await {
-                        dispatch_ws_message(
-                            &message,
-                            &emitter,
-                            &state,
-                            account_id,
-                            &instruments,
-                            clock,
-                        );
-                    }
-                })?;
-            }
+            self.session_tasks.spawn(async move {
+                pin_mut!(stream);
+                while let Some(message) = stream.next().await {
+                    dispatch_ws_message(
+                        &message,
+                        &emitter,
+                        &state,
+                        account_id,
+                        &instruments,
+                        clock,
+                    );
+                }
+            })?;
 
             if self.config.auto_repay_spot_borrows {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -871,9 +881,9 @@ impl ExecutionClient for BybitExecutionClient {
 
             let account_state = self
                 .http_client
-                .request_account_state(BybitAccountType::Unified, self.core.account_id)
+                .request_account_state(BitgetAccountType::Unified, self.core.account_id)
                 .await
-                .context("failed to request Bybit account state")?;
+                .context("failed to request Bitget account state")?;
 
             if !account_state.balances.is_empty() {
                 log::debug!(
@@ -891,7 +901,7 @@ impl ExecutionClient for BybitExecutionClient {
 
         if let Err(e) = connect_result {
             if let Err(teardown_error) = self.teardown_partial_connect().await {
-                return Err(e.context(format!("Bybit startup teardown failed: {teardown_error}")));
+                return Err(e.context(format!("Bitget startup teardown failed: {teardown_error}")));
             }
             return Err(e);
         }
@@ -1248,7 +1258,7 @@ impl ExecutionClient for BybitExecutionClient {
         let mut mass_status = ExecutionMassStatus::new(
             self.core.client_id,
             self.core.account_id,
-            *BYBIT_VENUE,
+            *BITGET_VENUE,
             ts_now,
             None,
         );
@@ -1279,8 +1289,8 @@ impl ExecutionClient for BybitExecutionClient {
             return Ok(());
         };
 
-        // Bybit does not support conditional orders for options
-        if product_type == BybitProductType::Option && is_conditional {
+        // Bitget does not support conditional orders for options
+        if product_type == BitgetProductType::Option && is_conditional {
             let denied = OrderDeniedReason::UnsupportedOrderType {
                 order_type: order.order_type(),
             };
@@ -1288,7 +1298,7 @@ impl ExecutionClient for BybitExecutionClient {
             return Ok(());
         }
 
-        let tp_sl = match parse_bybit_tp_sl_params(cmd.params.as_ref()) {
+        let tp_sl = match parse_bitget_tp_sl_params(cmd.params.as_ref()) {
             Ok(p) => p,
             Err(e) => {
                 let denied = OrderDeniedReason::ValidationFailed {
@@ -1307,18 +1317,6 @@ impl ExecutionClient for BybitExecutionClient {
             return Ok(());
         }
 
-        // The demo HTTP create-order entry cannot carry TP/SL trigger prices (only the mainnet
-        // WS path can), so deny rather than submit an order missing the user's trigger prices.
-        if self.config.environment == BybitEnvironment::Demo
-            && (tp_sl.tp_trigger_price.is_some() || tp_sl.sl_trigger_price.is_some())
-        {
-            let denied = OrderDeniedReason::UnsupportedTpSl {
-                detail: "TP/SL trigger prices are not supported in demo mode".to_string(),
-            };
-            self.emitter.emit_order_denied(&order, &denied.to_string());
-            return Ok(());
-        }
-
         log::debug!("OrderSubmitted client_order_id={}", order.client_order_id());
         self.emitter.emit_order_submitted(&order);
 
@@ -1327,10 +1325,10 @@ impl ExecutionClient for BybitExecutionClient {
         let emitter = self.emitter.clone();
         let clock = self.clock;
 
-        let bybit_side = BybitOrderSide::from(order.order_side());
+        let bitget_side = BitgetOrderSide::from(order.order_side());
         let position_idx = self.resolve_position_idx(
             instrument_id,
-            bybit_side,
+            bitget_side,
             order.is_reduce_only(),
             tp_sl.position_idx,
         );
@@ -1360,7 +1358,8 @@ impl ExecutionClient for BybitExecutionClient {
 
         let smp_type = self.resolve_smp_type(tp_sl.smp_type);
 
-        if self.config.environment == BybitEnvironment::Demo {
+        // Bitget `op:"trade"` places plain orders only; conditional orders use REST strategy orders
+        if is_conditional {
             let http_client = self.http_client.clone();
             let account_id = self.core.account_id;
             let order_side = order.order_side();
@@ -1415,7 +1414,7 @@ impl ExecutionClient for BybitExecutionClient {
                             client_order_id,
                             reason,
                             ts_event,
-                            bybit_rejection_due_post_only(reason),
+                            bitget_rejection_due_post_only(reason),
                         );
                         anyhow::bail!("submit order rejected: {reason}");
                     }
@@ -1479,7 +1478,7 @@ impl ExecutionClient for BybitExecutionClient {
             return Ok(());
         }
 
-        let tp_sl = match parse_bybit_tp_sl_params(cmd.params.as_ref()) {
+        let tp_sl = match parse_bitget_tp_sl_params(cmd.params.as_ref()) {
             Ok(p) => p,
             Err(e) => {
                 let cache = self.core.cache();
@@ -1499,25 +1498,6 @@ impl ExecutionClient for BybitExecutionClient {
 
         let instrument_id = cmd.instrument_id;
         let product_type = self.get_product_type_for_instrument(instrument_id);
-
-        // The demo HTTP create-order entry cannot carry TP/SL trigger prices (only the mainnet
-        // WS path can), so deny rather than submit orders missing the user's trigger prices.
-        if self.config.environment == BybitEnvironment::Demo
-            && (tp_sl.tp_trigger_price.is_some() || tp_sl.sl_trigger_price.is_some())
-        {
-            let cache = self.core.cache();
-            let denied = OrderDeniedReason::UnsupportedTpSl {
-                detail: "TP/SL trigger prices are not supported in demo mode".to_string(),
-            }
-            .to_string();
-
-            for cid in &cmd.order_list.client_order_ids {
-                if let Some(order) = cache.order(cid) {
-                    self.emitter.emit_order_denied(&order, &denied);
-                }
-            }
-            return Ok(());
-        }
 
         let strategy_id = cmd.strategy_id;
 
@@ -1560,8 +1540,8 @@ impl ExecutionClient for BybitExecutionClient {
                     break;
                 };
 
-                // Bybit does not support conditional orders for options
-                if product_type == BybitProductType::Option && is_conditional {
+                // Bitget does not support conditional orders for options
+                if product_type == BitgetProductType::Option && is_conditional {
                     denial = Some((
                         *cid,
                         OrderDeniedReason::UnsupportedOrderType {
@@ -1611,10 +1591,10 @@ impl ExecutionClient for BybitExecutionClient {
 
         for order in &valid_orders {
             self.emitter.emit_order_submitted(order);
-            let bybit_side = BybitOrderSide::from(order.order_side());
+            let bitget_side = BitgetOrderSide::from(order.order_side());
             let position_idx = self.resolve_position_idx(
                 instrument_id,
-                bybit_side,
+                bitget_side,
                 order.is_reduce_only(),
                 tp_sl.position_idx,
             );
@@ -1645,8 +1625,14 @@ impl ExecutionClient for BybitExecutionClient {
 
         let smp_type = self.resolve_smp_type(tp_sl.smp_type);
 
-        // Demo mode: submit individually via HTTP
-        if self.config.environment == BybitEnvironment::Demo {
+        // Bitget `batch-place` carries neither conditional, reduce-only nor BBO orders: submit
+        // those lists individually via HTTP
+        if tp_sl.bbo_level.is_some()
+            || valid_orders.iter().any(|order| {
+                order.is_reduce_only()
+                    || Self::map_order_type(order.order_type()).is_ok_and(|(_, c)| c)
+            })
+        {
             let http_client = self.http_client.clone();
             let account_id = self.core.account_id;
             let is_leverage = tp_sl.is_leverage;
@@ -1658,10 +1644,10 @@ impl ExecutionClient for BybitExecutionClient {
             let order_data: Vec<_> = valid_orders
                 .iter()
                 .map(|o| {
-                    let bybit_side = BybitOrderSide::from(o.order_side());
+                    let bitget_side = BitgetOrderSide::from(o.order_side());
                     let position_idx = self.resolve_position_idx(
                         instrument_id,
-                        bybit_side,
+                        bitget_side,
                         o.is_reduce_only(),
                         tp_sl.position_idx,
                     );
@@ -1732,7 +1718,7 @@ impl ExecutionClient for BybitExecutionClient {
                                 cid,
                                 reason,
                                 ts_event,
-                                bybit_rejection_due_post_only(reason),
+                                bitget_rejection_due_post_only(reason),
                             );
                             continue;
                         }
@@ -1756,10 +1742,10 @@ impl ExecutionClient for BybitExecutionClient {
         let mut client_order_ids = Vec::with_capacity(valid_orders.len());
 
         for order in &valid_orders {
-            let bybit_side = BybitOrderSide::from(order.order_side());
+            let bitget_side = BitgetOrderSide::from(order.order_side());
             let position_idx = self.resolve_position_idx(
                 instrument_id,
-                bybit_side,
+                bitget_side,
                 order.is_reduce_only(),
                 tp_sl.position_idx,
             );
@@ -1780,7 +1766,8 @@ impl ExecutionClient for BybitExecutionClient {
         let dispatch_state = Arc::clone(&self.dispatch_state);
 
         self.spawn_task("submit_order_list", async move {
-            let req_ids = BybitWebSocketClient::batch_request_ids(product_type, order_params.len());
+            let req_ids =
+                BitgetWebSocketClient::batch_request_ids(product_type, order_params.len());
             for (req_id, chunk_cids) in req_ids.iter().zip(
                 client_order_ids
                     .chunks(batch_send_limit(product_type))
@@ -1831,36 +1818,47 @@ impl ExecutionClient for BybitExecutionClient {
         let emitter = self.emitter.clone();
         let clock = self.clock;
 
-        let has_order_iv = cmd
+        if cmd
             .params
             .as_ref()
             .and_then(|p| p.get("order_iv"))
-            .is_some();
-
-        if self.config.environment == BybitEnvironment::Demo && has_order_iv {
+            .is_some()
+        {
             log::warn!(
                 "Modify command failed local validation for {client_order_id}: {}",
-                "Option params (order_iv) are not supported in demo mode",
+                "Option params (order_iv) are not supported by Bitget",
             );
             return Ok(());
         }
 
-        if self.config.environment == BybitEnvironment::Demo {
+        // The WS `modify-order` only covers plain orders; conditional (strategy) orders are
+        // modified over REST, which requires the full quantity on every request
+        if self.is_conditional_order(&client_order_id) {
             let http_client = self.http_client.clone();
-            let account_id = self.core.account_id;
-            let quantity = cmd.quantity;
+            let quantity = cmd.quantity.or_else(|| {
+                self.core
+                    .cache()
+                    .order(&client_order_id)
+                    .map(|order| order.quantity())
+            });
+            let Some(quantity) = quantity else {
+                log::warn!(
+                    "Modify command failed local validation for {client_order_id}: order quantity unknown"
+                );
+                return Ok(());
+            };
             let price = cmd.price;
+            let trigger_price = cmd.trigger_price;
 
             self.spawn_task("modify_order_http", async move {
                 let result = http_client
-                    .modify_order(
-                        account_id,
-                        product_type,
+                    .modify_strategy_order(
                         instrument_id,
                         Some(client_order_id),
                         venue_order_id,
                         quantity,
                         price,
+                        trigger_price,
                     )
                     .await;
 
@@ -1899,33 +1897,13 @@ impl ExecutionClient for BybitExecutionClient {
 
         let raw_symbol = extract_raw_symbol(instrument_id.symbol.as_str());
 
-        let order_iv = if let Some(value) = cmd.params.as_ref().and_then(|p| p.get("order_iv")) {
-            match get_price_str(cmd.params.as_ref().unwrap(), "order_iv") {
-                Some(s) => Some(s),
-                None => {
-                    log::warn!(
-                        "Modify command failed local validation for {client_order_id}: invalid type for 'order_iv': {value}, expected string or number",
-                    );
-                    return Ok(());
-                }
-            }
-        } else {
-            None
-        };
-
-        let params = BybitWsAmendOrderParams {
+        let params = BitgetWsAmendOrderParams {
             category: product_type,
             symbol: Ustr::from(raw_symbol),
             order_id: cmd.venue_order_id.map(|v| v.to_string()),
             order_link_id: Some(cmd.client_order_id.to_string()),
             qty: cmd.quantity.map(|q| q.to_string()),
             price: cmd.price.map(|p| p.to_string()),
-            trigger_price: None,
-            take_profit: None,
-            stop_loss: None,
-            tp_trigger_by: None,
-            sl_trigger_by: None,
-            order_iv,
         };
 
         let ws_trade = self.ws_trade.clone();
@@ -1969,14 +1947,13 @@ impl ExecutionClient for BybitExecutionClient {
         let emitter = self.emitter.clone();
         let clock = self.clock;
 
-        if self.config.environment == BybitEnvironment::Demo {
+        // Conditional (strategy) orders are cancelled over REST; `op:"trade"` covers plain orders
+        if self.is_conditional_order(&client_order_id) {
             let http_client = self.http_client.clone();
-            let account_id = self.core.account_id;
 
             self.spawn_task("cancel_order_http", async move {
                 let result = http_client
-                    .cancel_order(
-                        account_id,
+                    .cancel_strategy_order(
                         product_type,
                         instrument_id,
                         Some(client_order_id),
@@ -2019,7 +1996,7 @@ impl ExecutionClient for BybitExecutionClient {
 
         let raw_symbol = extract_raw_symbol(instrument_id.symbol.as_str());
 
-        let params = BybitWsCancelOrderParams {
+        let params = BitgetWsCancelOrderParams {
             category: product_type,
             symbol: Ustr::from(raw_symbol),
             order_id: cmd.venue_order_id.map(|v| v.to_string()),
@@ -2060,7 +2037,7 @@ impl ExecutionClient for BybitExecutionClient {
 
     fn cancel_all_orders(&self, cmd: CancelAllOrders) -> anyhow::Result<()> {
         if cmd.order_side.is_some() {
-            // Bybit cancel-all has no side parameter, so select matching open
+            // Bitget cancel-all has no side parameter, so select matching open
             // orders and cancel their explicit IDs through the batch path.
             let cancels: Vec<CancelOrder> = {
                 let cache = self.core.cache();
@@ -2137,28 +2114,53 @@ impl ExecutionClient for BybitExecutionClient {
         let emitter = self.emitter.clone();
         let clock = self.clock;
 
-        // Demo mode: cancel individually via HTTP (batch not supported)
-        if self.config.environment == BybitEnvironment::Demo {
+        // `batch-cancel` covers plain orders only: lists with conditional (strategy) orders are
+        // cancelled individually via HTTP
+        if cmd
+            .cancels
+            .iter()
+            .any(|c| self.is_conditional_order(&c.client_order_id))
+        {
             let http_client = self.http_client.clone();
             let account_id = self.core.account_id;
             let cancels: Vec<_> = cmd
                 .cancels
                 .iter()
-                .map(|c| (c.strategy_id, c.client_order_id, c.venue_order_id))
+                .map(|c| {
+                    (
+                        c.strategy_id,
+                        c.client_order_id,
+                        c.venue_order_id,
+                        self.is_conditional_order(&c.client_order_id),
+                    )
+                })
                 .collect();
 
             self.spawn_task("batch_cancel_orders_http", async move {
-                for (strategy_id, client_order_id, venue_order_id) in cancels {
-                    if let Err(e) = http_client
-                        .cancel_order(
-                            account_id,
-                            product_type,
-                            instrument_id,
-                            Some(client_order_id),
-                            venue_order_id,
-                        )
-                        .await
-                    {
+                for (strategy_id, client_order_id, venue_order_id, conditional) in cancels {
+                    let result = if conditional {
+                        http_client
+                            .cancel_strategy_order(
+                                product_type,
+                                instrument_id,
+                                Some(client_order_id),
+                                venue_order_id,
+                            )
+                            .await
+                    } else {
+                        http_client
+                            .cancel_order(
+                                account_id,
+                                product_type,
+                                instrument_id,
+                                Some(client_order_id),
+                                venue_order_id,
+                            )
+                            .await
+                            .map(|_| ())
+                    };
+
+                    if let Err(e) = result {
                         match classify_cancel_http_failure(&e) {
                             CommandFailure::VenueRejected(reason) => {
                                 let ts_event = clock.get_time_ns();
@@ -2198,7 +2200,7 @@ impl ExecutionClient for BybitExecutionClient {
         let venue_order_ids: Vec<_> = cmd.cancels.iter().map(|c| c.venue_order_id).collect();
 
         for cancel in &cmd.cancels {
-            cancel_params.push(BybitWsCancelOrderParams {
+            cancel_params.push(BitgetWsCancelOrderParams {
                 category: product_type,
                 symbol: raw_symbol,
                 order_id: cancel.venue_order_id.map(|v| v.to_string()),
@@ -2211,7 +2213,7 @@ impl ExecutionClient for BybitExecutionClient {
 
         self.spawn_task("batch_cancel_orders", async move {
             let req_ids =
-                BybitWebSocketClient::batch_request_ids(product_type, cancel_params.len());
+                BitgetWebSocketClient::batch_request_ids(product_type, cancel_params.len());
             let chunk_limit = batch_send_limit(product_type);
 
             for (req_id, (chunk_cids, chunk_voids)) in req_ids.iter().zip(
@@ -2265,7 +2267,7 @@ impl ExecutionClient for BybitExecutionClient {
 fn classify_cancel_http_failure(error: &anyhow::Error) -> CommandFailure {
     if error
         .chain()
-        .any(|cause| cause.downcast_ref::<BybitCancelOrderError>().is_some())
+        .any(|cause| cause.downcast_ref::<BitgetCancelOrderError>().is_some())
     {
         return CommandFailure::ambiguous(error.to_string());
     }
@@ -2276,7 +2278,7 @@ fn classify_cancel_http_failure(error: &anyhow::Error) -> CommandFailure {
 fn classify_modify_http_failure(error: &anyhow::Error) -> CommandFailure {
     if error
         .chain()
-        .any(|cause| cause.downcast_ref::<BybitModifyOrderError>().is_some())
+        .any(|cause| cause.downcast_ref::<BitgetModifyOrderError>().is_some())
     {
         return CommandFailure::ambiguous(error.to_string());
     }
@@ -2288,31 +2290,31 @@ fn classify_http_failure(error: &anyhow::Error) -> CommandFailure {
     let reason = error.to_string();
 
     for cause in error.chain() {
-        let Some(http_error) = cause.downcast_ref::<BybitHttpError>() else {
+        let Some(http_error) = cause.downcast_ref::<BitgetHttpError>() else {
             continue;
         };
 
         return match http_error {
-            BybitHttpError::BybitError { error_code, .. }
-                if is_bybit_ambiguous_order_error_code(i64::from(*error_code)) =>
+            BitgetHttpError::BitgetError { error_code, .. }
+                if is_bitget_ambiguous_order_error_code(i64::from(*error_code)) =>
             {
                 CommandFailure::Ambiguous(reason)
             }
-            BybitHttpError::BybitError { .. } => CommandFailure::VenueRejected(reason),
-            BybitHttpError::MissingCredentials
-            | BybitHttpError::ValidationError(_)
-            | BybitHttpError::BuildError(_) => CommandFailure::NotSent(reason),
-            BybitHttpError::JsonError(_)
-            | BybitHttpError::Canceled(_)
-            | BybitHttpError::NetworkError(_)
-            | BybitHttpError::UnexpectedStatus { .. } => CommandFailure::Ambiguous(reason),
+            BitgetHttpError::BitgetError { .. } => CommandFailure::VenueRejected(reason),
+            BitgetHttpError::MissingCredentials
+            | BitgetHttpError::ValidationError(_)
+            | BitgetHttpError::BuildError(_) => CommandFailure::NotSent(reason),
+            BitgetHttpError::JsonError(_)
+            | BitgetHttpError::Canceled(_)
+            | BitgetHttpError::NetworkError(_)
+            | BitgetHttpError::UnexpectedStatus { .. } => CommandFailure::Ambiguous(reason),
         };
     }
 
     CommandFailure::NotSent(reason)
 }
 
-impl BybitExecutionClient {
+impl BitgetExecutionClient {
     fn cache_reconciliation_order_identity(&self, report: &OrderStatusReport) {
         let Some(client_order_id) = report.client_order_id else {
             return;
@@ -2370,33 +2372,31 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::common::{
-        consts::{BYBIT_CLIENT_ID, BYBIT_VENUE},
-        enums::BybitMarketUnit,
-    };
+    use crate::common::consts::{BITGET_CLIENT_ID, BITGET_VENUE};
 
-    fn test_execution_client() -> (BybitExecutionClient, Rc<RefCell<Cache>>) {
+    fn test_execution_client() -> (BitgetExecutionClient, Rc<RefCell<Cache>>) {
         let cache = Rc::new(RefCell::new(Cache::default()));
         let core = ExecutionClientCore::new(
             TraderId::from("TESTER-001"),
-            *BYBIT_CLIENT_ID,
-            *BYBIT_VENUE,
+            *BITGET_CLIENT_ID,
+            *BITGET_VENUE,
             OmsType::Netting,
-            AccountId::from("BYBIT-001"),
+            AccountId::from("BITGET-001"),
             AccountType::Margin,
             None,
             cache.clone(),
         );
-        let config = BybitExecutionClientConfig {
+        let config = BitgetExecutionClientConfig {
             api_key: Some("test_key".into()),
             api_secret: Some("test_secret".into()),
+            api_passphrase: Some("test_passphrase".into()),
             ..Default::default()
         };
 
-        (BybitExecutionClient::new(core, config).unwrap(), cache)
+        (BitgetExecutionClient::new(core, config).unwrap(), cache)
     }
 
-    async fn wait_for_spawned_tasks(client: &BybitExecutionClient) {
+    async fn wait_for_spawned_tasks(client: &BitgetExecutionClient) {
         for _ in 0..20 {
             if client.pending_tasks.all_finished() {
                 return;
@@ -2405,7 +2405,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
 
-        panic!("timed out waiting for spawned Bybit execution tasks");
+        panic!("timed out waiting for spawned Bitget execution tasks");
     }
 
     fn assert_next_submitted(
@@ -2486,9 +2486,9 @@ mod tests {
     fn cancel_command(client_order_id: ClientOrderId) -> CancelOrder {
         CancelOrder::new(
             TraderId::from("TESTER-001"),
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             StrategyId::from("S-001"),
-            InstrumentId::from("BTCUSDT-LINEAR.BYBIT"),
+            InstrumentId::from("BTCUSDT-PERP.BITGET"),
             client_order_id,
             Some(VenueOrderId::from("venue-cancel-1")),
             UUID4::new(),
@@ -2501,9 +2501,9 @@ mod tests {
     fn modify_command(client_order_id: ClientOrderId, params: Option<Params>) -> ModifyOrder {
         ModifyOrder::new(
             TraderId::from("TESTER-001"),
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             StrategyId::from("S-001"),
-            InstrumentId::from("BTCUSDT-LINEAR.BYBIT"),
+            InstrumentId::from("BTCUSDT-PERP.BITGET"),
             client_order_id,
             Some(VenueOrderId::from("venue-modify-1")),
             Some(Quantity::from("1")),
@@ -2518,8 +2518,8 @@ mod tests {
 
     #[rstest]
     fn test_cancel_http_failure_classification_matches_policy() {
-        let venue_reject = anyhow::Error::from(BybitHttpError::BybitError {
-            error_code: 110001,
+        let venue_reject = anyhow::Error::from(BitgetHttpError::BitgetError {
+            error_code: 25204,
             message: "Order does not exist".to_string(),
         });
         assert_eq!(
@@ -2527,16 +2527,16 @@ mod tests {
             CommandFailure::VenueRejected(venue_reject.to_string()),
         );
 
-        let rate_limit = anyhow::Error::from(BybitHttpError::BybitError {
-            error_code: 10006,
-            message: "Too many visits".to_string(),
+        let rate_limit = anyhow::Error::from(BitgetHttpError::BitgetError {
+            error_code: 429,
+            message: "Too Many Requests".to_string(),
         });
         assert_eq!(
             classify_cancel_http_failure(&rate_limit),
             CommandFailure::VenueRejected(rate_limit.to_string()),
         );
 
-        let post_lookup = anyhow::Error::from(BybitCancelOrderError::PostCancelLookup {
+        let post_lookup = anyhow::Error::from(BitgetCancelOrderError::PostCancelLookup {
             source: anyhow::anyhow!("history lookup failed"),
         });
         assert_eq!(
@@ -2544,7 +2544,7 @@ mod tests {
             CommandFailure::Ambiguous(post_lookup.to_string()),
         );
 
-        let transport = anyhow::Error::from(BybitHttpError::NetworkError(
+        let transport = anyhow::Error::from(BitgetHttpError::NetworkError(
             "connection closed".to_string(),
         ));
         assert_eq!(
@@ -2555,25 +2555,25 @@ mod tests {
 
     #[rstest]
     fn test_modify_http_failure_classification_matches_policy() {
-        let venue_reject = anyhow::Error::from(BybitHttpError::BybitError {
-            error_code: 110003,
-            message: "Order price exceeds allowable range".to_string(),
+        let venue_reject = anyhow::Error::from(BitgetHttpError::BitgetError {
+            error_code: 25206,
+            message: "TSLAUSDT trading price cannot exceed 2%".to_string(),
         });
         assert_eq!(
             classify_modify_http_failure(&venue_reject),
             CommandFailure::VenueRejected(venue_reject.to_string()),
         );
 
-        let server_error = anyhow::Error::from(BybitHttpError::BybitError {
-            error_code: 10016,
-            message: "Server error".to_string(),
+        let server_error = anyhow::Error::from(BitgetHttpError::BitgetError {
+            error_code: 40010,
+            message: "Request timed out".to_string(),
         });
         assert_eq!(
             classify_modify_http_failure(&server_error),
             CommandFailure::Ambiguous(server_error.to_string()),
         );
 
-        let post_lookup = anyhow::Error::from(BybitModifyOrderError::PostModifyLookup {
+        let post_lookup = anyhow::Error::from(BitgetModifyOrderError::PostModifyLookup {
             source: anyhow::anyhow!("realtime lookup failed"),
         });
         assert_eq!(
@@ -2581,7 +2581,7 @@ mod tests {
             CommandFailure::Ambiguous(post_lookup.to_string()),
         );
 
-        let status = anyhow::Error::from(BybitHttpError::UnexpectedStatus {
+        let status = anyhow::Error::from(BitgetHttpError::UnexpectedStatus {
             status: 503,
             body: "service unavailable".to_string(),
         });
@@ -2628,15 +2628,25 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_http_cancel_local_validation_failure_does_not_emit_cancel_rejected() {
-        let (mut client, _cache) = test_execution_client();
+        let (mut client, cache) = test_execution_client();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         client.emitter.set_sender(tx);
-        client.config.environment = BybitEnvironment::Demo;
+        // Conditional orders are cancelled over REST (strategy orders), not `op:"trade"`
+        let client_order_id = ClientOrderId::from("O-CANCEL-LOCAL-VALIDATION");
+        let order = OrderTestBuilder::new(OrderType::StopMarket)
+            .instrument_id(InstrumentId::from("BTCUSDT-PERP.BITGET"))
+            .client_order_id(client_order_id)
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from("1"))
+            .trigger_price(Price::from("10000.00"))
+            .build();
+        cache
+            .borrow_mut()
+            .add_order(order, None, Some(*BITGET_CLIENT_ID), false)
+            .unwrap();
 
         client
-            .cancel_order(cancel_command(ClientOrderId::from(
-                "O-CANCEL-LOCAL-VALIDATION",
-            )))
+            .cancel_order(cancel_command(client_order_id))
             .unwrap();
         wait_for_spawned_tasks(&client).await;
 
@@ -2671,7 +2681,7 @@ mod tests {
         client.emitter.set_sender(tx);
 
         let client_order_id = ClientOrderId::from("O-WS-SEND-FAIL");
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let mut builder = OrderTestBuilder::new(OrderType::Limit);
         let order = builder
             .instrument_id(instrument_id)
@@ -2686,12 +2696,12 @@ mod tests {
 
         cache
             .borrow_mut()
-            .add_order(order, None, Some(*BYBIT_CLIENT_ID), false)
+            .add_order(order, None, Some(*BITGET_CLIENT_ID), false)
             .unwrap();
 
         let command = SubmitOrder::new(
             trader_id,
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             strategy_id,
             instrument_id,
             client_order_id,
@@ -2731,7 +2741,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         client.emitter.set_sender(tx);
 
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let strategy_id = StrategyId::from("S-001");
         let client_order_id_1 = ClientOrderId::from("O-WS-LIST-SEND-FAIL-1");
         let client_order_id_2 = ClientOrderId::from("O-WS-LIST-SEND-FAIL-2");
@@ -2761,11 +2771,11 @@ mod tests {
 
         cache
             .borrow_mut()
-            .add_order(order_1, None, Some(*BYBIT_CLIENT_ID), false)
+            .add_order(order_1, None, Some(*BITGET_CLIENT_ID), false)
             .unwrap();
         cache
             .borrow_mut()
-            .add_order(order_2, None, Some(*BYBIT_CLIENT_ID), false)
+            .add_order(order_2, None, Some(*BITGET_CLIENT_ID), false)
             .unwrap();
 
         let order_list = OrderList::new(
@@ -2777,7 +2787,7 @@ mod tests {
         );
         let command = SubmitOrderList::new(
             trader_id,
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             strategy_id,
             order_list,
             vec![init_1, init_2],
@@ -2819,10 +2829,10 @@ mod tests {
         venue_position_id: Option<PositionId>,
     ) -> OrderStatusReport {
         let mut report = OrderStatusReport::new(
-            AccountId::from("BYBIT-001"),
+            AccountId::from("BITGET-001"),
             instrument_id,
             Some(client_order_id),
-            VenueOrderId::from("BYBIT-ORDER-001"),
+            VenueOrderId::from("BITGET-ORDER-001"),
             OrderSide::Buy.into(),
             OrderType::Limit,
             TimeInForce::Gtc,
@@ -2842,8 +2852,8 @@ mod tests {
     fn test_cache_reconciliation_order_identity_caches_and_clears_hedge_report() {
         let (client, cache) = test_execution_client();
         let client_order_id = ClientOrderId::from("O-HEDGE-RECON");
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
-        let venue_position_id = PositionId::from("BTCUSDT-LINEAR.BYBIT-LONG");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
+        let venue_position_id = PositionId::from("BTCUSDT-PERP.BITGET-LONG");
         let mut builder = OrderTestBuilder::new(OrderType::Limit);
         let order = builder
             .instrument_id(instrument_id)
@@ -2899,7 +2909,7 @@ mod tests {
     fn test_cache_reconciliation_order_identity_keeps_one_way_local_report() {
         let (client, cache) = test_execution_client();
         let client_order_id = ClientOrderId::from("O-ONEWAY-RECON");
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let mut builder = OrderTestBuilder::new(OrderType::Limit);
         let order = builder
             .instrument_id(instrument_id)
@@ -2927,88 +2937,29 @@ mod tests {
     }
 
     #[rstest]
-    #[case::spot_market_base(
-        BybitProductType::Spot,
-        BybitOrderType::Market,
-        false,
-        Some(BybitMarketUnit::BaseCoin)
-    )]
-    #[case::spot_market_quote(
-        BybitProductType::Spot,
-        BybitOrderType::Market,
-        true,
-        Some(BybitMarketUnit::QuoteCoin)
-    )]
-    #[case::spot_limit(BybitProductType::Spot, BybitOrderType::Limit, true, None)]
-    #[case::linear_market(BybitProductType::Linear, BybitOrderType::Market, true, None)]
-    fn test_ws_params_market_unit(
-        #[case] product_type: BybitProductType,
-        #[case] order_type: BybitOrderType,
-        #[case] is_quote_quantity: bool,
-        #[case] expected: Option<BybitMarketUnit>,
-    ) {
-        let params = BybitWsPlaceOrderParams {
-            category: product_type,
-            symbol: ustr::Ustr::from("BTCUSDT"),
-            side: BybitOrderSide::Buy,
-            order_type,
-            qty: "1.0".to_string(),
-            is_leverage: None,
-            market_unit: spot_market_unit(product_type, order_type, is_quote_quantity),
-            price: None,
-            time_in_force: None,
-            order_link_id: None,
-            reduce_only: None,
-            close_on_trigger: None,
-            trigger_price: None,
-            trigger_by: None,
-            trigger_direction: None,
-            tpsl_mode: None,
-            take_profit: None,
-            stop_loss: None,
-            tp_trigger_by: None,
-            sl_trigger_by: None,
-            sl_trigger_price: None,
-            tp_trigger_price: None,
-            sl_order_type: None,
-            tp_order_type: None,
-            sl_limit_price: None,
-            tp_limit_price: None,
-            order_iv: None,
-            smp_type: None,
-            mmp: None,
-            position_idx: None,
-            bbo_side_type: None,
-            bbo_level: None,
-        };
-
-        assert_eq!(params.market_unit, expected);
-    }
-
-    #[rstest]
-    #[case::market(OrderType::Market, BybitOrderType::Market, false)]
-    #[case::limit(OrderType::Limit, BybitOrderType::Limit, false)]
-    #[case::stop_market(OrderType::StopMarket, BybitOrderType::Market, true)]
-    #[case::stop_limit(OrderType::StopLimit, BybitOrderType::Limit, true)]
-    #[case::market_if_touched(OrderType::MarketIfTouched, BybitOrderType::Market, true)]
-    #[case::limit_if_touched(OrderType::LimitIfTouched, BybitOrderType::Limit, true)]
+    #[case::market(OrderType::Market, BitgetOrderType::Market, false)]
+    #[case::limit(OrderType::Limit, BitgetOrderType::Limit, false)]
+    #[case::stop_market(OrderType::StopMarket, BitgetOrderType::Market, true)]
+    #[case::stop_limit(OrderType::StopLimit, BitgetOrderType::Limit, true)]
+    #[case::market_if_touched(OrderType::MarketIfTouched, BitgetOrderType::Market, true)]
+    #[case::limit_if_touched(OrderType::LimitIfTouched, BitgetOrderType::Limit, true)]
     fn test_map_order_type(
         #[case] input: OrderType,
-        #[case] expected_type: BybitOrderType,
+        #[case] expected_type: BitgetOrderType,
         #[case] expected_conditional: bool,
     ) {
-        let (bybit_type, is_conditional) = BybitExecutionClient::map_order_type(input).unwrap();
-        assert_eq!(bybit_type, expected_type);
+        let (bitget_type, is_conditional) = BitgetExecutionClient::map_order_type(input).unwrap();
+        assert_eq!(bitget_type, expected_type);
         assert_eq!(is_conditional, expected_conditional);
     }
 
     #[rstest]
     fn test_map_order_type_rejects_trailing_stop() {
-        BybitExecutionClient::map_order_type(OrderType::TrailingStopMarket).unwrap_err();
+        BitgetExecutionClient::map_order_type(OrderType::TrailingStopMarket).unwrap_err();
     }
 
     #[rstest]
-    #[case::linear("BTCUSDT-LINEAR", true)]
+    #[case::linear("BTCUSDT-PERP", true)]
     #[case::inverse("BTCUSD-INVERSE", true)]
     #[case::spot("BTCUSDT-SPOT", false)]
     #[case::option("BTC-30JUN25-100000-C-OPTION", false)]
@@ -3016,13 +2967,13 @@ mod tests {
         #[case] symbol_str: &str,
         #[case] keeps: bool,
     ) {
-        let result = BybitExecutionClient::parse_derivative_symbol(symbol_str);
+        let result = BitgetExecutionClient::parse_derivative_symbol(symbol_str);
         assert_eq!(result.is_some(), keeps);
     }
 
     #[rstest]
     fn test_parse_derivative_symbol_rejects_malformed() {
-        assert!(BybitExecutionClient::parse_derivative_symbol("not-a-real-symbol").is_none());
+        assert!(BitgetExecutionClient::parse_derivative_symbol("not-a-real-symbol").is_none());
     }
 
     #[rstest]
@@ -3034,7 +2985,7 @@ mod tests {
     fn test_is_unchanged_error(#[case] msg: &str, #[case] code: &str, #[case] expected: bool) {
         let err = anyhow::anyhow!("{msg}");
         assert_eq!(
-            BybitExecutionClient::is_unchanged_error(&err, code),
+            BitgetExecutionClient::is_unchanged_error(&err, code),
             expected
         );
     }
@@ -3044,12 +2995,12 @@ mod tests {
     #[case::no_match("Some other error", false)]
     fn test_is_low_margin_error(#[case] msg: &str, #[case] expected: bool) {
         let err = anyhow::anyhow!("{msg}");
-        assert_eq!(BybitExecutionClient::is_low_margin_error(&err), expected);
+        assert_eq!(BitgetExecutionClient::is_low_margin_error(&err), expected);
     }
 
     #[rstest]
     fn test_submit_rejection_reason_matches_confirmed_rejection() {
-        let err = anyhow::Error::from(BybitSubmitOrderError::Rejected {
+        let err = anyhow::Error::from(BitgetSubmitOrderError::Rejected {
             reason: "EC_PostOnlyWillTakeLiquidity".to_string(),
         });
 
@@ -3061,8 +3012,8 @@ mod tests {
 
     #[rstest]
     fn test_submit_rejection_reason_ignores_post_submit_lookup_failure() {
-        let err = anyhow::Error::from(BybitSubmitOrderError::PostSubmitLookup {
-            source: anyhow::Error::from(BybitHttpError::BybitError {
+        let err = anyhow::Error::from(BitgetSubmitOrderError::PostSubmitLookup {
+            source: anyhow::Error::from(BitgetHttpError::BitgetError {
                 error_code: 110017,
                 message: "current position is zero, cannot fix reduce-only order qty".to_string(),
             }),
@@ -3074,29 +3025,26 @@ mod tests {
 
     #[rstest]
     fn test_submit_rejection_reason_ignores_missing_order_id() {
-        let err = anyhow::Error::from(BybitSubmitOrderError::MissingOrderId);
+        let err = anyhow::Error::from(BitgetSubmitOrderError::MissingOrderId);
 
         assert_eq!(submit_rejection_reason(&err), None);
     }
 
     #[rstest]
     fn test_submit_rejection_reason_matches_venue_http_error() {
-        let err = anyhow::Error::from(BybitHttpError::BybitError {
-            error_code: 110017,
-            message: "current position is zero, cannot fix reduce-only order qty".to_string(),
+        let err = anyhow::Error::from(BitgetHttpError::BitgetError {
+            error_code: 22002,
+            message: "No position to close".to_string(),
         });
 
-        assert_eq!(
-            submit_rejection_reason(&err),
-            Some("current position is zero, cannot fix reduce-only order qty"),
-        );
+        assert_eq!(submit_rejection_reason(&err), Some("No position to close"),);
     }
 
     #[rstest]
     fn test_submit_rejection_reason_ignores_ambiguous_http_error() {
-        let err = anyhow::Error::from(BybitHttpError::BybitError {
-            error_code: 10016,
-            message: "rate limit exceeded".to_string(),
+        let err = anyhow::Error::from(BitgetHttpError::BitgetError {
+            error_code: 40010,
+            message: "Request timed out".to_string(),
         });
 
         assert_eq!(submit_rejection_reason(&err), None);
@@ -3115,8 +3063,8 @@ mod tests {
         client.emitter.set_sender(tx);
         client.ws_trade.close().await.unwrap();
 
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
-        let other_instrument_id = InstrumentId::from("ETHUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
+        let other_instrument_id = InstrumentId::from("ETHUSDT-PERP.BITGET");
         let account_id = client.core.account_id;
         let mut orders = Vec::new();
 
@@ -3143,11 +3091,11 @@ mod tests {
                 .quantity(Quantity::from("1"))
                 .price(Price::from("10000.00"))
                 .build();
-            let venue_order_id = VenueOrderId::from(format!("BYBIT-{index}"));
+            let venue_order_id = VenueOrderId::from(format!("BITGET-{index}"));
             let accepted = TestOrderEventStubs::accepted(&order, account_id, venue_order_id);
             cache
                 .borrow_mut()
-                .add_order(order.clone(), None, Some(*BYBIT_CLIENT_ID), false)
+                .add_order(order.clone(), None, Some(*BITGET_CLIENT_ID), false)
                 .unwrap();
             let order = cache.borrow_mut().update_order(&accepted).unwrap();
 
@@ -3163,7 +3111,7 @@ mod tests {
         client
             .cancel_all_orders(CancelAllOrders::new(
                 TraderId::from("TESTER-001"),
-                Some(*BYBIT_CLIENT_ID),
+                Some(*BITGET_CLIENT_ID),
                 StrategyId::from("S-001"),
                 instrument_id,
                 order_side,
@@ -3215,9 +3163,9 @@ mod tests {
         client
             .cancel_all_orders(CancelAllOrders::new(
                 TraderId::from("TESTER-001"),
-                Some(*BYBIT_CLIENT_ID),
+                Some(*BITGET_CLIENT_ID),
                 StrategyId::from("S-001"),
-                InstrumentId::from("BTCUSDT-LINEAR.BYBIT"),
+                InstrumentId::from("BTCUSDT-PERP.BITGET"),
                 Some(OrderSide::Buy),
                 UUID4::new(),
                 UnixNanos::default(),
@@ -3239,7 +3187,7 @@ mod tests {
         client.emitter.set_sender(tx);
         client.ws_trade.close().await.unwrap();
 
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
 
         let cancels = ["S-001", "S-002"]
             .into_iter()
@@ -3247,11 +3195,11 @@ mod tests {
             .map(|(index, owner)| {
                 CancelOrder::new(
                     TraderId::from("TESTER-001"),
-                    Some(*BYBIT_CLIENT_ID),
+                    Some(*BITGET_CLIENT_ID),
                     StrategyId::from(owner),
                     instrument_id,
                     ClientOrderId::from(format!("O-BATCH-OWNER-{index}")),
-                    Some(VenueOrderId::from(format!("BYBIT-BATCH-{index}"))),
+                    Some(VenueOrderId::from(format!("BITGET-BATCH-{index}"))),
                     UUID4::new(),
                     UnixNanos::default(),
                     None,
@@ -3263,7 +3211,7 @@ mod tests {
         client
             .batch_cancel_orders(BatchCancelOrders::new(
                 TraderId::from("TESTER-001"),
-                Some(*BYBIT_CLIENT_ID),
+                Some(*BITGET_CLIENT_ID),
                 StrategyId::from("S-001"),
                 instrument_id,
                 cancels.clone(),

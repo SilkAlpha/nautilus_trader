@@ -1,31 +1,35 @@
 {
-  "retCode": 0,
-  "retMsg": "OK",
-  "result": {
-    "nextPageCursor": "",
-    "list": [
-      {
-        "symbol": "AAPLUSDT",
-        "baseCoin": "AAPL",
-        "quoteCoin": "USDT",
-        "innovation": "0",
-        "status": "Trading",
-        "marginTrading": "none",
-        "lotSizeFilter": {
-          "basePrecision": "0.0001",
-          "quotePrecision": "0.01",
-          "minOrderQty": "0.001",
-          "maxOrderQty": "100.0",
-          "minOrderAmt": "10",
-          "maxOrderAmt": "1000000"
-        },
-        "priceFilter": {"tickSize": "0.01"},
-        "symbolId": 42,
-        "symbolType": "xstocks",
-        "xstockMultiplier": "0.1"
-      }
-    ]
-  },
-  "retExtInfo": {},
-  "time": 1700000000000
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794192850613,
+  "data": [
+    {
+      "symbol": "RTSLAUSDT",
+      "category": "SPOT",
+      "baseCoin": "rTSLA",
+      "quoteCoin": "USDT",
+      "symbolType": "stock",
+      "fullName": "Tesla",
+      "instrumentType": "stock",
+      "marketRegion": "US",
+      "isin": "US88160R1014",
+      "buyLimitPriceRatio": "0.1",
+      "sellLimitPriceRatio": "0.1",
+      "minOrderQty": "0",
+      "maxOrderQty": "0",
+      "pricePrecision": "2",
+      "quantityPrecision": "4",
+      "quotePrecision": "6",
+      "minOrderAmount": "10",
+      "maxMarketOrderAmount": "1000000",
+      "maxSymbolOrderNum": "",
+      "maxProductOrderNum": "400",
+      "status": "online",
+      "maintainTime": "",
+      "areaSymbol": "yes",
+      "maxPositionNum": "200",
+      "isReality": "yes",
+      "launchTime": "1780323652017"
+    }
+  ]
 }

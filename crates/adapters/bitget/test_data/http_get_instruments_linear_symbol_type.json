@@ -1,37 +1,49 @@
 {
-  "retCode": 0,
-  "retMsg": "OK",
-  "result": {
-    "nextPageCursor": "",
-    "category": "linear",
-    "list": [
-      {
-        "symbol": "TSLAUSDT",
-        "contractType": "LinearPerpetual",
-        "status": "Trading",
-        "baseCoin": "TSLA",
-        "quoteCoin": "USDT",
-        "launchTime": "0",
-        "deliveryTime": "0",
-        "deliveryFeeRate": "",
-        "priceScale": "2",
-        "leverageFilter": {"minLeverage": "1", "maxLeverage": "10", "leverageStep": "0.01"},
-        "priceFilter": {"minPrice": "0.01", "maxPrice": "1000", "tickSize": "0.01"},
-        "lotSizeFilter": {
-          "maxOrderQty": "100",
-          "minOrderQty": "0.001",
-          "qtyStep": "0.001",
-          "postOnlyMaxOrderQty": "1000",
-          "minNotionalValue": "1"
-        },
-        "unifiedMarginTrade": true,
-        "fundingInterval": 480,
-        "settleCoin": "USDT",
-        "symbolId": 7,
-        "symbolType": "stock"
-      }
-    ]
-  },
-  "retExtInfo": {},
-  "time": 1700000000000
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794192834619,
+  "data": [
+    {
+      "symbol": "NVDAUSDT",
+      "category": "USDT-FUTURES",
+      "baseCoin": "NVDA",
+      "quoteCoin": "USDT",
+      "symbolType": "stock",
+      "fullName": "Nvidia",
+      "instrumentType": "stock",
+      "marketRegion": "US",
+      "isin": "US67066G1040",
+      "isRwa": "YES",
+      "buyLimitPriceRatio": "0.02",
+      "sellLimitPriceRatio": "0.02",
+      "feeRateUpRatio": "0.005",
+      "makerFeeRate": "0.0002",
+      "takerFeeRate": "0.0006",
+      "openCostUpRatio": "0.01",
+      "minOrderQty": "0.01",
+      "maxOrderQty": "52000",
+      "pricePrecision": "2",
+      "quantityPrecision": "2",
+      "quotePrecision": "",
+      "priceMultiplier": "0.01",
+      "quantityMultiplier": "0.01",
+      "type": "perpetual",
+      "minOrderAmount": "5",
+      "maxSymbolOrderNum": "",
+      "maxProductOrderNum": "400",
+      "maxPositionNum": "200",
+      "status": "online",
+      "offTime": "-1",
+      "limitOpenTime": "-1",
+      "deliveryTime": "",
+      "deliveryStartTime": "",
+      "deliveryPeriod": "",
+      "launchTime": "1769994062273",
+      "fundInterval": "8",
+      "minLeverage": "1",
+      "maxLeverage": "100",
+      "maintainTime": "",
+      "maxMarketOrderQty": "9500"
+    }
+  ]
 }

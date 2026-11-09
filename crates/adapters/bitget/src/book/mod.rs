@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Order book synchronization and recovery for Bybit.
+//! Order book synchronization and recovery for Bitget.
 //!
 //! - [`sync`] owns update ID validation, snapshot tracking, and recovery state transitions.
 //! - [`recovery`] owns recovery tasks and replacement subscriptions, using the shared retry runner.

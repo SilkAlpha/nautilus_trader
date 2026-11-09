@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Integration tests for `BybitDataClient`.
+//! Integration tests for `BitgetDataClient`.
 //!
 //! These tests verify the full data flow from WebSocket messages through
 //! parsing to event emission via the data event channel.
@@ -38,14 +38,14 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::get,
 };
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::{
-        consts::{BYBIT_CLIENT_ID, BYBIT_VENUE},
-        enums::{BybitEnvironment, BybitProductType},
+        consts::{BITGET_CLIENT_ID, BITGET_VENUE},
+        enums::{BitgetEnvironment, BitgetProductType},
     },
-    config::BybitDataClientConfig,
-    data::BybitDataClient,
-    data_types::BybitLiquidation,
+    config::BitgetDataClientConfig,
+    data::BitgetDataClient,
+    data_types::BitgetLiquidation,
 };
 use nautilus_common::{
     clients::DataClient,
@@ -72,7 +72,6 @@ use nautilus_model::{
 };
 use nautilus_network::http::HttpClient;
 use rstest::rstest;
-use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use ustr::Ustr;
 
@@ -81,6 +80,7 @@ struct TestServerState {
     connection_count: Arc<tokio::sync::Mutex<usize>>,
     upgrade_count: Arc<AtomicUsize>,
     instrument_requests: Arc<AtomicUsize>,
+    orderbook_requests: Arc<AtomicUsize>,
     upgrade_gate: tokio::sync::watch::Sender<bool>,
     socket_drops: Arc<tokio::sync::Mutex<HashMap<usize, tokio::sync::oneshot::Sender<()>>>>,
     subscriptions: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -100,6 +100,7 @@ impl Default for TestServerState {
             connection_count: Arc::new(tokio::sync::Mutex::new(0)),
             upgrade_count: Arc::new(AtomicUsize::new(0)),
             instrument_requests: Arc::new(AtomicUsize::new(0)),
+            orderbook_requests: Arc::new(AtomicUsize::new(0)),
             upgrade_gate: tokio::sync::watch::channel(true).0,
             socket_drops: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             subscriptions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -139,18 +140,17 @@ async fn handle_get_instruments(
     state.instrument_requests.fetch_add(1, Ordering::Relaxed);
     let category = query.get("category").map(String::as_str);
     let filename = match category {
-        Some("linear") => "http_get_instruments_linear.json",
-        Some("spot") => "http_get_instruments_spot.json",
-        Some("inverse") => "http_get_instruments_inverse.json",
-        Some("option") => "http_get_instruments_option.json",
+        Some("USDT-FUTURES") => "http_get_instruments_linear.json",
+        Some("SPOT") => "http_get_instruments_spot.json",
+        Some("COIN-FUTURES") => "http_get_instruments_inverse.json",
         _ => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "retCode": 10001,
-                    "retMsg": "Invalid category",
-                    "result": {},
-                    "time": 1704470400123i64
+                    "code": "40034",
+                    "msg": "Parameter category error",
+                    "requestTime": 1794192837141_i64,
+                    "data": null
                 })),
             )
                 .into_response();
@@ -167,27 +167,22 @@ async fn handle_get_fee_rate() -> impl IntoResponse {
 }
 
 async fn handle_get_server_time() -> impl IntoResponse {
-    Json(json!({
-        "retCode": 0,
-        "retMsg": "OK",
-        "result": {
-            "timeSecond": "1704470400",
-            "timeNano": "1704470400123456789"
-        },
-        "retExtInfo": {},
-        "time": 1704470400123i64
-    }))
+    Json(load_test_data("http_get_server_time.json"))
 }
 
-async fn handle_get_orderbook() -> impl IntoResponse {
+async fn handle_get_orderbook(State(state): State<TestServerState>) -> impl IntoResponse {
+    state.orderbook_requests.fetch_add(1, Ordering::Relaxed);
     let orderbook = load_test_data("http_get_orderbook.json");
     Json(orderbook).into_response()
 }
 
 async fn handle_get_klines(Query(query): Query<HashMap<String, String>>) -> impl IntoResponse {
-    assert_eq!(query.get("category").map(String::as_str), Some("linear"));
+    assert_eq!(
+        query.get("category").map(String::as_str),
+        Some("USDT-FUTURES")
+    );
     assert_eq!(query.get("symbol").map(String::as_str), Some("BTCUSDT"));
-    assert_eq!(query.get("interval").map(String::as_str), Some("5"));
+    assert_eq!(query.get("interval").map(String::as_str), Some("5m"));
     Json(load_test_data("http_get_klines_linear.json"))
 }
 
@@ -222,6 +217,52 @@ async fn handle_websocket(ws: WebSocketUpgrade, State(state): State<TestServerSt
     })
 }
 
+// Dotted topic key the client tracks for a Bitget `arg` object
+fn arg_key(arg: &Value) -> String {
+    let topic = arg["topic"].as_str().unwrap_or_default();
+    match (
+        arg.get("interval").and_then(Value::as_str),
+        arg.get("symbol").and_then(Value::as_str),
+    ) {
+        (Some(interval), Some(symbol)) => format!("{topic}.{interval}.{symbol}"),
+        (None, Some(symbol)) => format!("{topic}.{symbol}"),
+        _ => topic.to_string(),
+    }
+}
+
+fn with_arg(mut frame: Value, arg: &Value) -> Value {
+    frame["arg"] = arg.clone();
+    frame
+}
+
+fn interval_ms(interval: &str) -> u64 {
+    let (value, unit) = interval.split_at(interval.len() - 1);
+    let value: u64 = value.parse().unwrap();
+    value
+        * match unit {
+            "m" => 60_000,
+            "H" => 3_600_000,
+            "D" => 86_400_000,
+            _ => panic!("unexpected interval {interval}"),
+        }
+}
+
+// The captured all-symbol liquidation frame re-targeted to the subscribed symbol
+fn liquidation_frame(symbol: &str) -> Value {
+    let mut frame = load_test_data("ws_all_liquidation.json");
+    frame["data"][0]["symbol"] = symbol.into();
+    frame["data"][0]["side"] = "buy".into();
+    frame["data"][0]["price"] = "96250.5".into();
+    frame["data"][0]["amount"] = "0.015".into();
+    frame["data"][0]["ts"] = "1739502302929".into();
+    frame["data"][1]["symbol"] = symbol.into();
+    frame["data"][1]["side"] = "sell".into();
+    frame["data"][1]["price"] = "97410.0".into();
+    frame["data"][1]["amount"] = "1.250".into();
+    frame["data"][1]["ts"] = "1739502303011".into();
+    frame
+}
+
 async fn handle_socket(
     mut socket: WebSocket,
     state: TestServerState,
@@ -239,8 +280,8 @@ async fn handle_socket(
         }
 
         for update in std::mem::take(&mut *state.book_updates.lock().await) {
-            let topic = update["topic"].as_str().unwrap();
-            if state.subscriptions.lock().await.iter().any(|s| s == topic) {
+            let topic = arg_key(&update["arg"]);
+            if state.subscriptions.lock().await.contains(&topic) {
                 socket
                     .send(Message::Text(update.to_string().into()))
                     .await
@@ -267,81 +308,75 @@ async fn handle_socket(
         };
 
         match msg {
+            // Bitget heartbeats are the plain text frames `ping`/`pong`
+            Message::Text(text) if text.as_str() == "ping" => {
+                state.ping_count.fetch_add(1, Ordering::Relaxed);
+
+                if socket.send(Message::Text("pong".into())).await.is_err() {
+                    break;
+                }
+            }
             Message::Text(text) => {
                 let Ok(value) = serde_json::from_str::<Value>(&text) else {
                     continue;
                 };
 
                 let op = value.get("op").and_then(|v| v.as_str());
+                let args = value
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .cloned()
+                    .unwrap_or_default();
 
                 match op {
-                    Some("ping") => {
-                        state.ping_count.fetch_add(1, Ordering::Relaxed);
-                        let pong_response = json!({
-                            "success": true,
-                            "ret_msg": "pong",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "pong"
-                        });
-
-                        if socket
-                            .send(Message::Text(pong_response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
                     Some("subscribe") => {
-                        let args = value.get("args").and_then(|a| a.as_array());
-                        if let Some(topics) = args {
-                            for topic in topics {
-                                if let Some(topic_str) = topic.as_str() {
-                                    state
-                                        .subscription_events
-                                        .lock()
-                                        .await
-                                        .push((topic_str.to_string(), true));
+                        for arg in &args {
+                            let topic = arg_key(arg);
+                            state
+                                .subscription_events
+                                .lock()
+                                .await
+                                .push((topic.clone(), true));
 
-                                    let mut subs = state.subscriptions.lock().await;
-                                    if !subs.contains(&topic_str.to_string()) {
-                                        subs.push(topic_str.to_string());
-                                    }
-                                }
+                            let mut subs = state.subscriptions.lock().await;
+                            if !subs.contains(&topic) {
+                                subs.push(topic);
                             }
                         }
 
-                        let sub_response = json!({
-                            "success": true,
-                            "ret_msg": "",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "subscribe"
-                        });
-
-                        if socket
-                            .send(Message::Text(sub_response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
+                        let mut failed = false;
+                        for arg in &args {
+                            let ack = json!({
+                                "event": "subscribe",
+                                "arg": arg,
+                                "connId": "test-conn-id"
+                            });
+                            if socket
+                                .send(Message::Text(ack.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        if failed {
                             break;
                         }
 
-                        if let Some(topics) = args
-                            && let Some(first_topic) = topics.first().and_then(|t| t.as_str())
-                        {
-                            if first_topic.contains("publicTrade") {
-                                let trade_msg = load_test_data("ws_public_trade.json");
+                        let Some(arg) = args.first() else {
+                            continue;
+                        };
+                        let channel = arg["topic"].as_str().unwrap_or_default();
+                        let symbol = arg["symbol"].as_str().unwrap_or_default();
 
-                                if socket
-                                    .send(Message::Text(trade_msg.to_string().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            } else if first_topic.contains("orderbook") {
+                        let frames = match channel {
+                            "publicTrade" => {
+                                vec![with_arg(load_test_data("ws_public_trade.json"), arg)]
+                            }
+                            // `books1` pushes nothing on subscribe; the client seeds from REST
+                            "books1" => vec![],
+                            "books5" | "books50" | "books" => {
                                 // Answers the subscribe without its snapshot
                                 if state
                                     .book_snapshot_drops
@@ -353,84 +388,80 @@ async fn handle_socket(
                                     continue;
                                 }
 
-                                let mut orderbook_msg =
-                                    load_test_data("ws_orderbook_snapshot.json");
-                                orderbook_msg["topic"] = first_topic.into();
-                                orderbook_msg["data"]["s"] =
-                                    first_topic.rsplit('.').next().unwrap().into();
-
-                                if socket
-                                    .send(Message::Text(orderbook_msg.to_string().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            } else if first_topic.contains("tickers") {
-                                let ticker_msg = load_test_data("ws_ticker_linear.json");
-
-                                if socket
-                                    .send(Message::Text(ticker_msg.to_string().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            } else if first_topic.contains("kline") {
-                                let mut kline_msg = load_test_data("ws_kline.json");
-                                kline_msg["data"][0]["confirm"] = json!(true);
-
-                                if socket
-                                    .send(Message::Text(kline_msg.to_string().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            } else if first_topic.starts_with("allLiquidation") {
-                                let liquidation_msg =
-                                    state.liquidation_frame.lock().await.clone().unwrap_or_else(
-                                        || load_test_data("ws_all_liquidation.json"),
-                                    );
-
-                                if socket
-                                    .send(Message::Text(liquidation_msg.to_string().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
+                                let fixture = if channel == "books" {
+                                    "ws_orderbook_full_snapshot.json"
+                                } else {
+                                    "ws_orderbook_snapshot.json"
+                                };
+                                vec![with_arg(load_test_data(fixture), arg)]
                             }
+                            "ticker" => {
+                                vec![with_arg(load_test_data("ws_ticker_linear.json"), arg)]
+                            }
+                            "kline" => {
+                                // Bitget pushes the forming candle; the next start closes it
+                                let first = with_arg(load_test_data("ws_kline.json"), arg);
+                                let start: u64 =
+                                    first["data"][0]["start"].as_str().unwrap().parse().unwrap();
+                                let step = interval_ms(arg["interval"].as_str().unwrap());
+                                let mut next = first.clone();
+                                next["data"][0]["start"] = (start + step).to_string().into();
+                                vec![first, next]
+                            }
+                            "liquidation" => {
+                                let frame = state
+                                    .liquidation_frame
+                                    .lock()
+                                    .await
+                                    .clone()
+                                    .unwrap_or_else(|| liquidation_frame(symbol));
+                                vec![with_arg(frame, arg)]
+                            }
+                            _ => vec![],
+                        };
+
+                        for frame in frames {
+                            if socket
+                                .send(Message::Text(frame.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        if failed {
+                            break;
                         }
                     }
                     Some("unsubscribe") => {
-                        let args = value.get("args").and_then(|a| a.as_array());
-                        if let Some(topics) = args {
-                            for topic in topics {
-                                if let Some(topic_str) = topic.as_str() {
-                                    let mut events = state.subscription_events.lock().await;
-                                    events.retain(|(t, _)| t != topic_str);
-                                    drop(events);
+                        for arg in &args {
+                            let topic = arg_key(arg);
+                            let mut events = state.subscription_events.lock().await;
+                            events.retain(|(t, _)| *t != topic);
+                            drop(events);
 
-                                    let mut subs = state.subscriptions.lock().await;
-                                    subs.retain(|s| s != topic_str);
-                                }
-                            }
+                            let mut subs = state.subscriptions.lock().await;
+                            subs.retain(|s| *s != topic);
                         }
 
-                        let unsub_response = json!({
-                            "success": true,
-                            "ret_msg": "",
-                            "conn_id": "test-conn-id",
-                            "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "op": "unsubscribe"
-                        });
-
-                        if socket
-                            .send(Message::Text(unsub_response.to_string().into()))
-                            .await
-                            .is_err()
-                        {
+                        let mut failed = false;
+                        for arg in &args {
+                            let ack = json!({
+                                "event": "unsubscribe",
+                                "arg": arg,
+                                "connId": "test-conn-id"
+                            });
+                            if socket
+                                .send(Message::Text(ack.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        if failed {
                             break;
                         }
                     }
@@ -458,18 +489,17 @@ async fn handle_socket(
 
 fn create_test_router(state: TestServerState) -> Router {
     Router::new()
-        .route("/v5/market/instruments-info", get(handle_get_instruments))
-        .route("/v5/market/orderbook", get(handle_get_orderbook))
-        .route("/v5/market/kline", get(handle_get_klines))
+        .route("/api/v3/market/instruments", get(handle_get_instruments))
+        .route("/api/v3/market/orderbook", get(handle_get_orderbook))
+        .route("/api/v3/market/candles", get(handle_get_klines))
         .route(
-            "/v5/market/funding/history",
+            "/api/v3/market/history-fund-rate",
             get(handle_get_funding_history),
         )
-        .route("/v5/market/tickers", get(handle_get_tickers))
-        .route("/v5/account/fee-rate", get(handle_get_fee_rate))
-        .route("/v3/public/time", get(handle_get_server_time))
-        .route("/v5/public/linear", get(handle_websocket))
-        .route("/v5/public/spot", get(handle_websocket))
+        .route("/api/v3/market/tickers", get(handle_get_tickers))
+        .route("/api/v3/account/all-fee-rate", get(handle_get_fee_rate))
+        .route("/api/v3/market/time", get(handle_get_server_time))
+        .route("/v3/ws/public", get(handle_websocket))
         .with_state(state)
 }
 
@@ -484,7 +514,7 @@ async fn start_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    let health_url = format!("http://{addr}/v3/public/time");
+    let health_url = format!("http://{addr}/api/v3/market/time");
     let http_client = HttpClient::builder().build().unwrap();
     wait_until_async(
         || {
@@ -499,14 +529,15 @@ async fn start_test_server()
     Ok((addr, state))
 }
 
-fn create_test_config(addr: SocketAddr) -> BybitDataClientConfig {
-    BybitDataClientConfig {
+fn create_test_config(addr: SocketAddr) -> BitgetDataClientConfig {
+    BitgetDataClientConfig {
         api_key: None,
         api_secret: None,
-        product_types: vec![BybitProductType::Linear],
-        environment: BybitEnvironment::Mainnet,
+        api_passphrase: None,
+        product_types: vec![BitgetProductType::Linear],
+        environment: BitgetEnvironment::Mainnet,
         base_url_http: Some(format!("http://{addr}")),
-        base_url_ws_public: Some(format!("ws://{addr}/v5/public/linear")),
+        base_url_ws_public: Some(format!("ws://{addr}/v3/ws/public")),
         base_url_ws_private: None,
         proxy_url: None,
         http_timeout_secs: 10,
@@ -534,7 +565,7 @@ fn liquidation_data_type(instrument_id: Option<&str>, identifier: Option<&str>) 
     });
 
     DataType::new(
-        "BybitLiquidation",
+        "BitgetLiquidation",
         metadata,
         identifier.map(ToString::to_string),
     )
@@ -542,7 +573,7 @@ fn liquidation_data_type(instrument_id: Option<&str>, identifier: Option<&str>) 
 
 fn subscribe_custom_data(data_type: DataType) -> SubscribeCustomData {
     SubscribeCustomData::new(
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         data_type,
         UUID4::new(),
@@ -554,7 +585,7 @@ fn subscribe_custom_data(data_type: DataType) -> SubscribeCustomData {
 
 fn unsubscribe_custom_data(data_type: DataType) -> UnsubscribeCustomData {
     UnsubscribeCustomData::new(
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         data_type,
         UUID4::new(),
@@ -582,12 +613,12 @@ async fn recv_custom_data(
     .expect("timeout waiting for custom data")
 }
 
-fn as_liquidation(custom: &CustomData) -> &BybitLiquidation {
+fn as_liquidation(custom: &CustomData) -> &BitgetLiquidation {
     custom
         .data
         .as_any()
-        .downcast_ref::<BybitLiquidation>()
-        .expect("expected BybitLiquidation")
+        .downcast_ref::<BitgetLiquidation>()
+        .expect("expected BitgetLiquidation")
 }
 
 async fn wait_for_server_topics(state: &TestServerState, expected: &[&str]) {
@@ -598,72 +629,28 @@ async fn wait_for_server_topics(state: &TestServerState, expected: &[&str]) {
     .await;
 }
 
+// Bitget lists no options, so the option-chain reference price resolves to `None` without a
+// venue request
 #[rstest]
-#[case::valid(0, "97000.125", Some("97000.125"))]
-#[case::zero(0, "0", None)]
-#[case::negative(0, "-1", None)]
-#[case::invalid(0, "not_a_number", None)]
-#[case::venue_error(10001, "97000.125", None)]
 #[tokio::test]
-async fn test_option_chain_reference_price_response(
-    #[case] ret_code: i64,
-    #[case] value: &str,
-    #[case] expected: Option<&str>,
-) {
+async fn test_option_chain_reference_price_response() {
     let (addr, state) = start_test_server().await.unwrap();
-    *state.ticker_response.lock().await = Some(json!({
-        "retCode": ret_code,
-        "retMsg": if ret_code == 0 { "OK" } else { "Invalid request" },
-        "result": {
-            "category": "option",
-            "nextPageCursor": "",
-            "list": [{
-                "symbol": "BTC-28MAR25-90000-C",
-                "bid1Price": "1",
-                "bid1Size": "2",
-                "bid1Iv": "0.4",
-                "ask1Price": "3",
-                "ask1Size": "4",
-                "ask1Iv": "0.5",
-                "lastPrice": "2",
-                "highPrice24h": "4",
-                "lowPrice24h": "1",
-                "markPrice": "2.5",
-                "indexPrice": "96900",
-                "markIv": "0.45",
-                "underlyingPrice": value,
-                "openInterest": "10",
-                "turnover24h": "20",
-                "volume24h": "30",
-                "totalVolume": "40",
-                "totalTurnover": "50",
-                "delta": "0.5",
-                "gamma": "0.01",
-                "vega": "0.1",
-                "theta": "-0.1",
-                "predictedDeliveryPrice": "97100",
-                "change24h": "0.01"
-            }]
-        },
-        "retExtInfo": {},
-        "time": 1704470400123_i64
-    }));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     let series_id = OptionSeriesId::new_derived(
-        *BYBIT_VENUE,
+        *BITGET_VENUE,
         Ustr::from("BTC"),
         Ustr::from("USDC"),
         UnixNanos::from(1_743_120_000_000_000_000),
     );
-    let instrument_id = InstrumentId::from("BTC-28MAR25-90000-C-OPTION.BYBIT");
+    let instrument_id = InstrumentId::from("BTC-28MAR25-90000-C-OPTION.BITGET");
     let mut params = Params::new();
-    params.insert("test-case".to_string(), json!(ret_code));
+    params.insert("test-case".to_string(), json!(0));
     let request = RequestOptionChainReferencePrice::new(
         series_id,
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         UUID4::new(),
         UnixNanos::from(42),
         Some(params.clone()),
@@ -683,23 +670,14 @@ async fn test_option_chain_reference_price_response(
     let DataEvent::Response(DataResponse::OptionChainReferencePrice(response)) = event else {
         panic!("expected option-chain reference price response, received {event:?}");
     };
-    let queries = state.ticker_queries.lock().await;
 
     assert_eq!(response.correlation_id, request_id);
-    assert_eq!(response.client_id, *BYBIT_CLIENT_ID);
+    assert_eq!(response.client_id, *BITGET_CLIENT_ID);
     assert_eq!(response.series_id, series_id);
-    assert_eq!(response.price, expected.map(Price::from));
+    assert_eq!(response.price, None);
     assert!(response.ts_init >= before_ns && response.ts_init <= after_ns);
     assert_eq!(response.params, Some(params));
-    assert_eq!(queries.len(), 1);
-    assert_eq!(
-        queries[0].get("category").map(String::as_str),
-        Some("option")
-    );
-    assert_eq!(
-        queries[0].get("symbol").map(String::as_str),
-        Some("BTC-28MAR25-90000-C")
-    );
+    assert!(state.ticker_queries.lock().await.is_empty());
 }
 
 #[rstest]
@@ -714,7 +692,7 @@ async fn test_data_client_connect_disconnect() {
     let config = create_test_config(addr);
     let registry = SocketReconnectRegistry::default();
     let mut client = registry
-        .scope(|| BybitDataClient::new(*BYBIT_CLIENT_ID, config))
+        .scope(|| BitgetDataClient::new(*BITGET_CLIENT_ID, config))
         .unwrap();
     assert!(!client.is_connected());
 
@@ -731,12 +709,12 @@ async fn test_data_client_connect_disconnect() {
         .unwrap()
         .unwrap();
     let SystemEvent::SocketState(change) = event;
-    let endpoint = Ustr::from("bybit-linear-data-streams");
-    let handle = registry.handle(*BYBIT_CLIENT_ID, endpoint).unwrap();
+    let endpoint = Ustr::from("bitget-linear-data-streams");
+    let handle = registry.handle(*BITGET_CLIENT_ID, endpoint).unwrap();
 
     assert_eq!(*state.connection_count.lock().await, 1);
-    assert_eq!(change.client_id, *BYBIT_CLIENT_ID);
-    assert_eq!(change.venue, Some(*BYBIT_VENUE));
+    assert_eq!(change.client_id, *BITGET_CLIENT_ID);
+    assert_eq!(change.venue, Some(*BITGET_VENUE));
     assert_eq!(change.endpoint, endpoint);
     assert_eq!(change.state, SocketState::Connected);
     assert_eq!(
@@ -753,16 +731,16 @@ async fn test_data_client_connect_disconnect() {
 
     client.disconnect().await.unwrap();
     assert!(!client.is_connected());
-    assert!(registry.handle(*BYBIT_CLIENT_ID, endpoint).is_none());
+    assert!(registry.handle(*BITGET_CLIENT_ID, endpoint).is_none());
 }
 
 #[rstest]
-#[case::linear(vec![BybitProductType::Linear], 1)]
-#[case::linear_and_spot_drop_first(vec![BybitProductType::Linear, BybitProductType::Spot], 1)]
-#[case::linear_and_spot_drop_second(vec![BybitProductType::Linear, BybitProductType::Spot], 2)]
+#[case::linear(vec![BitgetProductType::Linear], 1)]
+#[case::linear_and_spot_drop_first(vec![BitgetProductType::Linear, BitgetProductType::Spot], 1)]
+#[case::linear_and_spot_drop_second(vec![BitgetProductType::Linear, BitgetProductType::Spot], 2)]
 #[tokio::test]
 async fn test_data_client_transport_reconnect(
-    #[case] product_types: Vec<BybitProductType>,
+    #[case] product_types: Vec<BitgetProductType>,
     #[case] dropped_socket: usize,
 ) {
     let (addr, state) = start_test_server().await.unwrap();
@@ -775,7 +753,7 @@ async fn test_data_client_transport_reconnect(
     let socket_count = product_types.len();
     config.product_types = product_types;
     let mut client = registry
-        .scope(|| BybitDataClient::new(*BYBIT_CLIENT_ID, config))
+        .scope(|| BitgetDataClient::new(*BITGET_CLIENT_ID, config))
         .unwrap();
     assert!(!client.is_connected());
     assert!(client.is_disconnected());
@@ -863,7 +841,7 @@ async fn test_data_client_transport_reconnect(
     assert!(!client.is_connected());
     assert!(client.is_disconnected());
     for endpoint in endpoints {
-        assert!(registry.handle(*BYBIT_CLIENT_ID, endpoint).is_none());
+        assert!(registry.handle(*BITGET_CLIENT_ID, endpoint).is_none());
     }
 }
 
@@ -875,7 +853,7 @@ async fn test_data_client_subscribe_trades() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     wait_until_async(
@@ -886,10 +864,10 @@ async fn test_data_client_subscribe_trades() {
 
     while rx.try_recv().is_ok() {}
 
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let cmd = SubscribeTrades::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -926,7 +904,7 @@ async fn test_data_client_subscribe_quotes_linear() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     wait_until_async(
@@ -937,10 +915,10 @@ async fn test_data_client_subscribe_quotes_linear() {
 
     while rx.try_recv().is_ok() {}
 
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let cmd = SubscribeQuotes::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -956,22 +934,79 @@ async fn test_data_client_subscribe_quotes_linear() {
                 .lock()
                 .await
                 .iter()
-                .any(|(topic, subscribed)| topic == "orderbook.1.BTCUSDT" && *subscribed)
+                .any(|(topic, subscribed)| topic == "books1.BTCUSDT" && *subscribed)
         },
         Duration::from_secs(5),
     )
     .await;
 
-    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    // `books1` pushes nothing on subscribe, so the first quote is seeded from REST limit=1
+    let quote = next_quote(&mut rx, UnixNanos::new(1_794_192_836_072_000_000)).await;
+    assert_eq!(quote.instrument_id, instrument_id);
+    assert_eq!(quote.bid_price, Price::from("75228.8"));
+    assert_eq!(quote.ask_price, Price::from("75228.9"));
+    assert_eq!(quote.bid_size, Quantity::from("4.1459"));
+    assert_eq!(quote.ask_size, Quantity::from("2.6781"));
+
+    // Later `books1` snapshots stream quotes
+    let mut books1 = load_test_data("ws_orderbook_books1.json");
+    books1["ts"] = 1_794_192_890_496_u64.into();
+    state.book_updates.lock().await.push(books1);
+    let quote = next_quote(&mut rx, UnixNanos::new(1_794_192_890_495_000_000)).await;
+    assert_eq!(quote.bid_price, Price::from("75242.8"));
+    assert_eq!(quote.ask_price, Price::from("75242.9"));
+
+    client.disconnect().await.unwrap();
+}
+
+// `books1` stays silent after a reconnect too, so every reconnect reseeds the quote from REST
+#[rstest]
+#[tokio::test]
+async fn test_data_client_reconnect_reseeds_quotes() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
+    set_data_event_sender(tx);
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
+    client.connect().await.unwrap();
+    wait_for_socket_registrations(&state, &[1]).await;
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
+    let seed_ts = UnixNanos::new(1_794_192_836_072_000_000);
+
+    client
+        .subscribe_quotes(SubscribeQuotes::new(
+            instrument_id,
+            Some(*BITGET_CLIENT_ID),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .unwrap();
+    next_quote(&mut rx, seed_ts).await;
+    assert_eq!(state.orderbook_requests.load(Ordering::Relaxed), 1);
+
+    state
+        .socket_drops
+        .lock()
         .await
-        .expect("timeout waiting for event")
-        .expect("channel closed");
+        .remove(&1)
+        .unwrap()
+        .send(())
+        .unwrap();
+    wait_for_socket_registrations(&state, &[2]).await;
+    let quote = next_quote(&mut rx, seed_ts).await;
 
+    assert_eq!(quote.instrument_id, instrument_id);
+    assert_eq!(state.orderbook_requests.load(Ordering::Relaxed), 2);
     assert!(
-        matches!(event, DataEvent::Data(Data::Quote(_))),
-        "Expected Quote event, was: {event:?}"
+        state
+            .subscriptions
+            .lock()
+            .await
+            .iter()
+            .any(|topic| topic == "books1.BTCUSDT")
     );
-
     client.disconnect().await.unwrap();
 }
 
@@ -984,7 +1019,7 @@ async fn test_data_client_subscribe_book_deltas() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     wait_until_async(
@@ -995,11 +1030,11 @@ async fn test_data_client_subscribe_book_deltas() {
 
     while rx.try_recv().is_ok() {}
 
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let cmd = SubscribeBookDeltas::new(
         instrument_id,
         BookType::L2_MBP,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1017,7 +1052,7 @@ async fn test_data_client_subscribe_book_deltas() {
                 .lock()
                 .await
                 .iter()
-                .any(|(topic, _)| topic.contains("orderbook"))
+                .any(|(topic, _)| topic.starts_with("books"))
         },
         Duration::from_secs(5),
     )
@@ -1042,31 +1077,31 @@ async fn test_data_client_book_gap_resubscribes_for_fresh_snapshot() {
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
 
+    // Full depth subscribes `books`, the only channel with snapshot + update sequencing
     let book = SubscribeBookDeltas::new(
         instrument_id,
         BookType::L2_MBP,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
-        NonZeroUsize::new(50),
+        NonZeroUsize::new(1000),
         false,
         None,
         None,
     );
 
-    // The server answers every subscribe with the snapshot fixture, whose update ID is 123456789
+    // The server answers every subscribe with the `books` snapshot whose seq is 1207360465262;
+    // the captured update links to it through pseq, so a larger pseq is a gap
     let mut gapped = load_test_data("ws_orderbook_delta.json");
-    gapped["topic"] = "orderbook.50.BTCUSDT".into();
-    gapped["ts"] = 1_709_891_700_000_u64.into();
-    gapped["data"]["u"] = 123_456_791_u64.into();
-    let mut linked = gapped.clone();
-    linked["ts"] = 1_709_891_701_000_u64.into();
-    linked["data"]["u"] = 123_456_790_u64.into();
+    gapped["data"][0]["pseq"] = 1_207_360_465_263_u64.into();
+    gapped["data"][0]["ts"] = "1709891700000".into();
+    let mut linked = load_test_data("ws_orderbook_delta.json");
+    linked["data"][0]["ts"] = "1709891701000".into();
 
     client.subscribe_book_deltas(book).unwrap();
     let initial = next_book_deltas(&mut rx).await;
@@ -1086,13 +1121,20 @@ async fn test_data_client_book_gap_resubscribes_for_fresh_snapshot() {
     }
 
     assert_eq!(update.ts_event, UnixNanos::new(1_709_891_701_000_000_000));
+    let actions: Vec<_> = update.deltas.iter().map(|delta| delta.action).collect();
     assert_eq!(
-        update
-            .deltas
+        actions
             .iter()
-            .map(|delta| delta.action)
-            .collect::<Vec<_>>(),
-        [BookAction::Update, BookAction::Delete],
+            .filter(|action| **action == BookAction::Delete)
+            .count(),
+        4,
+    );
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| **action == BookAction::Update)
+            .count(),
+        11,
     );
     client.disconnect().await.unwrap();
 }
@@ -1108,31 +1150,30 @@ async fn test_data_client_book_recovers_dropped_snapshot(#[case] after_gap: bool
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
 
-    let config = BybitDataClientConfig {
+    let config = BitgetDataClientConfig {
         book_snapshot_timeout_secs: 1,
         ..create_test_config(addr)
     };
 
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     let book = SubscribeBookDeltas::new(
-        InstrumentId::from("BTCUSDT-LINEAR.BYBIT"),
+        InstrumentId::from("BTCUSDT-PERP.BITGET"),
         BookType::L2_MBP,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
-        NonZeroUsize::new(50),
+        NonZeroUsize::new(1000),
         false,
         None,
         None,
     );
 
-    // The snapshot fixture carries update ID 123456789
+    // The `books` snapshot fixture carries seq 1207360465262
     let mut gapped = load_test_data("ws_orderbook_delta.json");
-    gapped["topic"] = "orderbook.50.BTCUSDT".into();
-    gapped["data"]["u"] = 123_456_791_u64.into();
+    gapped["data"][0]["pseq"] = 1_207_360_465_263_u64.into();
 
     if after_gap {
         client.subscribe_book_deltas(book).unwrap();
@@ -1147,26 +1188,28 @@ async fn test_data_client_book_recovers_dropped_snapshot(#[case] after_gap: bool
     let snapshot = next_book_deltas(&mut rx).await;
 
     assert_eq!(snapshot.deltas[0].action, BookAction::Clear);
-    assert_eq!(snapshot.deltas.len(), 5);
+    // Clear plus 1000 levels per side
+    assert_eq!(snapshot.deltas.len(), 2001);
     assert_eq!(state.book_snapshot_drops.load(Ordering::SeqCst), 0);
     client.disconnect().await.unwrap();
 }
 
-// Recovery resubscribes a depth-1 topic that quotes also hold, so quotes must outlive the book
+// Quotes and a depth-1 book share the `books1` topic, so dropping the book must keep quotes
+// streaming (`books1` is snapshot-per-push, so it never needs gap recovery)
 #[rstest]
 #[tokio::test]
 async fn test_data_client_shared_depth_one_recovery_keeps_quotes() {
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
-    let topic = "orderbook.1.BTCUSDT";
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
+    let topic = "books1.BTCUSDT";
 
     let quotes = SubscribeQuotes::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1177,7 +1220,7 @@ async fn test_data_client_shared_depth_one_recovery_keeps_quotes() {
     let book = SubscribeBookDeltas::new(
         instrument_id,
         BookType::L2_MBP,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1189,7 +1232,7 @@ async fn test_data_client_shared_depth_one_recovery_keeps_quotes() {
 
     let unsubscribe_book = UnsubscribeBookDeltas::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1197,32 +1240,23 @@ async fn test_data_client_shared_depth_one_recovery_keeps_quotes() {
         None,
     );
 
-    // The snapshot fixture uses the depth-1 topic and carries update ID 123456789
-    let mut snapshot = load_test_data("ws_orderbook_snapshot.json");
-    snapshot["ts"] = 1_709_891_700_000_u64.into();
-    let mut gapped = load_test_data("ws_orderbook_delta.json");
-    gapped["data"]["u"] = 123_456_791_u64.into();
-    let mut later = load_test_data("ws_orderbook_snapshot.json");
-    later["ts"] = 1_709_891_800_000_u64.into();
+    let mut snapshot = load_test_data("ws_orderbook_books1.json");
+    snapshot["data"][0]["ts"] = "1709891700000".into();
+    let mut later = load_test_data("ws_orderbook_books1.json");
+    later["data"][0]["ts"] = "1709891800000".into();
 
-    // Consumes the subscribe snapshot first so the book can only sync from the injected one
+    // The first quote is the REST seed taken on subscribe
     client.subscribe_quotes(quotes).unwrap();
-    next_quote(&mut rx, UnixNanos::new(1_709_891_679_000_000_000)).await;
+    next_quote(&mut rx, UnixNanos::new(1_794_192_836_072_000_000)).await;
     client.subscribe_book_deltas(book).unwrap();
     state.book_updates.lock().await.push(snapshot);
     let synced = next_book_deltas(&mut rx).await;
-    state.book_updates.lock().await.push(gapped);
-
-    // The server answers only a subscribe with the fixture timestamp
-    let resynced = next_book_deltas(&mut rx).await;
     client.unsubscribe_book_deltas(&unsubscribe_book).unwrap();
     state.book_updates.lock().await.push(later);
     let quote = next_quote(&mut rx, UnixNanos::new(1_709_891_800_000_000_000)).await;
 
     assert_eq!(synced.deltas[0].action, BookAction::Clear);
     assert_eq!(synced.ts_event, UnixNanos::new(1_709_891_700_000_000_000));
-    assert_eq!(resynced.deltas[0].action, BookAction::Clear);
-    assert_eq!(resynced.ts_event, UnixNanos::new(1_709_891_679_000_000_000));
     assert_eq!(quote.instrument_id, instrument_id);
     assert!(state.subscriptions.lock().await.iter().any(|t| t == topic));
     client.disconnect().await.unwrap();
@@ -1268,7 +1302,7 @@ async fn test_data_client_reset_clears_state() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
 
     client.reset().unwrap();
     assert!(!client.is_connected());
@@ -1289,7 +1323,7 @@ async fn test_data_client_emits_instruments_on_connect() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
 
     client.connect().await.unwrap();
 
@@ -1326,7 +1360,7 @@ async fn test_data_client_request_book_snapshot() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     // Drain instrument events from connect
@@ -1334,11 +1368,11 @@ async fn test_data_client_request_book_snapshot() {
 
     while rx.try_recv().is_ok() {}
 
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let request = RequestBookSnapshot::new(
         instrument_id,
         None,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1366,7 +1400,7 @@ async fn test_data_client_request_funding_rates() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     // Drain instrument events from connect
@@ -1374,13 +1408,13 @@ async fn test_data_client_request_funding_rates() {
 
     while rx.try_recv().is_ok() {}
 
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let request = RequestFundingRates::new(
         instrument_id,
         None,
         None,
         None,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1408,18 +1442,18 @@ async fn test_data_client_request_funding_rates_rejects_spot() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let instrument_id = InstrumentId::from("BTCUSDT-SPOT.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-SPOT.BITGET");
     let request = RequestFundingRates::new(
         instrument_id,
         None,
         None,
         None,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1444,18 +1478,18 @@ async fn test_data_client_request_funding_rates_rejects_option() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let instrument_id = InstrumentId::from("BTC-26DEC25-100000-C-OPTION.BYBIT");
+    let instrument_id = InstrumentId::from("BTC-26DEC25-100000-C-OPTION.BITGET");
     let request = RequestFundingRates::new(
         instrument_id,
         None,
         None,
         None,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1480,7 +1514,7 @@ async fn test_data_client_request_instruments() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     // Drain instrument events from connect
@@ -1491,8 +1525,8 @@ async fn test_data_client_request_instruments() {
     let request = RequestInstruments::new(
         None,
         None,
-        Some(*BYBIT_CLIENT_ID),
-        Some(*BYBIT_VENUE),
+        Some(*BITGET_CLIENT_ID),
+        Some(*BITGET_VENUE),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1520,7 +1554,7 @@ async fn test_data_client_request_instrument() {
     set_data_event_sender(tx);
 
     let config = create_test_config(addr);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
 
     // Drain instrument events from connect
@@ -1528,12 +1562,12 @@ async fn test_data_client_request_instrument() {
 
     while rx.try_recv().is_ok() {}
 
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let request = RequestInstrument::new(
         instrument_id,
         None,
         None,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1569,12 +1603,12 @@ async fn test_data_client_book_quote_topic_lifetime(
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let quotes = SubscribeQuotes::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1584,7 +1618,7 @@ async fn test_data_client_book_quote_topic_lifetime(
     let book = SubscribeBookDeltas::new(
         instrument_id,
         BookType::L2_MBP,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1601,9 +1635,9 @@ async fn test_data_client_book_quote_topic_lifetime(
             client.subscribe_book_deltas(book.clone()).unwrap();
         }
     }
-    let mut expected_topics = vec!["orderbook.1.BTCUSDT".to_string()];
+    let mut expected_topics = vec!["books1.BTCUSDT".to_string()];
     if depth != 1 {
-        expected_topics.push(format!("orderbook.{depth}.BTCUSDT"));
+        expected_topics.push(format!("books{depth}.BTCUSDT"));
     }
     wait_until_async(
         || async {
@@ -1630,7 +1664,7 @@ async fn test_data_client_book_quote_topic_lifetime(
     client.subscribe_book_deltas(book).unwrap();
     let unsubscribe_quotes = UnsubscribeQuotes::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1639,7 +1673,7 @@ async fn test_data_client_book_quote_topic_lifetime(
     );
     let unsubscribe_book = UnsubscribeBookDeltas::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1654,8 +1688,8 @@ async fn test_data_client_book_quote_topic_lifetime(
     }
     let remaining_depth = if remove_quotes_first { depth } else { 1 };
     let mut snapshot = load_test_data("ws_orderbook_snapshot.json");
-    snapshot["topic"] = format!("orderbook.{remaining_depth}.BTCUSDT").into();
-    snapshot["ts"] = 1_709_891_700_000_u64.into();
+    snapshot["arg"]["topic"] = format!("books{remaining_depth}").into();
+    snapshot["data"][0]["ts"] = "1709891700000".into();
     state.book_updates.lock().await.push(snapshot);
     let expected_ts = UnixNanos::new(1_709_891_700_000_000_000);
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1664,8 +1698,8 @@ async fn test_data_client_book_quote_topic_lifetime(
                 DataEvent::Data(Data::Quote(quote)) if quote.ts_event == expected_ts => {
                     assert!(!remove_quotes_first);
                     assert_eq!(quote.instrument_id, instrument_id);
-                    assert_eq!(quote.bid_price.as_decimal(), Decimal::from(27450));
-                    assert_eq!(quote.ask_price.as_decimal(), Decimal::from(27451));
+                    assert_eq!(quote.bid_price, Price::from("75242.8"));
+                    assert_eq!(quote.ask_price, Price::from("75242.9"));
                     break;
                 }
                 DataEvent::Data(Data::BookDeltas(deltas)) if deltas.ts_event == expected_ts => {
@@ -1700,11 +1734,11 @@ async fn test_data_client_failed_quote_subscription_keeps_shared_book_topic() {
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
     let quotes = SubscribeQuotes::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1714,7 +1748,7 @@ async fn test_data_client_failed_quote_subscription_keeps_shared_book_topic() {
     let book = SubscribeBookDeltas::new(
         instrument_id,
         BookType::L2_MBP,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1725,7 +1759,7 @@ async fn test_data_client_failed_quote_subscription_keeps_shared_book_topic() {
     );
     let unsubscribe_quotes = UnsubscribeQuotes::new(
         instrument_id,
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         None,
         UUID4::new(),
         UnixNanos::default(),
@@ -1737,10 +1771,16 @@ async fn test_data_client_failed_quote_subscription_keeps_shared_book_topic() {
     client.subscribe_quotes(quotes).unwrap();
     client.connect().await.unwrap();
     client.subscribe_book_deltas(book).unwrap();
+    wait_for_server_topics(&state, &["books1.BTCUSDT"]).await;
+
+    // `books1` pushes nothing on subscribe, so the venue snapshots are injected
+    let mut first = load_test_data("ws_orderbook_books1.json");
+    first["data"][0]["ts"] = "1709891679000".into();
+    state.book_updates.lock().await.push(first);
     let subscribed = next_book_deltas(&mut rx).await;
     client.unsubscribe_quotes(&unsubscribe_quotes).unwrap();
-    let mut snapshot = load_test_data("ws_orderbook_snapshot.json");
-    snapshot["ts"] = 1_709_891_700_000_u64.into();
+    let mut snapshot = load_test_data("ws_orderbook_books1.json");
+    snapshot["data"][0]["ts"] = "1709891700000".into();
     state.book_updates.lock().await.push(snapshot);
     let updated = next_book_deltas(&mut rx).await;
 
@@ -1749,13 +1789,13 @@ async fn test_data_client_failed_quote_subscription_keeps_shared_book_topic() {
         UnixNanos::new(1_709_891_679_000_000_000)
     );
     assert_eq!(updated.ts_event, UnixNanos::new(1_709_891_700_000_000_000));
-    assert_eq!(*state.subscriptions.lock().await, ["orderbook.1.BTCUSDT"]);
+    assert_eq!(*state.subscriptions.lock().await, ["books1.BTCUSDT"]);
     client.disconnect().await.unwrap();
 }
 
 #[rstest]
-#[case::open(false, 1_672_324_800_000_000_000)]
-#[case::close(true, 1_672_325_100_000_000_000)]
+#[case::open(false, 1_794_192_840_000_000_000)]
+#[case::close(true, 1_794_193_140_000_000_000)]
 #[tokio::test]
 async fn test_data_client_live_bar_timestamp(#[case] on_close: bool, #[case] expected: u64) {
     let (addr, _state) = start_test_server().await.unwrap();
@@ -1763,13 +1803,13 @@ async fn test_data_client_live_bar_timestamp(#[case] on_close: bool, #[case] exp
     set_data_event_sender(tx);
     let mut config = create_test_config(addr);
     config.bars_timestamp_on_close = on_close;
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
-    let bar_type = BarType::from("BTCUSDT-LINEAR.BYBIT-5-MINUTE-LAST-EXTERNAL");
+    let bar_type = BarType::from("BTCUSDT-PERP.BITGET-5-MINUTE-LAST-EXTERNAL");
     client
         .subscribe_bars(SubscribeBars::new(
             bar_type,
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             None,
             UUID4::new(),
             UnixNanos::default(),
@@ -1792,8 +1832,8 @@ async fn test_data_client_live_bar_timestamp(#[case] on_close: bool, #[case] exp
 }
 
 #[rstest]
-#[case::open(false, 1_709_891_679_000_000_000)]
-#[case::close(true, 1_709_891_979_000_000_000)]
+#[case::open(false, 1_794_192_780_000_000_000)]
+#[case::close(true, 1_794_193_080_000_000_000)]
 #[tokio::test]
 async fn test_data_client_request_bar_timestamp(#[case] on_close: bool, #[case] expected: u64) {
     let (addr, _state) = start_test_server().await.unwrap();
@@ -1801,15 +1841,15 @@ async fn test_data_client_request_bar_timestamp(#[case] on_close: bool, #[case] 
     set_data_event_sender(tx);
     let mut config = create_test_config(addr);
     config.bars_timestamp_on_close = on_close;
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
-    let bar_type = BarType::from("BTCUSDT-LINEAR.BYBIT-5-MINUTE-LAST-EXTERNAL");
+    let bar_type = BarType::from("BTCUSDT-PERP.BITGET-5-MINUTE-LAST-EXTERNAL");
     let request = RequestBars::new(
         bar_type,
         None,
         None,
         NonZeroUsize::new(1),
-        Some(*BYBIT_CLIENT_ID),
+        Some(*BITGET_CLIENT_ID),
         UUID4::new(),
         UnixNanos::default(),
         None,
@@ -1832,13 +1872,13 @@ async fn test_data_client_request_bar_timestamp(#[case] on_close: bool, #[case] 
     assert_eq!(response.data[0].ts_event, UnixNanos::from(expected));
     assert_eq!(
         response.data[0].ts_init,
-        UnixNanos::from(1_709_891_979_000_000_000)
+        UnixNanos::from(1_794_193_080_000_000_000)
     );
 }
 
 #[rstest]
 #[case::metadata_only(None)]
-#[case::with_identifier(Some("bybit-liquidations"))]
+#[case::with_identifier(Some("bitget-liquidations"))]
 #[tokio::test]
 async fn test_data_client_subscribe_liquidations_emits_subscribed_data_type(
     #[case] identifier: Option<&str>,
@@ -1846,16 +1886,16 @@ async fn test_data_client_subscribe_liquidations_emits_subscribed_data_type(
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
-    let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
-    let data_type = liquidation_data_type(Some("BTCUSDT-LINEAR.BYBIT"), identifier);
+    let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
+    let data_type = liquidation_data_type(Some("BTCUSDT-PERP.BITGET"), identifier);
 
     client
         .subscribe(subscribe_custom_data(data_type.clone()))
         .unwrap();
 
-    wait_for_server_topics(&state, &["allLiquidation.BTCUSDT"]).await;
+    wait_for_server_topics(&state, &["liquidation.BTCUSDT"]).await;
     let events = recv_custom_data(&mut rx, 2).await;
     let long = as_liquidation(&events[0]);
     let short = as_liquidation(&events[1]);
@@ -1884,13 +1924,13 @@ async fn test_data_client_unsubscribe_liquidations() {
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
-    let data_type = liquidation_data_type(Some("BTCUSDT-LINEAR.BYBIT"), None);
+    let data_type = liquidation_data_type(Some("BTCUSDT-PERP.BITGET"), None);
     client
         .subscribe(subscribe_custom_data(data_type.clone()))
         .unwrap();
-    wait_for_server_topics(&state, &["allLiquidation.BTCUSDT"]).await;
+    wait_for_server_topics(&state, &["liquidation.BTCUSDT"]).await;
 
     client
         .unsubscribe(&unsubscribe_custom_data(data_type))
@@ -1909,26 +1949,23 @@ async fn test_data_client_subscribe_liquidations_routes_inverse_to_inverse_clien
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut frame = load_test_data("ws_all_liquidation.json");
-    frame["topic"] = "allLiquidation.BTCUSD".into();
-    frame["data"][0]["s"] = "BTCUSD".into();
-    frame["data"][0]["v"] = "1500".into();
-    frame["data"][1]["s"] = "BTCUSD".into();
-    frame["data"][1]["v"] = "25000".into();
+    let mut frame = liquidation_frame("BTCUSD_CM");
+    frame["data"][0]["amount"] = "1500".into();
+    frame["data"][1]["amount"] = "25000".into();
     *state.liquidation_frame.lock().await = Some(frame);
     let mut config = create_test_config(addr);
-    config.product_types = vec![BybitProductType::Linear, BybitProductType::Inverse];
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
+    config.product_types = vec![BitgetProductType::Linear, BitgetProductType::Inverse];
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, config).unwrap();
     client.connect().await.unwrap();
-    let instrument_id = InstrumentId::from("BTCUSD-INVERSE.BYBIT");
-    let data_type = liquidation_data_type(Some("BTCUSD-INVERSE.BYBIT"), None);
+    let instrument_id = InstrumentId::from("BTCUSD_CM-INVERSE.BITGET");
+    let data_type = liquidation_data_type(Some("BTCUSD_CM-INVERSE.BITGET"), None);
 
     client
         .subscribe(subscribe_custom_data(data_type.clone()))
         .unwrap();
 
-    // Only the inverse stream resolves BTCUSD to the inverse instrument
-    wait_for_server_topics(&state, &["allLiquidation.BTCUSD"]).await;
+    // Only the inverse stream resolves BTCUSD_CM to the inverse instrument
+    wait_for_server_topics(&state, &["liquidation.BTCUSD_CM"]).await;
     let events = recv_custom_data(&mut rx, 2).await;
     let long = as_liquidation(&events[0]);
     let short = as_liquidation(&events[1]);
@@ -1951,31 +1988,31 @@ async fn test_data_client_subscribe_liquidations_routes_inverse_to_inverse_clien
 
 #[rstest]
 #[case::spot(
-    Some("BTCUSDT-SPOT.BYBIT"),
+    Some("BTCUSDT-SPOT.BITGET"),
     "Liquidations not available for Spot instruments"
 )]
 #[case::option(
-    Some("BTC-26DEC25-100000-C-OPTION.BYBIT"),
+    Some("BTC-26DEC25-100000-C-OPTION.BITGET"),
     "Liquidations not available for Option instruments"
 )]
-#[case::missing_instrument_id(None, "BybitLiquidation requires `instrument_id` metadata")]
+#[case::missing_instrument_id(None, "BitgetLiquidation requires `instrument_id` metadata")]
 #[case::invalid_instrument_id(
-    Some("BTCUSDT-LINEAR"),
+    Some("BTCUSDT-PERP"),
     concat!(
-        "Invalid instrument_id metadata `BTCUSDT-LINEAR`: invalid `InstrumentId` value ",
-        "'BTCUSDT-LINEAR': missing '.' separator between symbol and venue components",
+        "Invalid instrument_id metadata `BTCUSDT-PERP`: invalid `InstrumentId` value ",
+        "'BTCUSDT-PERP': missing '.' separator between symbol and venue components",
     )
 )]
 #[case::other_venue(
     Some("BTCUSDT-PERP.BINANCE"),
-    "BybitLiquidation requires a BYBIT instrument, received BTCUSDT-PERP.BINANCE"
+    "BitgetLiquidation requires a BITGET instrument, received BTCUSDT-PERP.BINANCE"
 )]
 #[case::unknown_product(
-    Some("BTCUSDT.BYBIT"),
-    "Liquidations require a -LINEAR or -INVERSE instrument, received BTCUSDT.BYBIT"
+    Some("BTCUSDT.BITGET"),
+    "Liquidations require a -PERP or -INVERSE instrument, received BTCUSDT.BITGET"
 )]
 #[case::inverse_without_client(
-    Some("BTCUSD-INVERSE.BYBIT"),
+    Some("BTCUSD_CM-INVERSE.BITGET"),
     "no WebSocket client for product type"
 )]
 #[tokio::test]
@@ -1986,7 +2023,7 @@ async fn test_data_client_subscribe_liquidations_rejects(
     let (addr, _state) = start_test_server().await.unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
     let data_type = liquidation_data_type(instrument_id, None);
 
@@ -2005,9 +2042,9 @@ async fn test_data_client_unsupported_custom_data_type_is_ignored() {
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
-    let unsupported = DataType::new("BybitOpenInterest", None, None);
+    let unsupported = DataType::new("BitgetOpenInterest", None, None);
 
     client
         .subscribe(subscribe_custom_data(unsupported.clone()))
@@ -2017,15 +2054,15 @@ async fn test_data_client_unsupported_custom_data_type_is_ignored() {
         .unwrap();
     client
         .subscribe(subscribe_custom_data(liquidation_data_type(
-            Some("BTCUSDT-LINEAR.BYBIT"),
+            Some("BTCUSDT-PERP.BITGET"),
             None,
         )))
         .unwrap();
 
-    wait_for_server_topics(&state, &["allLiquidation.BTCUSDT"]).await;
+    wait_for_server_topics(&state, &["liquidation.BTCUSDT"]).await;
     assert_eq!(
         *state.subscription_events.lock().await,
-        vec![("allLiquidation.BTCUSDT".to_string(), true)],
+        vec![("liquidation.BTCUSDT".to_string(), true)],
     );
 
     client.disconnect().await.unwrap();
@@ -2037,14 +2074,14 @@ async fn test_data_client_duplicate_liquidation_subscription() {
     let (addr, state) = start_test_server().await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DataEvent>();
     set_data_event_sender(tx);
-    let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, create_test_config(addr)).unwrap();
+    let mut client = BitgetDataClient::new(*BITGET_CLIENT_ID, create_test_config(addr)).unwrap();
     client.connect().await.unwrap();
-    let data_type = liquidation_data_type(Some("BTCUSDT-LINEAR.BYBIT"), None);
-    let other_data_type = liquidation_data_type(Some("BTCUSDT-LINEAR.BYBIT"), Some("other"));
+    let data_type = liquidation_data_type(Some("BTCUSDT-PERP.BITGET"), None);
+    let other_data_type = liquidation_data_type(Some("BTCUSDT-PERP.BITGET"), Some("other"));
     client
         .subscribe(subscribe_custom_data(data_type.clone()))
         .unwrap();
-    wait_for_server_topics(&state, &["allLiquidation.BTCUSDT"]).await;
+    wait_for_server_topics(&state, &["liquidation.BTCUSDT"]).await;
     recv_custom_data(&mut rx, 2).await;
 
     // Repeating the request must not acquire another transport reference
@@ -2059,20 +2096,20 @@ async fn test_data_client_duplicate_liquidation_subscription() {
         .unwrap();
     wait_for_server_topics(&state, &[]).await;
 
-    let mut frame = load_test_data("ws_all_liquidation.json");
-    frame["data"][0]["T"] = 1_739_502_310_000_u64.into();
-    frame["data"][1]["T"] = 1_739_502_310_500_u64.into();
+    let mut frame = liquidation_frame("BTCUSDT");
+    frame["data"][0]["ts"] = "1739502310000".into();
+    frame["data"][1]["ts"] = "1739502310500".into();
     *state.liquidation_frame.lock().await = Some(frame);
     client
         .subscribe(subscribe_custom_data(data_type.clone()))
         .unwrap();
-    wait_for_server_topics(&state, &["allLiquidation.BTCUSDT"]).await;
+    wait_for_server_topics(&state, &["liquidation.BTCUSDT"]).await;
     let events = recv_custom_data(&mut rx, 2).await;
 
     assert_eq!(
         error.to_string(),
         format!(
-            "Already subscribed to liquidations for BTCUSDT-LINEAR.BYBIT as {}",
+            "Already subscribed to liquidations for BTCUSDT-PERP.BITGET as {}",
             data_type.topic()
         ),
     );

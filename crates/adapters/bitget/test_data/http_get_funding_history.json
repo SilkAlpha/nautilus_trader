@@ -1,20 +1,24 @@
 {
-  "retCode": 0,
-  "retMsg": "OK",
-  "result": {
-    "category": "linear",
-    "list": [
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794192836488,
+  "data": {
+    "resultList": [
       {
         "symbol": "BTCUSDT",
-        "fundingRate": "0.0001",
-        "fundingRateTimestamp": "1709884800000"
+        "fundingRate": "0.000041",
+        "fundingRateTimestamp": "1794182400000"
       },
       {
         "symbol": "BTCUSDT",
-        "fundingRate": "0.00015",
-        "fundingRateTimestamp": "1709856000000"
+        "fundingRate": "0.000025",
+        "fundingRateTimestamp": "1794153600000"
+      },
+      {
+        "symbol": "BTCUSDT",
+        "fundingRate": "0.00007",
+        "fundingRateTimestamp": "1794124800000"
       }
     ]
-  },
-  "time": 1709891679050
+  }
 }

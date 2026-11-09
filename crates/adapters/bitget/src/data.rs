@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Live market data client implementation for the Bybit adapter.
+//! Live market data client implementation for the Bitget adapter.
 
 use std::{
     future::Future,
@@ -59,7 +59,7 @@ use nautilus_live::{
 };
 use nautilus_model::{
     data::{BarType, CustomData, Data, DataType, QuoteTick},
-    enums::{BookType, MarketStatusAction},
+    enums::{BookAction, BookType, MarketStatusAction, OrderSide},
     identifiers::{ClientId, InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
     orderbook::book::OrderBook,
@@ -77,19 +77,19 @@ use crate::{
     },
     common::{
         consts::{
-            BYBIT_BOOK_DEPTHS, BYBIT_DEFAULT_ORDERBOOK_DEPTH, BYBIT_QUOTE_DEPTH, BYBIT_VENUE,
+            BITGET_BOOK_DEPTHS, BITGET_DEFAULT_ORDERBOOK_DEPTH, BITGET_QUOTE_DEPTH, BITGET_VENUE,
         },
-        enums::BybitProductType,
+        enums::{BitgetEnvironment, BitgetProductType},
         instruments::diff_and_emit_instruments,
-        parse::{extract_raw_symbol, make_bybit_symbol},
+        parse::{extract_raw_symbol, make_bitget_symbol},
         status::{diff_and_emit_statuses, emit_status},
     },
-    config::BybitDataClientConfig,
-    data_types::register_bybit_custom_data,
-    http::client::BybitHttpClient,
+    config::BitgetDataClientConfig,
+    data_types::register_bitget_custom_data,
+    http::client::BitgetHttpClient,
     websocket::{
-        client::BybitWebSocketClient,
-        messages::{BybitWsMessage, BybitWsOrderbookDepthMsg},
+        client::BitgetWebSocketClient,
+        messages::{BitgetWsKline, BitgetWsMessage, BitgetWsOrderbookDepthMsg},
         parse::{
             parse_kline_topic, parse_millis_i64, parse_orderbook_deltas, parse_orderbook_quote,
             parse_orderbook_topic, parse_ticker_linear_funding, parse_ticker_linear_index_price,
@@ -101,13 +101,13 @@ use crate::{
     },
 };
 
-/// Live market data client for Bybit.
+/// Live market data client for Bitget.
 #[derive(Debug)]
-pub struct BybitDataClient {
+pub struct BitgetDataClient {
     client_id: ClientId,
-    config: BybitDataClientConfig,
-    http_client: BybitHttpClient,
-    ws_clients: Vec<BybitWebSocketClient>,
+    config: BitgetDataClientConfig,
+    http_client: BitgetHttpClient,
+    ws_clients: Vec<BitgetWebSocketClient>,
     session_established: AtomicBool,
     cancellation_token: CancellationToken,
     session_tasks: TaskGroup,
@@ -130,27 +130,30 @@ pub struct BybitDataClient {
     clock: &'static AtomicTime,
 }
 
-impl BybitDataClient {
-    /// Creates a new [`BybitDataClient`] instance.
+impl BitgetDataClient {
+    /// Creates a new [`BitgetDataClient`] instance.
     ///
     /// # Errors
     ///
     /// Returns an error if the client fails to initialize.
-    pub fn new(client_id: ClientId, config: BybitDataClientConfig) -> anyhow::Result<Self> {
+    pub fn new(client_id: ClientId, config: BitgetDataClientConfig) -> anyhow::Result<Self> {
         let clock = get_atomic_clock_realtime();
         let data_sender = get_data_event_sender();
-        let socket_factory = SocketControlFactory::new(client_id, Some(*BYBIT_VENUE));
+        let socket_factory = SocketControlFactory::new(client_id, Some(*BITGET_VENUE));
         let proxy_url = config
             .proxy_url
             .as_ref()
             .map(|value| value.expose_secret().to_owned());
 
-        let http_client = if let (Some(api_key), Some(api_secret)) =
-            (config.api_key.clone(), config.api_secret.clone())
-        {
-            BybitHttpClient::with_credentials(
+        let http_client = if let (Some(api_key), Some(api_secret), Some(api_passphrase)) = (
+            config.api_key.clone(),
+            config.api_secret.clone(),
+            config.api_passphrase.clone(),
+        ) {
+            BitgetHttpClient::with_credentials(
                 api_key.into_inner(),
                 api_secret.into_inner(),
+                api_passphrase.into_inner(),
                 Some(config.http_base_url()),
                 config.http_timeout_secs,
                 config.max_retries,
@@ -160,7 +163,7 @@ impl BybitDataClient {
                 proxy_url.clone(),
             )?
         } else {
-            BybitHttpClient::new(
+            BitgetHttpClient::new(
                 Some(config.http_base_url()),
                 config.http_timeout_secs,
                 config.max_retries,
@@ -171,17 +174,20 @@ impl BybitDataClient {
             )?
         };
 
+        // Bitget demo trading shares the mainnet REST host and is selected by header
+        http_client.set_demo_trading(config.environment != BitgetEnvironment::Mainnet);
+
         // Create a WebSocket client for each product type (default to Linear if empty)
         let product_types = if config.product_types.is_empty() {
-            vec![BybitProductType::Linear]
+            vec![BitgetProductType::Linear]
         } else {
             config.product_types.clone()
         };
 
-        let ws_clients: Vec<BybitWebSocketClient> = product_types
+        let ws_clients: Vec<BitgetWebSocketClient> = product_types
             .iter()
             .map(|product_type| {
-                BybitWebSocketClient::new_public_with(
+                BitgetWebSocketClient::new_public_with(
                     *product_type,
                     config.environment,
                     Some(config.ws_public_url_for(*product_type)),
@@ -190,7 +196,8 @@ impl BybitDataClient {
                     proxy_url.clone(),
                 )
                 .with_socket_control(
-                    socket_factory.control(format!("bybit-{}-data-streams", product_type.as_str())),
+                    socket_factory
+                        .control(format!("bitget-{}-data-streams", product_type.as_str())),
                 )
             })
             .collect();
@@ -227,13 +234,13 @@ impl BybitDataClient {
     }
 
     fn venue(&self) -> Venue {
-        *BYBIT_VENUE
+        *BITGET_VENUE
     }
 
     fn get_ws_client_for_product(
         &self,
-        product_type: BybitProductType,
-    ) -> Option<&BybitWebSocketClient> {
+        product_type: BitgetProductType,
+    ) -> Option<&BitgetWebSocketClient> {
         self.ws_clients
             .iter()
             .find(|ws| ws.product_type() == Some(product_type))
@@ -242,11 +249,11 @@ impl BybitDataClient {
     fn get_product_type_for_instrument(
         &self,
         instrument_id: InstrumentId,
-    ) -> Option<BybitProductType> {
+    ) -> Option<BitgetProductType> {
         let guard = self.instruments.load();
         guard
             .get(&instrument_id)
-            .and_then(|_| BybitProductType::from_suffix(instrument_id.symbol.as_str()))
+            .and_then(|_| BitgetProductType::from_suffix(instrument_id.symbol.as_str()))
     }
 
     fn spawn_command<F>(&self, future: F)
@@ -254,7 +261,7 @@ impl BybitDataClient {
         F: Future<Output = ()> + Send + 'static,
     {
         if let Err(e) = self.command_tasks.spawn(future) {
-            log::warn!("Skipping Bybit data command after shutdown began: {e}");
+            log::warn!("Skipping Bitget data command after shutdown began: {e}");
         }
     }
 
@@ -267,11 +274,11 @@ impl BybitDataClient {
         );
         let mut errors = Vec::new();
         if let Err(e) = session_result {
-            errors.push(format!("failed to finish Bybit data session tasks: {e}"));
+            errors.push(format!("failed to finish Bitget data session tasks: {e}"));
         }
 
         if let Err(e) = command_result {
-            errors.push(format!("failed to finish Bybit data command tasks: {e}"));
+            errors.push(format!("failed to finish Bitget data command tasks: {e}"));
         }
 
         if errors.is_empty() {
@@ -286,10 +293,10 @@ impl BybitDataClient {
             self.teardown_partial_connect().await?;
             self.session_tasks
                 .start_generation()
-                .context("failed to start Bybit data session task generation")?;
+                .context("failed to start Bitget data session task generation")?;
             self.command_tasks
                 .start_generation()
-                .context("failed to start Bybit data command task generation")?;
+                .context("failed to start Bitget data command task generation")?;
             self.cancellation_token = self.session_tasks.cancellation_token();
         }
         Ok(())
@@ -306,13 +313,13 @@ impl BybitDataClient {
         };
 
         if let Err(e) = self.command_tasks.spawn(future) {
-            log::warn!("Skipping Bybit {context} after shutdown began: {e}");
+            log::warn!("Skipping Bitget {context} after shutdown began: {e}");
         }
     }
 
     fn spawn_instrument_polling(
         &self,
-        product_types: &[BybitProductType],
+        product_types: &[BitgetProductType],
         poll_secs: u64,
     ) -> anyhow::Result<()> {
         let http = self.http_client.clone();
@@ -364,7 +371,7 @@ impl BybitDataClient {
                                         }
                                     }
                                     Err(e) => {
-                                        log::warn!("Bybit instrument poll failed for {pt:?}: {e}");
+                                        log::warn!("Bitget instrument poll failed for {pt:?}: {e}");
                                     }
                                 }
                             }
@@ -382,7 +389,7 @@ impl BybitDataClient {
                                         }
                                     }
                                     Err(e) => {
-                                        log::warn!("Bybit instrument status poll failed for {pt:?}: {e}");
+                                        log::warn!("Bitget instrument status poll failed for {pt:?}: {e}");
                                     }
                                 }
                             }
@@ -399,7 +406,7 @@ impl BybitDataClient {
                         }
                     }
                     () = cancel.cancelled() => {
-                        log::debug!("Bybit instrument polling task cancelled");
+                        log::debug!("Bitget instrument polling task cancelled");
                         break;
                     }
                 }
@@ -408,7 +415,7 @@ impl BybitDataClient {
 
         self.session_tasks
             .spawn(future)
-            .context("failed to register Bybit instrument polling task")?;
+            .context("failed to register Bitget instrument polling task")?;
         log::debug!("Instrument polling started: interval={poll_secs}s");
         Ok(())
     }
@@ -435,7 +442,7 @@ impl BybitDataClient {
             Ok(())
         } else {
             let errors = std::mem::take(&mut self.shutdown_errors);
-            anyhow::bail!("Bybit data shutdown failed: {}", errors.join("; "))
+            anyhow::bail!("Bitget data shutdown failed: {}", errors.join("; "))
         }
     }
 }
@@ -446,9 +453,43 @@ fn send_data(sender: &EventSender<DataEvent>, data: Data) {
     }
 }
 
+// Bitget `books1` sends nothing on subscribe or while the book is unchanged, so the top of book
+// is seeded from REST `orderbook?limit=1` on subscribe and after every reconnect
+async fn seed_quote_from_rest(
+    http: &BitgetHttpClient,
+    sender: &EventSender<DataEvent>,
+    product_type: BitgetProductType,
+    instrument_id: InstrumentId,
+    ts_init: UnixNanos,
+) -> anyhow::Result<()> {
+    let deltas = http
+        .request_orderbook_snapshot(product_type, instrument_id, Some(1))
+        .await?;
+    let level = |side: OrderSide| {
+        deltas
+            .deltas
+            .iter()
+            .find(|d| d.action == BookAction::Add && d.order.side == Some(side))
+            .map(|d| d.order)
+            .with_context(|| format!("REST orderbook for {instrument_id} has no {side:?} level"))
+    };
+    let (bid, ask) = (level(OrderSide::Buy)?, level(OrderSide::Sell)?);
+    let quote = QuoteTick::new_checked(
+        instrument_id,
+        bid.price,
+        ask.price,
+        bid.size,
+        ask.size,
+        deltas.ts_event,
+        ts_init,
+    )?;
+    send_data(sender, Data::Quote(quote));
+    Ok(())
+}
+
 fn validate_orderbook_depth(depth: u32) -> anyhow::Result<()> {
-    if !BYBIT_BOOK_DEPTHS.contains(&depth) {
-        anyhow::bail!("invalid depth {depth}; valid values are {BYBIT_BOOK_DEPTHS:?}");
+    if !BITGET_BOOK_DEPTHS.contains(&depth) {
+        anyhow::bail!("invalid depth {depth}; valid values are {BITGET_BOOK_DEPTHS:?}");
     }
 
     Ok(())
@@ -457,25 +498,25 @@ fn validate_orderbook_depth(depth: u32) -> anyhow::Result<()> {
 fn liquidation_instrument_id(data_type: &DataType, venue: Venue) -> anyhow::Result<InstrumentId> {
     let instrument_id = data_type
         .instrument_id()?
-        .context("BybitLiquidation requires `instrument_id` metadata")?;
+        .context("BitgetLiquidation requires `instrument_id` metadata")?;
 
     if instrument_id.venue != venue {
-        anyhow::bail!("BybitLiquidation requires a {venue} instrument, received {instrument_id}");
+        anyhow::bail!("BitgetLiquidation requires a {venue} instrument, received {instrument_id}");
     }
 
     Ok(instrument_id)
 }
 
-fn liquidation_product_type(instrument_id: InstrumentId) -> anyhow::Result<BybitProductType> {
-    match BybitProductType::from_suffix(instrument_id.symbol.as_str()) {
-        Some(product_type @ (BybitProductType::Linear | BybitProductType::Inverse)) => {
+fn liquidation_product_type(instrument_id: InstrumentId) -> anyhow::Result<BitgetProductType> {
+    match BitgetProductType::from_suffix(instrument_id.symbol.as_str()) {
+        Some(product_type @ (BitgetProductType::Linear | BitgetProductType::Inverse)) => {
             Ok(product_type)
         }
         Some(product_type) => {
             anyhow::bail!("Liquidations not available for {product_type:?} instruments")
         }
         None => anyhow::bail!(
-            "Liquidations require a -LINEAR or -INVERSE instrument, received {instrument_id}"
+            "Liquidations require a -PERP or -INVERSE instrument, received {instrument_id}"
         ),
     }
 }
@@ -508,34 +549,35 @@ type FundingCacheEntry = (Option<String>, Option<String>, Option<String>);
 
 #[expect(clippy::too_many_arguments)]
 fn handle_ws_message(
-    message: &BybitWsMessage,
+    message: &BitgetWsMessage,
     data_sender: &EventSender<DataEvent>,
     instruments: &AHashMap<Ustr, InstrumentAny>,
-    product_type: Option<BybitProductType>,
+    product_type: Option<BitgetProductType>,
     trade_subs: &Arc<AtomicSet<InstrumentId>>,
     ticker_subs: &Arc<AtomicMap<InstrumentId, AHashSet<&'static str>>>,
     quote_subs: &Arc<AtomicSet<InstrumentId>>,
     book_depths: &Arc<AtomicMap<InstrumentId, u32>>,
     book_sync: &BookSyncTracker,
-    ws_client: &BybitWebSocketClient,
+    ws_client: &BitgetWebSocketClient,
     option_greeks_subs: &Arc<AtomicSet<InstrumentId>>,
     liquidation_subs: &Arc<AtomicMap<InstrumentId, Arc<DataType>>>,
     bar_types_cache: &Arc<AtomicMap<String, BarType>>,
     bars_timestamp_on_close: bool,
     last_quotes: &DashMap<InstrumentId, QuoteTick>,
     funding_cache: &mut AHashMap<Ustr, FundingCacheEntry>,
+    kline_cache: &mut AHashMap<Ustr, BitgetWsKline>,
     snapshot_timeout: Duration,
     tasks: &TaskSpawner,
     clock: &AtomicTime,
 ) {
     let ts_init = clock.get_time_ns();
     let resolve = |raw_symbol: &Ustr| -> Option<&InstrumentAny> {
-        let key = product_type.map_or(*raw_symbol, |pt| make_bybit_symbol(raw_symbol, pt));
+        let key = product_type.map_or(*raw_symbol, |pt| make_bitget_symbol(raw_symbol, pt));
         instruments.get(&key)
     };
 
     match message {
-        BybitWsMessage::Orderbook(msg) => {
+        BitgetWsMessage::Orderbook(msg) => {
             let Some(instrument) = resolve(&msg.data.s) else {
                 log::warn!("Unknown symbol in orderbook update: {}", msg.data.s);
                 return;
@@ -569,7 +611,7 @@ fn handle_ws_message(
                 );
             }
 
-            if depth == BYBIT_QUOTE_DEPTH && quote_subs.contains(&instrument_id) {
+            if depth == BITGET_QUOTE_DEPTH && quote_subs.contains(&instrument_id) {
                 match parse_orderbook_quote(msg, instrument, ts_init) {
                     Ok(quote) => {
                         send_data(data_sender, Data::Quote(quote));
@@ -578,7 +620,7 @@ fn handle_ws_message(
                 }
             }
         }
-        BybitWsMessage::Trade(msg) => {
+        BitgetWsMessage::Trade(msg) => {
             for trade in &msg.data {
                 let Some(instrument) = resolve(&trade.s) else {
                     continue;
@@ -594,7 +636,7 @@ fn handle_ws_message(
                 }
             }
         }
-        BybitWsMessage::Liquidation(msg) => {
+        BitgetWsMessage::Liquidation(msg) => {
             let subs = liquidation_subs.load();
 
             for liquidation in &msg.data {
@@ -617,7 +659,7 @@ fn handle_ws_message(
                 }
             }
         }
-        BybitWsMessage::Kline(msg) => {
+        BitgetWsMessage::Kline(msg) => {
             let Ok((_, raw_symbol)) = parse_kline_topic(msg.topic.as_str()) else {
                 log::warn!("Invalid kline topic: {}", msg.topic);
                 return;
@@ -633,13 +675,23 @@ fn handle_ws_message(
                 return;
             };
 
+            // Bitget pushes the forming candle, so a bar closes when a later candle starts
+            let is_snapshot = msg.msg_type == "snapshot";
+
             for kline in &msg.data {
-                if !kline.confirm {
+                let previous = match kline_cache.get(&msg.topic) {
+                    Some(prev) if prev.start > kline.start => continue,
+                    prev => prev.cloned(),
+                };
+                kline_cache.insert(msg.topic, kline.clone());
+
+                let Some(closed) = previous.filter(|prev| !is_snapshot && prev.start < kline.start)
+                else {
                     continue;
-                }
+                };
 
                 match parse_ws_kline_bar(
-                    kline,
+                    &closed,
                     instrument,
                     bar_type,
                     bars_timestamp_on_close,
@@ -650,7 +702,7 @@ fn handle_ws_message(
                 }
             }
         }
-        BybitWsMessage::TickerLinear(msg) => {
+        BitgetWsMessage::TickerLinear(msg) => {
             let Some(instrument) = resolve(&msg.data.symbol) else {
                 log::warn!("Unknown symbol in ticker update: {}", msg.data.symbol);
                 return;
@@ -689,8 +741,11 @@ fn handle_ws_message(
                     changed = true;
                 }
 
-                if let Some(interval) = &msg.data.funding_interval_hour {
-                    cache_entry.2 = Some(interval.clone());
+                // Bitget's ticker carries no interval; it comes from the instrument `fundInterval`
+                if let InstrumentAny::CryptoPerpetual(perp) = instrument
+                    && let Some(hours) = perp.info.as_ref().and_then(|i| i.get_str("fund_interval"))
+                {
+                    cache_entry.2 = Some(hours.to_string());
                 }
 
                 if changed && cache_entry.0.is_some() {
@@ -734,7 +789,7 @@ fn handle_ws_message(
                 }
             }
         }
-        BybitWsMessage::TickerOption(msg) => {
+        BitgetWsMessage::TickerOption(msg) => {
             let Some(instrument) = resolve(&msg.data.symbol) else {
                 log::warn!(
                     "Unknown symbol in option ticker update: {}",
@@ -784,9 +839,10 @@ fn handle_ws_message(
                 }
             }
         }
-        BybitWsMessage::Reconnected => {
+        BitgetWsMessage::Reconnected => {
             reset_option_quotes(last_quotes, product_type);
             funding_cache.clear();
+            kline_cache.clear();
             log::info!("WebSocket reconnected, cleared caches");
 
             if let Some(product_type) = product_type {
@@ -800,32 +856,33 @@ fn handle_ws_message(
                 );
             }
         }
-        BybitWsMessage::Error(e) => {
+        BitgetWsMessage::Error(e) => {
             log::warn!(
-                "Bybit WebSocket error: code={} message={}",
+                "Bitget WebSocket error: code={} message={}",
                 e.code,
                 e.message
             );
         }
-        BybitWsMessage::Auth(_)
-        | BybitWsMessage::OrderResponse(_)
-        | BybitWsMessage::AccountOrder(_)
-        | BybitWsMessage::AccountExecution(_)
-        | BybitWsMessage::AccountExecutionFast(_)
-        | BybitWsMessage::AccountWallet(_)
-        | BybitWsMessage::AccountPosition(_) => {}
+        BitgetWsMessage::Auth(_)
+        | BitgetWsMessage::OrderResponse(_)
+        | BitgetWsMessage::AccountOrder(_)
+        | BitgetWsMessage::AccountExecution(_)
+        | BitgetWsMessage::AccountExecutionFast(_)
+        | BitgetWsMessage::AccountWallet(_)
+        | BitgetWsMessage::AccountPosition(_)
+        | BitgetWsMessage::AccountStrategyOrder(_) => {}
     }
 }
 
 // Validates the update ID before parsing, so a delta without levels still advances the book
 #[expect(clippy::too_many_arguments)]
 fn handle_orderbook_deltas(
-    msg: &BybitWsOrderbookDepthMsg,
+    msg: &BitgetWsOrderbookDepthMsg,
     instrument: &InstrumentAny,
     data_sender: &EventSender<DataEvent>,
     book_depths: &AtomicMap<InstrumentId, u32>,
     book_sync: &BookSyncTracker,
-    ws_client: &BybitWebSocketClient,
+    ws_client: &BitgetWebSocketClient,
     snapshot_timeout: Duration,
     tasks: &TaskSpawner,
     ts_init: UnixNanos,
@@ -833,12 +890,15 @@ fn handle_orderbook_deltas(
     let instrument_id = instrument.id();
     let is_snapshot = msg.msg_type.eq_ignore_ascii_case("snapshot");
 
-    let outcome = match u64::try_from(msg.data.u) {
-        Ok(update_id) => book_sync.validate(instrument_id, is_snapshot, update_id, Instant::now()),
-        Err(e) => {
+    let outcome = match (u64::try_from(msg.data.seq), u64::try_from(msg.data.pseq)) {
+        (Ok(seq), Ok(pseq)) => {
+            book_sync.validate(instrument_id, is_snapshot, seq, pseq, Instant::now())
+        }
+        _ => {
             log::error!(
-                "Invalid orderbook update ID {} for {instrument_id}: {e}",
-                msg.data.u
+                "Invalid orderbook sequence seq={} pseq={} for {instrument_id}",
+                msg.data.seq,
+                msg.data.pseq
             );
             BookSequenceOutcome::Recover
         }
@@ -880,6 +940,44 @@ fn handle_orderbook_deltas(
     }
 }
 
+fn reseed_quotes(
+    http: &BitgetHttpClient,
+    sender: &EventSender<DataEvent>,
+    quote_subs: &AtomicSet<InstrumentId>,
+    product_type: Option<BitgetProductType>,
+    tasks: &TaskSpawner,
+    clock: &'static AtomicTime,
+) {
+    let Some(product_type) = product_type.filter(|pt| *pt != BitgetProductType::Option) else {
+        return;
+    };
+
+    for instrument_id in quote_subs.load().iter().copied() {
+        if BitgetProductType::from_suffix(instrument_id.symbol.as_str()) != Some(product_type) {
+            continue;
+        }
+        let http = http.clone();
+        let sender = sender.clone();
+        let result = tasks.spawn(async move {
+            if let Err(e) = seed_quote_from_rest(
+                &http,
+                &sender,
+                product_type,
+                instrument_id,
+                clock.get_time_ns(),
+            )
+            .await
+            {
+                log::warn!("Failed to reseed quote for {instrument_id}: {e}");
+            }
+        });
+
+        if let Err(e) = result {
+            log::debug!("Skipping quote reseed after shutdown began: {e}");
+        }
+    }
+}
+
 fn upsert_instrument(
     cache: &Arc<AtomicMap<InstrumentId, InstrumentAny>>,
     instrument: InstrumentAny,
@@ -889,15 +987,15 @@ fn upsert_instrument(
 
 fn reset_option_quotes(
     last_quotes: &DashMap<InstrumentId, QuoteTick>,
-    product_type: Option<BybitProductType>,
+    product_type: Option<BitgetProductType>,
 ) {
-    if product_type == Some(BybitProductType::Option) {
+    if product_type == Some(BitgetProductType::Option) {
         last_quotes.clear();
     }
 }
 
 #[async_trait::async_trait(?Send)]
-impl DataClient for BybitDataClient {
+impl DataClient for BitgetDataClient {
     fn client_id(&self) -> ClientId {
         self.client_id
     }
@@ -964,7 +1062,7 @@ impl DataClient for BybitDataClient {
             return Ok(());
         }
 
-        register_bybit_custom_data();
+        register_bitget_custom_data();
 
         self.prepare_task_groups().await?;
         self.last_quotes.clear();
@@ -977,7 +1075,7 @@ impl DataClient for BybitDataClient {
             });
 
         let product_types = if self.config.product_types.is_empty() {
-            vec![BybitProductType::Linear]
+            vec![BitgetProductType::Linear]
         } else {
             self.config.product_types.clone()
         };
@@ -990,7 +1088,7 @@ impl DataClient for BybitDataClient {
                 .request_instruments(*product_type, None, None)
                 .await
                 .with_context(|| {
-                    format!("failed to request Bybit instruments for {product_type:?}")
+                    format!("failed to request Bitget instruments for {product_type:?}")
                 })?;
 
             self.http_client.cache_instruments(&fetched);
@@ -1066,7 +1164,7 @@ impl DataClient for BybitDataClient {
                 ws_client
                     .connect()
                     .await
-                    .context("failed to connect Bybit WebSocket")?;
+                    .context("failed to connect Bitget WebSocket")?;
                 ws_client
                     .wait_until_active(10.0)
                     .await
@@ -1085,7 +1183,7 @@ impl DataClient for BybitDataClient {
                 let tasks = self
                     .command_tasks
                     .spawner()
-                    .context("Bybit data command task admission is closed")?;
+                    .context("Bitget data command task admission is closed")?;
                 let option_greeks_subs = self.option_greeks_subs.clone();
                 let liquidation_subs = self.liquidation_subs.clone();
                 let bar_types_cache = ws_client.bar_types_cache().clone();
@@ -1094,15 +1192,20 @@ impl DataClient for BybitDataClient {
                 let clock = self.clock;
                 let cancel = self.cancellation_token.clone();
                 let ws_client = ws_client.clone();
+                let http = self.http_client.clone();
 
                 let future = async move {
                     let mut funding_cache: AHashMap<Ustr, FundingCacheEntry> = AHashMap::new();
+                    let mut kline_cache: AHashMap<Ustr, BitgetWsKline> = AHashMap::new();
 
                     pin_mut!(stream);
 
                     loop {
                         tokio::select! {
                             Some(message) = stream.next() => {
+                                if matches!(message, BitgetWsMessage::Reconnected) {
+                                    reseed_quotes(&http, &sender, &quote_subs, product_type, &tasks, clock);
+                                }
                                 handle_ws_message(
                                     &message,
                                     &sender,
@@ -1120,6 +1223,7 @@ impl DataClient for BybitDataClient {
                                     bars_timestamp_on_close,
                                     &last_quotes,
                                     &mut funding_cache,
+                                    &mut kline_cache,
                                     snapshot_timeout,
                                     &tasks,
                                     clock,
@@ -1134,7 +1238,7 @@ impl DataClient for BybitDataClient {
                 };
                 self.session_tasks
                     .spawn(future)
-                    .context("failed to register Bybit WebSocket stream task")?;
+                    .context("failed to register Bitget WebSocket stream task")?;
             }
 
             if let Some(poll_secs) = self.config.instrument_poll_interval_secs
@@ -1150,7 +1254,7 @@ impl DataClient for BybitDataClient {
         if let Err(e) = session_result {
             if let Err(teardown_error) = self.teardown_partial_connect().await {
                 return Err(e.context(format!(
-                    "Bybit data startup teardown failed: {teardown_error}"
+                    "Bitget data startup teardown failed: {teardown_error}"
                 )));
             }
             return Err(e);
@@ -1202,13 +1306,13 @@ impl DataClient for BybitDataClient {
             Ok(())
         } else {
             let errors = std::mem::take(&mut self.shutdown_errors);
-            anyhow::bail!("Bybit data shutdown failed: {}", errors.join("; "))
+            anyhow::bail!("Bitget data shutdown failed: {}", errors.join("; "))
         }
     }
 
     fn is_connected(&self) -> bool {
         self.session_established.load(Ordering::Relaxed)
-            && self.ws_clients.iter().all(BybitWebSocketClient::is_active)
+            && self.ws_clients.iter().all(BitgetWebSocketClient::is_active)
     }
 
     fn is_disconnected(&self) -> bool {
@@ -1217,7 +1321,7 @@ impl DataClient for BybitDataClient {
 
     fn subscribe(&mut self, cmd: SubscribeCustomData) -> anyhow::Result<()> {
         let data_type = cmd.data_type.type_name();
-        if data_type != "BybitLiquidation" {
+        if data_type != "BitgetLiquidation" {
             log::warn!("Unsupported custom data subscription: {data_type}");
             return Ok(());
         }
@@ -1268,19 +1372,19 @@ impl DataClient for BybitDataClient {
 
     fn subscribe_book_deltas(&mut self, cmd: SubscribeBookDeltas) -> anyhow::Result<()> {
         if cmd.book_type != BookType::L2_MBP {
-            anyhow::bail!("Bybit only supports L2_MBP order book deltas");
+            anyhow::bail!("Bitget only supports L2_MBP order book deltas");
         }
 
         let depth = cmd
             .depth
-            .map_or(BYBIT_DEFAULT_ORDERBOOK_DEPTH, |d| d.get() as u32);
+            .map_or(BITGET_DEFAULT_ORDERBOOK_DEPTH, |d| d.get() as u32);
 
         validate_orderbook_depth(depth)?;
 
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let ws_client = self
             .get_ws_client_for_product(product_type)
@@ -1298,7 +1402,7 @@ impl DataClient for BybitDataClient {
         let tasks = match self.command_tasks.spawner() {
             Ok(tasks) => tasks,
             Err(e) => {
-                log::warn!("Skipping Bybit data command after shutdown began: {e}");
+                log::warn!("Skipping Bitget data command after shutdown began: {e}");
                 return Ok(());
             }
         };
@@ -1320,14 +1424,14 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let ws = self
             .get_ws_client_for_product(product_type)
             .context("no WebSocket client for product type")?
             .clone();
 
-        if product_type == BybitProductType::Option {
+        if product_type == BitgetProductType::Option {
             self.last_quotes.remove(&instrument_id);
             let mut should_subscribe = false;
             self.ticker_subs.rcu(|m| {
@@ -1353,11 +1457,14 @@ impl DataClient for BybitDataClient {
 
             self.quote_subs.insert(instrument_id);
             let quote_subs = Arc::clone(&self.quote_subs);
+            let http = self.http_client.clone();
+            let sender = self.data_sender.clone();
+            let clock = self.clock;
 
             self.spawn_ws(
                 async move {
                     if let Err(e) = ws
-                        .subscribe_orderbook(instrument_id, BYBIT_QUOTE_DEPTH)
+                        .subscribe_orderbook(instrument_id, BITGET_QUOTE_DEPTH)
                         .await
                     {
                         // A stale entry, or a leftover reference that a retry would ride, lets a
@@ -1368,7 +1475,7 @@ impl DataClient for BybitDataClient {
 
                         if removed
                             && let Err(e) = ws
-                                .unsubscribe_orderbook(instrument_id, BYBIT_QUOTE_DEPTH)
+                                .unsubscribe_orderbook(instrument_id, BITGET_QUOTE_DEPTH)
                                 .await
                         {
                             log::warn!("Failed to unsubscribe after quote subscription error: {e}");
@@ -1377,7 +1484,15 @@ impl DataClient for BybitDataClient {
                         return Err(e).context("orderbook subscription for quotes");
                     }
 
-                    Ok(())
+                    seed_quote_from_rest(
+                        &http,
+                        &sender,
+                        product_type,
+                        instrument_id,
+                        clock.get_time_ns(),
+                    )
+                    .await
+                    .context("quote seed from REST orderbook")
                 },
                 "quote subscription (orderbook)",
             );
@@ -1389,7 +1504,7 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         self.trade_subs.insert(instrument_id);
 
@@ -1413,9 +1528,9 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
-        if product_type == BybitProductType::Spot || product_type == BybitProductType::Option {
+        if product_type == BitgetProductType::Spot || product_type == BitgetProductType::Option {
             anyhow::bail!("Funding rates not available for {product_type:?} instruments");
         }
 
@@ -1455,9 +1570,9 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
-        if product_type == BybitProductType::Spot {
+        if product_type == BitgetProductType::Spot {
             anyhow::bail!("Mark prices not available for Spot instruments");
         }
 
@@ -1490,9 +1605,9 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
-        if product_type == BybitProductType::Spot {
+        if product_type == BitgetProductType::Spot {
             anyhow::bail!("Index prices not available for Spot instruments");
         }
 
@@ -1526,10 +1641,10 @@ impl DataClient for BybitDataClient {
         let instrument_id = bar_type.instrument_id();
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
-        if product_type == BybitProductType::Option {
-            anyhow::bail!("Bybit does not support kline/bar data for options");
+        if product_type == BitgetProductType::Option {
+            anyhow::bail!("Bitget does not support kline/bar data for options");
         }
 
         let ws = self
@@ -1550,7 +1665,7 @@ impl DataClient for BybitDataClient {
 
     fn unsubscribe(&mut self, cmd: &UnsubscribeCustomData) -> anyhow::Result<()> {
         let data_type = cmd.data_type.type_name();
-        if data_type != "BybitLiquidation" {
+        if data_type != "BitgetLiquidation" {
             log::warn!("Unsupported custom data unsubscription: {data_type}");
             return Ok(());
         }
@@ -1600,7 +1715,7 @@ impl DataClient for BybitDataClient {
 
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let ws = self
             .get_ws_client_for_product(product_type)
@@ -1622,14 +1737,14 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let ws = self
             .get_ws_client_for_product(product_type)
             .context("no WebSocket client for product type")?
             .clone();
 
-        if product_type == BybitProductType::Option {
+        if product_type == BitgetProductType::Option {
             self.last_quotes.remove(&instrument_id);
             let mut should_unsubscribe = false;
             self.ticker_subs.rcu(|m| {
@@ -1665,7 +1780,7 @@ impl DataClient for BybitDataClient {
 
             self.spawn_ws(
                 async move {
-                    ws.unsubscribe_orderbook(instrument_id, BYBIT_QUOTE_DEPTH)
+                    ws.unsubscribe_orderbook(instrument_id, BITGET_QUOTE_DEPTH)
                         .await
                         .context("orderbook unsubscribe for quotes")
                 },
@@ -1679,7 +1794,7 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         self.trade_subs.remove(&instrument_id);
 
@@ -1703,7 +1818,7 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let mut should_unsubscribe = false;
         self.ticker_subs.rcu(|m| {
@@ -1742,7 +1857,7 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let mut should_unsubscribe = false;
         self.ticker_subs.rcu(|m| {
@@ -1781,7 +1896,7 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let mut should_unsubscribe = false;
         self.ticker_subs.rcu(|m| {
@@ -1821,7 +1936,7 @@ impl DataClient for BybitDataClient {
         let instrument_id = bar_type.instrument_id();
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
-            .unwrap_or(BybitProductType::Linear);
+            .unwrap_or(BitgetProductType::Linear);
 
         let ws = self
             .get_ws_client_for_product(product_type)
@@ -1853,7 +1968,7 @@ impl DataClient for BybitDataClient {
         if should_subscribe {
             let product_type = self
                 .get_product_type_for_instrument(instrument_id)
-                .unwrap_or(BybitProductType::Option);
+                .unwrap_or(BitgetProductType::Option);
 
             let ws = self
                 .get_ws_client_for_product(product_type)
@@ -1894,7 +2009,7 @@ impl DataClient for BybitDataClient {
         if should_unsubscribe {
             let product_type = self
                 .get_product_type_for_instrument(instrument_id)
-                .unwrap_or(BybitProductType::Option);
+                .unwrap_or(BitgetProductType::Option);
 
             let ws = self
                 .get_ws_client_for_product(product_type)
@@ -1989,7 +2104,7 @@ impl DataClient for BybitDataClient {
         let start_nanos = datetime_to_unix_nanos(start);
         let end_nanos = datetime_to_unix_nanos(end);
         let product_types = if self.config.product_types.is_empty() {
-            vec![BybitProductType::Linear]
+            vec![BitgetProductType::Linear]
         } else {
             self.config.product_types.clone()
         };
@@ -2044,8 +2159,8 @@ impl DataClient for BybitDataClient {
         let start_nanos = datetime_to_unix_nanos(start);
         let end_nanos = datetime_to_unix_nanos(end);
 
-        let product_type = BybitProductType::from_suffix(instrument_id.symbol.as_str())
-            .unwrap_or(BybitProductType::Linear);
+        let product_type = BitgetProductType::from_suffix(instrument_id.symbol.as_str())
+            .unwrap_or(BitgetProductType::Linear);
         let raw_symbol = extract_raw_symbol(instrument_id.symbol.as_str()).to_string();
 
         self.spawn_command(async move {
@@ -2094,14 +2209,14 @@ impl DataClient for BybitDataClient {
         let params = request.params;
         let clock = self.clock;
 
-        let product_type = BybitProductType::from_suffix(instrument_id.symbol.as_str())
-            .unwrap_or(BybitProductType::Linear);
+        let product_type = BitgetProductType::from_suffix(instrument_id.symbol.as_str())
+            .unwrap_or(BitgetProductType::Linear);
 
         self.spawn_command(async move {
             match http
                 .request_orderbook_snapshot(product_type, instrument_id, depth)
                 .await
-                .context("failed to request book snapshot from Bybit")
+                .context("failed to request book snapshot from Bitget")
             {
                 Ok(deltas) => {
                     let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
@@ -2146,14 +2261,14 @@ impl DataClient for BybitDataClient {
         let start_nanos = datetime_to_unix_nanos(start);
         let end_nanos = datetime_to_unix_nanos(end);
 
-        let product_type = BybitProductType::from_suffix(instrument_id.symbol.as_str())
-            .unwrap_or(BybitProductType::Linear);
+        let product_type = BitgetProductType::from_suffix(instrument_id.symbol.as_str())
+            .unwrap_or(BitgetProductType::Linear);
 
         self.spawn_command(async move {
             match http
                 .request_trades(product_type, instrument_id, limit)
                 .await
-                .context("failed to request trades from Bybit")
+                .context("failed to request trades from Bitget")
             {
                 Ok(trades) => {
                     let response = DataResponse::Trades(TradesResponse::new(
@@ -2194,8 +2309,8 @@ impl DataClient for BybitDataClient {
         let end_nanos = datetime_to_unix_nanos(end);
 
         let instrument_id = bar_type.instrument_id();
-        let product_type = BybitProductType::from_suffix(instrument_id.symbol.as_str())
-            .unwrap_or(BybitProductType::Linear);
+        let product_type = BitgetProductType::from_suffix(instrument_id.symbol.as_str())
+            .unwrap_or(BitgetProductType::Linear);
 
         self.spawn_command(async move {
             match http
@@ -2208,7 +2323,7 @@ impl DataClient for BybitDataClient {
                     bars_timestamp_on_close,
                 )
                 .await
-                .context("failed to request bars from Bybit")
+                .context("failed to request bars from Bitget")
             {
                 Ok(bars) => {
                     let response = DataResponse::Bars(BarsResponse::new(
@@ -2247,10 +2362,10 @@ impl DataClient for BybitDataClient {
         let start_nanos = datetime_to_unix_nanos(start);
         let end_nanos = datetime_to_unix_nanos(end);
 
-        let product_type = BybitProductType::from_suffix(instrument_id.symbol.as_str())
-            .unwrap_or(BybitProductType::Linear);
+        let product_type = BitgetProductType::from_suffix(instrument_id.symbol.as_str())
+            .unwrap_or(BitgetProductType::Linear);
 
-        if product_type == BybitProductType::Spot || product_type == BybitProductType::Option {
+        if product_type == BitgetProductType::Spot || product_type == BitgetProductType::Option {
             anyhow::bail!("Funding rates not available for {product_type} instruments");
         }
 
@@ -2258,7 +2373,7 @@ impl DataClient for BybitDataClient {
             match http
                 .request_funding_rates(product_type, instrument_id, start, end, limit)
                 .await
-                .context("failed to request funding rates from Bybit")
+                .context("failed to request funding rates from Bitget")
             {
                 Ok(funding_rates) => {
                     let response = DataResponse::FundingRates(FundingRatesResponse::new(
@@ -2298,8 +2413,8 @@ impl DataClient for BybitDataClient {
 
         self.spawn_command(async move {
             let raw_symbol = extract_raw_symbol(instrument_id.symbol.as_str()).to_string();
-            let query = crate::http::query::BybitTickersParams {
-                category: BybitProductType::Option,
+            let query = crate::http::query::BitgetTickersParams {
+                category: BitgetProductType::Option,
                 symbol: Some(raw_symbol),
                 base_coin: None,
                 exp_date: None,
@@ -2315,7 +2430,7 @@ impl DataClient for BybitDataClient {
                         Ok(price) => Some(price),
                         Err(e) => {
                             log::warn!(
-                                "Invalid Bybit option-chain reference price for {instrument_id}: {e}"
+                                "Invalid Bitget option-chain reference price for {instrument_id}: {e}"
                             );
                             None
                         }
@@ -2367,7 +2482,7 @@ pub(crate) mod tests {
             DataEvent,
             data::{
                 SubscribeBookDeltas, SubscribeCustomData, SubscribeQuotes, UnsubscribeBookDeltas,
-                UnsubscribeCustomData, UnsubscribeQuotes,
+                UnsubscribeCustomData,
             },
         },
         testing::wait_until_async,
@@ -2381,7 +2496,7 @@ pub(crate) mod tests {
         task::{TaskGroup, TaskSpawner},
     };
     use nautilus_model::{
-        data::{BarType, CustomData, Data, DataType, MarkPriceUpdate, QuoteTick},
+        data::{BarType, CustomData, Data, DataType, QuoteTick},
         enums::{AggressorSide, BookAction, BookType, PositionSide},
         identifiers::InstrumentId,
         instruments::{Instrument, InstrumentAny},
@@ -2391,33 +2506,31 @@ pub(crate) mod tests {
     use ustr::Ustr;
 
     use super::{
-        BybitDataClient, handle_orderbook_deltas, handle_ws_message, remove_owned_liquidation_sub,
+        BitgetDataClient, handle_orderbook_deltas, handle_ws_message, remove_owned_liquidation_sub,
         validate_orderbook_depth,
     };
     use crate::{
         book::{BookSequenceOutcome, sync::BookSyncTracker},
         common::{
-            consts::BYBIT_CLIENT_ID,
-            enums::BybitProductType,
-            parse::{parse_linear_instrument, parse_option_instrument},
-            rate_limit::BYBIT_OPTION_SUBSCRIPTION_LIMIT,
+            consts::BITGET_CLIENT_ID, enums::BitgetProductType, parse::parse_linear_instrument,
             testing::load_test_json,
         },
-        config::BybitDataClientConfig,
-        data_types::BybitLiquidation,
-        http::models::{BybitInstrumentLinearResponse, BybitInstrumentOptionResponse},
+        config::BitgetDataClientConfig,
+        data_types::BitgetLiquidation,
+        http::models::BitgetInstrumentLinearResponse,
         websocket::{
-            client::BybitWebSocketClient,
+            client::BitgetWebSocketClient,
             messages::{
-                BybitWsKlineMsg, BybitWsLiquidationMsg, BybitWsMessage, BybitWsOrderbookDepthMsg,
-                BybitWsTickerLinearMsg, BybitWsTickerOptionMsg, BybitWsTradeMsg,
+                BitgetWsFrame, BitgetWsKlineMsg, BitgetWsLiquidationMsg, BitgetWsMessage,
+                BitgetWsOrderbookDepthMsg,
             },
+            parse::parse_bitget_ws_frame,
         },
     };
 
     fn linear_instrument() -> InstrumentAny {
         let json = load_test_json("http_get_instruments_linear.json");
-        let response: BybitInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
         let ts = UnixNanos::new(1_700_000_000_000_000_000);
         parse_linear_instrument(instrument, ts, ts).unwrap()
@@ -2425,7 +2538,7 @@ pub(crate) mod tests {
 
     fn linear_instruments() -> Vec<InstrumentAny> {
         let json = load_test_json("http_get_instruments_linear.json");
-        let response: BybitInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
+        let response: BitgetInstrumentLinearResponse = serde_json::from_str(&json).unwrap();
         let ts = UnixNanos::new(1_700_000_000_000_000_000);
         response
             .result
@@ -2435,12 +2548,9 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn option_instrument() -> InstrumentAny {
-        let json = load_test_json("http_get_instruments_option.json");
-        let response: BybitInstrumentOptionResponse = serde_json::from_str(&json).unwrap();
-        let instrument = &response.result.list[0];
-        let ts = UnixNanos::new(1_700_000_000_000_000_000);
-        parse_option_instrument(instrument, ts, ts).unwrap()
+    // Bitget pushes carry the symbol in `arg`; the frame parser copies it into the payload
+    fn ws_frame(json: &str) -> BitgetWsFrame {
+        parse_bitget_ws_frame(serde_json::from_str(json).unwrap())
     }
 
     fn build_instruments(instruments: &[InstrumentAny]) -> AHashMap<Ustr, InstrumentAny> {
@@ -2470,9 +2580,9 @@ pub(crate) mod tests {
         )
     }
 
-    fn book_context() -> (BookSyncTracker, BybitWebSocketClient, TaskSpawner) {
+    fn book_context() -> (BookSyncTracker, BitgetWebSocketClient, TaskSpawner) {
         let tasks = TaskGroup::new().spawner().unwrap();
-        let ws_client = BybitWebSocketClient::new_public(None, 20);
+        let ws_client = BitgetWebSocketClient::new_public(None, 20);
         (BookSyncTracker::default(), ws_client, tasks)
     }
 
@@ -2484,7 +2594,7 @@ pub(crate) mod tests {
         );
 
         DataType::new(
-            "BybitLiquidation",
+            "BitgetLiquidation",
             Some(metadata),
             identifier.map(ToString::to_string),
         )
@@ -2492,7 +2602,7 @@ pub(crate) mod tests {
 
     fn subscribe_custom_data(data_type: DataType) -> SubscribeCustomData {
         SubscribeCustomData::new(
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             None,
             data_type,
             UUID4::new(),
@@ -2504,7 +2614,7 @@ pub(crate) mod tests {
 
     fn unsubscribe_custom_data(data_type: DataType) -> UnsubscribeCustomData {
         UnsubscribeCustomData::new(
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             None,
             data_type,
             UUID4::new(),
@@ -2515,7 +2625,7 @@ pub(crate) mod tests {
     }
 
     fn handle_liquidation_message(
-        msg: BybitWsLiquidationMsg,
+        msg: BitgetWsLiquidationMsg,
         instruments: &AHashMap<Ustr, InstrumentAny>,
         liquidation_subs: &Arc<AtomicMap<InstrumentId, Arc<DataType>>>,
         ts_init: UnixNanos,
@@ -2525,14 +2635,15 @@ pub(crate) mod tests {
         let (book_sync, ws_client, tasks) = book_context();
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = AtomicTime::new(false, ts_init);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         handle_ws_message(
-            &BybitWsMessage::Liquidation(msg),
+            &BitgetWsMessage::Liquidation(msg),
             &tx.into(),
             instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -2545,6 +2656,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             &clock,
@@ -2562,74 +2674,21 @@ pub(crate) mod tests {
         events
     }
 
-    fn as_liquidation(custom: &CustomData) -> &BybitLiquidation {
+    // The captured all-symbol frame carries other symbols; retarget both rows to BTCUSDT
+    fn liquidation_fixture() -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&load_test_json("ws_all_liquidation.json")).unwrap();
+        value["data"][0]["symbol"] = serde_json::json!("BTCUSDT");
+        value["data"][1]["symbol"] = serde_json::json!("BTCUSDT");
+        value
+    }
+
+    fn as_liquidation(custom: &CustomData) -> &BitgetLiquidation {
         custom
             .data
             .as_any()
-            .downcast_ref::<BybitLiquidation>()
-            .expect("expected BybitLiquidation")
-    }
-
-    #[tokio::test]
-    async fn test_failed_book_subscription_releases_registration() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        set_data_event_sender(tx);
-        let config = BybitDataClientConfig {
-            product_types: vec![BybitProductType::Option],
-            ..Default::default()
-        };
-        let mut client = BybitDataClient::new(*BYBIT_CLIENT_ID, config).unwrap();
-        let ws = client.ws_clients[0].clone();
-        let topics = (0..BYBIT_OPTION_SUBSCRIPTION_LIMIT)
-            .map(|index| format!("tickers.OPTION-{index}"))
-            .collect();
-
-        // The disconnected command channel rejects the send after registering these topics
-        ws.subscribe(topics).await.unwrap_err();
-        let instrument_id = InstrumentId::from("ETH-26JUN26-16000-P-OPTION.BYBIT");
-        let expected_error = format!(
-            "Client error: Option WebSocket subscription limit is {BYBIT_OPTION_SUBSCRIPTION_LIMIT} arguments per connection, requested {}",
-            BYBIT_OPTION_SUBSCRIPTION_LIMIT + 1,
-        );
-        assert_eq!(
-            ws.subscribe_orderbook(instrument_id, 50)
-                .await
-                .unwrap_err()
-                .to_string(),
-            expected_error,
-        );
-        client
-            .instruments
-            .insert(instrument_id, option_instrument());
-        let command = SubscribeBookDeltas::new(
-            instrument_id,
-            BookType::L2_MBP,
-            Some(*BYBIT_CLIENT_ID),
-            None,
-            UUID4::new(),
-            UnixNanos::default(),
-            None,
-            false,
-            None,
-            None,
-        );
-
-        for _ in 0..2 {
-            client.subscribe_book_deltas(command.clone()).unwrap();
-            wait_until_async(
-                || async { !client.book_depths.contains_key(&instrument_id) },
-                Duration::from_secs(2),
-            )
-            .await;
-            assert!(!client.book_depths.contains_key(&instrument_id));
-            assert_eq!(
-                ws.subscribe_orderbook(instrument_id, 50)
-                    .await
-                    .unwrap_err()
-                    .to_string(),
-                expected_error,
-            );
-        }
+            .downcast_ref::<BitgetLiquidation>()
+            .expect("expected BitgetLiquidation")
     }
 
     #[tokio::test]
@@ -2637,14 +2696,14 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         set_data_event_sender(tx);
         let mut client =
-            BybitDataClient::new(*BYBIT_CLIENT_ID, BybitDataClientConfig::default()).unwrap();
+            BitgetDataClient::new(*BITGET_CLIENT_ID, BitgetDataClientConfig::default()).unwrap();
         let ws = client.ws_clients[0].clone();
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         client
             .subscribe_book_deltas(SubscribeBookDeltas::new(
                 instrument_id,
                 BookType::L2_MBP,
-                Some(*BYBIT_CLIENT_ID),
+                Some(*BITGET_CLIENT_ID),
                 None,
                 UUID4::new(),
                 UnixNanos::default(),
@@ -2674,9 +2733,9 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         set_data_event_sender(tx);
         let mut client =
-            BybitDataClient::new(*BYBIT_CLIENT_ID, BybitDataClientConfig::default()).unwrap();
+            BitgetDataClient::new(*BITGET_CLIENT_ID, BitgetDataClientConfig::default()).unwrap();
         let ws = client.ws_clients[0].clone();
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let command = subscribe_custom_data(liquidation_data_type(instrument_id, None));
 
         // The disconnected command channel rejects each send, so a retry must subscribe again
@@ -2704,12 +2763,12 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         set_data_event_sender(tx);
         let mut client =
-            BybitDataClient::new(*BYBIT_CLIENT_ID, BybitDataClientConfig::default()).unwrap();
+            BitgetDataClient::new(*BITGET_CLIENT_ID, BitgetDataClientConfig::default()).unwrap();
         let ws = client.ws_clients[0].clone();
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let command = SubscribeQuotes::new(
             instrument_id,
-            Some(*BYBIT_CLIENT_ID),
+            Some(*BITGET_CLIENT_ID),
             None,
             UUID4::new(),
             UnixNanos::default(),
@@ -2741,8 +2800,8 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         set_data_event_sender(tx);
         let mut client =
-            BybitDataClient::new(*BYBIT_CLIENT_ID, BybitDataClientConfig::default()).unwrap();
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+            BitgetDataClient::new(*BITGET_CLIENT_ID, BitgetDataClientConfig::default()).unwrap();
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let data_type = liquidation_data_type(instrument_id, None);
         let other_data_type = liquidation_data_type(instrument_id, Some("other"));
         let subscription = Arc::new(data_type.clone());
@@ -2763,7 +2822,7 @@ pub(crate) mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "Already subscribed to liquidations for BTCUSDT-LINEAR.BYBIT as {}",
+                "Already subscribed to liquidations for BTCUSDT-PERP.BITGET as {}",
                 data_type.topic()
             ),
         );
@@ -2777,7 +2836,7 @@ pub(crate) mod tests {
 
     #[rstest]
     fn test_remove_owned_liquidation_sub_removes_own_entry() {
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let owned = Arc::new(liquidation_data_type(instrument_id, None));
         let subs = AtomicMap::new();
         subs.insert(instrument_id, Arc::clone(&owned));
@@ -2790,7 +2849,7 @@ pub(crate) mod tests {
 
     #[rstest]
     fn test_remove_owned_liquidation_sub_skips_entry_removed_by_unsubscribe() {
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let owned = Arc::new(liquidation_data_type(instrument_id, None));
         let subs = AtomicMap::new();
 
@@ -2806,7 +2865,7 @@ pub(crate) mod tests {
     fn test_remove_owned_liquidation_sub_keeps_later_subscription(
         #[case] identifier: Option<&str>,
     ) {
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         let owned = Arc::new(liquidation_data_type(instrument_id, None));
         let later = Arc::new(liquidation_data_type(instrument_id, identifier));
         let subs = AtomicMap::new();
@@ -2833,18 +2892,18 @@ pub(crate) mod tests {
 
         assert_eq!(
             e.to_string(),
-            "invalid depth 500; valid values are [1, 50, 200, 1000]"
+            "invalid depth 500; valid values are [1, 5, 50, 1000]"
         );
     }
 
     #[rstest]
-    #[case::open(false, true, Some(1_672_324_800_000_000_000))]
-    #[case::close(true, true, Some(1_672_325_100_000_000_000))]
-    #[case::unconfirmed_open(false, false, None)]
-    #[case::unconfirmed_close(true, false, None)]
+    #[case::open(false, true, Some(1_794_192_840_000_000_000))]
+    #[case::close(true, true, Some(1_794_192_900_000_000_000))]
+    #[case::forming_open(false, false, None)]
+    #[case::forming_close(true, false, None)]
     fn test_handle_kline_bar_timestamp(
         #[case] on_close: bool,
-        #[case] confirmed: bool,
+        #[case] next_candle: bool,
         #[case] expected: Option<u64>,
     ) {
         let instrument = linear_instrument();
@@ -2852,36 +2911,46 @@ pub(crate) mod tests {
         let (trade_subs, ticker_subs, quote_subs, book_depths, greeks_subs, bar_types) =
             empty_subs();
         let (book_sync, ws_client, tasks) = book_context();
-        let bar_type = BarType::from("BTCUSDT-LINEAR.BYBIT-5-MINUTE-LAST-EXTERNAL");
-        bar_types.insert("kline.5.BTCUSDT".to_string(), bar_type);
-        let mut msg: BybitWsKlineMsg =
-            serde_json::from_str(&load_test_json("ws_kline.json")).unwrap();
-        msg.data[0].confirm = confirmed;
+        let bar_type = BarType::from("BTCUSDT-PERP.BITGET-1-MINUTE-LAST-EXTERNAL");
+        bar_types.insert("kline.1m.BTCUSDT".to_string(), bar_type);
+        let msg: BitgetWsKlineMsg = serde_json::from_str(&load_test_json("ws_kline.json")).unwrap();
+        // Bitget pushes the forming candle; the next candle's first push closes it
+        let mut next = msg.clone();
+        next.data[0].start += 60_000;
+        let mut messages = vec![msg];
+        if next_candle {
+            messages.push(next);
+        }
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        handle_ws_message(
-            &BybitWsMessage::Kline(msg),
-            &tx.into(),
-            &instruments,
-            Some(BybitProductType::Linear),
-            &trade_subs,
-            &ticker_subs,
-            &quote_subs,
-            &book_depths,
-            &book_sync,
-            &ws_client,
-            &greeks_subs,
-            &Arc::new(AtomicMap::new()),
-            &bar_types,
-            on_close,
-            &DashMap::new(),
-            &mut funding_cache,
-            Duration::ZERO,
-            &tasks,
-            clock,
-        );
+        let sender = tx.into();
+        for msg in messages {
+            handle_ws_message(
+                &BitgetWsMessage::Kline(msg),
+                &sender,
+                &instruments,
+                Some(BitgetProductType::Linear),
+                &trade_subs,
+                &ticker_subs,
+                &quote_subs,
+                &book_depths,
+                &book_sync,
+                &ws_client,
+                &greeks_subs,
+                &Arc::new(AtomicMap::new()),
+                &bar_types,
+                on_close,
+                &DashMap::new(),
+                &mut funding_cache,
+                &mut kline_cache,
+                Duration::ZERO,
+                &tasks,
+                clock,
+            );
+        }
 
         if let Some(expected) = expected {
             let DataEvent::Data(Data::Bar(bar)) = rx.try_recv().unwrap() else {
@@ -2903,19 +2972,22 @@ pub(crate) mod tests {
         trade_subs.insert(instrument.id());
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_public_trade.json");
-        let msg: BybitWsTradeMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::Trade(msg);
+        let BitgetWsFrame::Trade(msg) = ws_frame(&json) else {
+            panic!("Expected trade frame");
+        };
+        let ws_msg = BitgetWsMessage::Trade(msg);
 
         handle_ws_message(
             &ws_msg,
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -2928,6 +3000,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -2937,9 +3010,9 @@ pub(crate) mod tests {
         match event {
             DataEvent::Data(Data::Trade(tick)) => {
                 assert_eq!(tick.instrument_id, instrument.id());
-                assert_eq!(tick.price, instrument.make_price(27451.00));
-                assert_eq!(tick.size, instrument.make_qty(0.010, None));
-                assert_eq!(tick.aggressor_side, AggressorSide::Buy);
+                assert_eq!(tick.price, instrument.make_price(75242.8));
+                assert_eq!(tick.size, instrument.make_qty(0.001, None));
+                assert_eq!(tick.aggressor_side, AggressorSide::Sell);
             }
             other => panic!("Expected Trade data event, found {other:?}"),
         }
@@ -2953,19 +3026,22 @@ pub(crate) mod tests {
         let (book_sync, ws_client, tasks) = book_context();
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_public_trade.json");
-        let msg: BybitWsTradeMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::Trade(msg);
+        let BitgetWsFrame::Trade(msg) = ws_frame(&json) else {
+            panic!("Expected trade frame");
+        };
+        let ws_msg = BitgetWsMessage::Trade(msg);
 
         handle_ws_message(
             &ws_msg,
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -2978,6 +3054,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -2988,7 +3065,7 @@ pub(crate) mod tests {
 
     #[rstest]
     #[case::metadata_only(None)]
-    #[case::with_identifier(Some("bybit-liquidations"))]
+    #[case::with_identifier(Some("bitget-liquidations"))]
     fn test_handle_liquidation_message_emits_subscribed_data_type(
         #[case] identifier: Option<&str>,
     ) {
@@ -2999,8 +3076,7 @@ pub(crate) mod tests {
         let liquidation_subs = Arc::new(AtomicMap::new());
         liquidation_subs.insert(instrument_id, Arc::new(data_type.clone()));
         let ts_init = UnixNanos::new(1_739_502_303_500_000_000);
-        let msg: BybitWsLiquidationMsg =
-            serde_json::from_str(&load_test_json("ws_all_liquidation.json")).unwrap();
+        let msg: BitgetWsLiquidationMsg = serde_json::from_value(liquidation_fixture()).unwrap();
 
         let events = handle_liquidation_message(msg, &instruments, &liquidation_subs, ts_init);
 
@@ -3011,23 +3087,23 @@ pub(crate) mod tests {
         assert_eq!(events[1].data_type, data_type);
         assert_eq!(
             as_liquidation(&events[0]),
-            &BybitLiquidation::new(
+            &BitgetLiquidation::new(
                 instrument_id,
-                PositionSide::Long,
-                Price::from("96250.5"),
-                Quantity::from("0.015"),
-                UnixNanos::new(1_739_502_302_929_000_000),
+                PositionSide::Short,
+                Price::from("0.2"),
+                Quantity::from("30.7515"),
+                UnixNanos::new(1_794_192_963_576_000_000),
                 ts_init,
             ),
         );
         assert_eq!(
             as_liquidation(&events[1]),
-            &BybitLiquidation::new(
+            &BitgetLiquidation::new(
                 instrument_id,
-                PositionSide::Short,
-                Price::from("97410.0"),
-                Quantity::from("1.250"),
-                UnixNanos::new(1_739_502_303_011_000_000),
+                PositionSide::Long,
+                Price::from("1.1"),
+                Quantity::from("98.8536"),
+                UnixNanos::new(1_794_192_961_705_000_000),
                 ts_init,
             ),
         );
@@ -3044,24 +3120,23 @@ pub(crate) mod tests {
         let liquidation_subs = Arc::new(AtomicMap::new());
         liquidation_subs.insert(instrument_id, Arc::new(data_type.clone()));
         let ts_init = UnixNanos::new(1_739_502_303_500_000_000);
-        let mut value: serde_json::Value =
-            serde_json::from_str(&load_test_json("ws_all_liquidation.json")).unwrap();
-        value["data"][1]["s"] = serde_json::json!(skipped_symbol);
-        let msg: BybitWsLiquidationMsg = serde_json::from_value(value).unwrap();
+        let mut value = liquidation_fixture();
+        value["data"][1]["symbol"] = serde_json::json!(skipped_symbol);
+        let msg: BitgetWsLiquidationMsg = serde_json::from_value(value).unwrap();
 
         let events = handle_liquidation_message(msg, &instruments, &liquidation_subs, ts_init);
 
-        assert_eq!(instruments.len(), 2);
+        assert_eq!(instruments.len(), 3);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data_type, data_type);
         assert_eq!(
             as_liquidation(&events[0]),
-            &BybitLiquidation::new(
+            &BitgetLiquidation::new(
                 instrument_id,
-                PositionSide::Long,
-                Price::from("96250.5"),
-                Quantity::from("0.015"),
-                UnixNanos::new(1_739_502_302_929_000_000),
+                PositionSide::Short,
+                Price::from("0.2"),
+                Quantity::from("30.7515"),
+                UnixNanos::new(1_794_192_963_576_000_000),
                 ts_init,
             ),
         );
@@ -3076,10 +3151,9 @@ pub(crate) mod tests {
         let liquidation_subs = Arc::new(AtomicMap::new());
         liquidation_subs.insert(instrument_id, Arc::new(data_type.clone()));
         let ts_init = UnixNanos::new(1_739_502_303_500_000_000);
-        let mut value: serde_json::Value =
-            serde_json::from_str(&load_test_json("ws_all_liquidation.json")).unwrap();
-        value["data"][0]["S"] = serde_json::json!("");
-        let msg: BybitWsLiquidationMsg = serde_json::from_value(value).unwrap();
+        let mut value = liquidation_fixture();
+        value["data"][0]["side"] = serde_json::json!("");
+        let msg: BitgetWsLiquidationMsg = serde_json::from_value(value).unwrap();
 
         let events = handle_liquidation_message(msg, &instruments, &liquidation_subs, ts_init);
 
@@ -3087,12 +3161,12 @@ pub(crate) mod tests {
         assert_eq!(events[0].data_type, data_type);
         assert_eq!(
             as_liquidation(&events[0]),
-            &BybitLiquidation::new(
+            &BitgetLiquidation::new(
                 instrument_id,
-                PositionSide::Short,
-                Price::from("97410.0"),
-                Quantity::from("1.250"),
-                UnixNanos::new(1_739_502_303_011_000_000),
+                PositionSide::Long,
+                Price::from("1.1"),
+                Quantity::from("98.8536"),
+                UnixNanos::new(1_794_192_961_705_000_000),
                 ts_init,
             ),
         );
@@ -3103,7 +3177,7 @@ pub(crate) mod tests {
         let instrument = linear_instrument();
         let instruments = build_instruments(&[instrument]);
         let liquidation_subs = Arc::new(AtomicMap::new());
-        let msg: BybitWsLiquidationMsg =
+        let msg: BitgetWsLiquidationMsg =
             serde_json::from_str(&load_test_json("ws_all_liquidation.json")).unwrap();
 
         let events = handle_liquidation_message(
@@ -3117,13 +3191,13 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    #[case::shared_depth_one("orderbook.1.BTCUSDT", 1, "snapshot", true, true)]
-    #[case::depth_one_with_deeper_book("orderbook.1.BTCUSDT", 50, "snapshot", false, true)]
-    #[case::deeper_snapshot("orderbook.50.BTCUSDT", 50, "snapshot", true, false)]
-    #[case::deeper_deletion("orderbook.50.BTCUSDT", 50, "delta", true, false)]
-    #[case::unsubscribed_depth("orderbook.200.BTCUSDT", 50, "delta", false, false)]
-    #[case::invalid_topic("orderbook.invalid.BTCUSDT", 1, "snapshot", false, false)]
-    #[case::wrong_symbol("orderbook.1.ETHUSDT", 1, "snapshot", false, false)]
+    #[case::shared_depth_one("books1.BTCUSDT", 1, "snapshot", true, true)]
+    #[case::depth_one_with_deeper_book("books1.BTCUSDT", 1000, "snapshot", false, true)]
+    #[case::deeper_snapshot("books.BTCUSDT", 1000, "snapshot", true, false)]
+    #[case::deeper_deletion("books.BTCUSDT", 1000, "update", true, false)]
+    #[case::unsubscribed_depth("books5.BTCUSDT", 1000, "update", false, false)]
+    #[case::invalid_topic("booksX.BTCUSDT", 1, "snapshot", false, false)]
+    #[case::wrong_symbol("books1.ETHUSDT", 1, "snapshot", false, false)]
     fn test_handle_orderbook_routes_by_depth(
         #[case] topic: &str,
         #[case] book_depth: u32,
@@ -3140,12 +3214,13 @@ pub(crate) mod tests {
         book_depths.insert(instrument_id, book_depth);
         book_sync.record_subscription(instrument_id, Instant::now(), SnapshotGate::default());
 
-        // The delta fixture follows the snapshot fixture's update ID
-        let synced = book_sync.validate(instrument_id, true, 123_456_789, Instant::now());
+        // The delta fixture's `pseq` is the `books` snapshot `seq` it follows
+        let synced = book_sync.validate(instrument_id, true, 1_207_360_465_262, 0, Instant::now());
         assert_eq!(synced, BookSequenceOutcome::Accept);
         quote_subs.insert(instrument_id);
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let ts_init = UnixNanos::new(1_709_891_680_000_000_000);
         let clock = AtomicTime::new(false, ts_init);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3154,15 +3229,16 @@ pub(crate) mod tests {
         } else {
             "ws_orderbook_delta.json"
         };
-        let mut msg: BybitWsOrderbookDepthMsg =
-            serde_json::from_str(&load_test_json(fixture)).unwrap();
+        let BitgetWsFrame::Orderbook(mut msg) = ws_frame(&load_test_json(fixture)) else {
+            panic!("Expected orderbook frame");
+        };
         msg.topic = topic.into();
 
         handle_ws_message(
-            &BybitWsMessage::Orderbook(msg),
+            &BitgetWsMessage::Orderbook(msg),
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -3175,6 +3251,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             &clock,
@@ -3190,8 +3267,8 @@ pub(crate) mod tests {
                 msg_type == "snapshot"
             );
 
-            if msg_type == "delta" {
-                assert_eq!(deltas.deltas.len(), 2);
+            if msg_type == "update" {
+                assert_eq!(deltas.deltas.len(), 15);
                 assert_eq!(deltas.deltas[1].action, BookAction::Delete);
                 assert_eq!(deltas.deltas[1].order.size, Quantity::from("0.000"));
             }
@@ -3200,11 +3277,11 @@ pub(crate) mod tests {
         if expect_quote {
             let expected = QuoteTick::new(
                 instrument_id,
-                Price::from("27450.00"),
-                Price::from("27451.00"),
-                Quantity::from("0.500"),
-                Quantity::from("0.750"),
-                UnixNanos::new(1_709_891_679_000_000_000),
+                Price::from("75242.8"),
+                Price::from("75242.9"),
+                Quantity::from("3.5691"),
+                Quantity::from("3.9769"),
+                UnixNanos::new(1_794_192_890_496_000_000),
                 ts_init,
             );
             let DataEvent::Data(Data::Quote(quote)) = rx.try_recv().unwrap() else {
@@ -3216,17 +3293,24 @@ pub(crate) mod tests {
         rx.try_recv().unwrap_err();
     }
 
-    fn orderbook_msg(msg_type: &str, update_id: i64, levels: bool) -> BybitWsOrderbookDepthMsg {
+    fn orderbook_msg(msg_type: &str, update_id: i64, levels: bool) -> BitgetWsOrderbookDepthMsg {
         let fixture = if msg_type == "snapshot" {
             "ws_orderbook_snapshot.json"
         } else {
             "ws_orderbook_delta.json"
         };
 
-        let mut msg: BybitWsOrderbookDepthMsg =
-            serde_json::from_str(&load_test_json(fixture)).unwrap();
-        msg.topic = "orderbook.50.BTCUSDT".into();
-        msg.data.u = update_id;
+        let BitgetWsFrame::Orderbook(mut msg) = ws_frame(&load_test_json(fixture)) else {
+            panic!("Expected orderbook frame");
+        };
+        msg.topic = "books50.BTCUSDT".into();
+        msg.data.seq = update_id;
+        // Bitget continuity: an update's `pseq` is the previous push's `seq`
+        msg.data.pseq = if msg_type == "snapshot" {
+            0
+        } else {
+            update_id - 1
+        };
 
         if !levels {
             msg.data.b.clear();
@@ -3288,7 +3372,7 @@ pub(crate) mod tests {
         let instrument_id = instrument.id();
         let (_, _, _, book_depths, _, _) = empty_subs();
         let book_sync = BookSyncTracker::default();
-        let ws_client = BybitWebSocketClient::new_public(None, 20);
+        let ws_client = BitgetWebSocketClient::new_public(None, 20);
         let tasks = TaskGroup::new();
         let spawner = tasks.spawner().unwrap();
         book_depths.insert(instrument_id, 50);
@@ -3330,15 +3414,16 @@ pub(crate) mod tests {
         let (trade_subs, ticker_subs, quote_subs, book_depths, greeks_subs, bar_types) =
             empty_subs();
         let book_sync = BookSyncTracker::default();
-        let ws_client = BybitWebSocketClient::new_public(None, 20);
+        let ws_client = BitgetWebSocketClient::new_public(None, 20);
         let tasks = TaskGroup::new();
         let spawner = tasks.spawner().unwrap();
         book_depths.insert(instrument_id, 50);
         book_sync.record_subscription(instrument_id, Instant::now(), SnapshotGate::default());
-        let synced = book_sync.validate(instrument_id, true, 100, Instant::now());
+        let synced = book_sync.validate(instrument_id, true, 100, 0, Instant::now());
         assert_eq!(synced, BookSequenceOutcome::Accept);
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = tx.into();
@@ -3346,14 +3431,14 @@ pub(crate) mod tests {
 
         // The update follows the book's position, so only the reconnect can suppress it
         for message in [
-            BybitWsMessage::Reconnected,
-            BybitWsMessage::Orderbook(orderbook_msg("delta", 101, true)),
+            BitgetWsMessage::Reconnected,
+            BitgetWsMessage::Orderbook(orderbook_msg("delta", 101, true)),
         ] {
             handle_ws_message(
                 &message,
                 &sender,
                 &instruments,
-                Some(BybitProductType::Linear),
+                Some(BitgetProductType::Linear),
                 &trade_subs,
                 &ticker_subs,
                 &quote_subs,
@@ -3366,6 +3451,7 @@ pub(crate) mod tests {
                 true,
                 &DashMap::new(),
                 &mut funding_cache,
+                &mut kline_cache,
                 snapshot_timeout,
                 &spawner,
                 clock,
@@ -3373,7 +3459,7 @@ pub(crate) mod tests {
         }
 
         let deadline = Instant::now() + snapshot_timeout;
-        let expired = book_sync.take_expired_snapshots(BybitProductType::Linear, deadline);
+        let expired = book_sync.take_expired_snapshots(BitgetProductType::Linear, deadline);
 
         rx.try_recv().unwrap_err();
         assert_eq!(expired.len(), 1);
@@ -3389,8 +3475,8 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         set_data_event_sender(tx);
         let mut client =
-            BybitDataClient::new(*BYBIT_CLIENT_ID, BybitDataClientConfig::default()).unwrap();
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+            BitgetDataClient::new(*BITGET_CLIENT_ID, BitgetDataClientConfig::default()).unwrap();
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
         client.book_depths.insert(instrument_id, 50);
         client.book_sync.record_subscription(
             instrument_id,
@@ -3404,7 +3490,7 @@ pub(crate) mod tests {
         } else {
             let command = UnsubscribeBookDeltas::new(
                 instrument_id,
-                Some(*BYBIT_CLIENT_ID),
+                Some(*BITGET_CLIENT_ID),
                 None,
                 UUID4::new(),
                 UnixNanos::default(),
@@ -3427,19 +3513,22 @@ pub(crate) mod tests {
         let (book_sync, ws_client, tasks) = book_context();
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_orderbook_snapshot.json");
-        let msg: BybitWsOrderbookDepthMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::Orderbook(msg);
+        let BitgetWsFrame::Orderbook(msg) = ws_frame(&json) else {
+            panic!("Expected orderbook frame");
+        };
+        let ws_msg = BitgetWsMessage::Orderbook(msg);
 
         handle_ws_message(
             &ws_msg,
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -3452,6 +3541,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -3474,19 +3564,22 @@ pub(crate) mod tests {
         ticker_subs.insert(instrument_id, subs);
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_ticker_linear.json");
-        let msg: BybitWsTickerLinearMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::TickerLinear(msg);
+        let BitgetWsFrame::TickerLinear(msg) = ws_frame(&json) else {
+            panic!("Expected ticker frame");
+        };
+        let ws_msg = BitgetWsMessage::TickerLinear(msg);
 
         handle_ws_message(
             &ws_msg,
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -3499,6 +3592,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -3521,19 +3615,22 @@ pub(crate) mod tests {
         ticker_subs.insert(instrument_id, subs);
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_ticker_linear.json");
-        let msg: BybitWsTickerLinearMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::TickerLinear(msg.clone());
+        let BitgetWsFrame::TickerLinear(msg) = ws_frame(&json) else {
+            panic!("Expected ticker frame");
+        };
+        let ws_msg = BitgetWsMessage::TickerLinear(msg.clone());
 
         handle_ws_message(
             &ws_msg,
             &tx.clone().into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -3546,6 +3643,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -3555,12 +3653,12 @@ pub(crate) mod tests {
         assert!(matches!(event, DataEvent::FundingRate(_)));
 
         // Send same message again, funding unchanged so should be deduped
-        let ws_msg2 = BybitWsMessage::TickerLinear(msg);
+        let ws_msg2 = BitgetWsMessage::TickerLinear(msg);
         handle_ws_message(
             &ws_msg2,
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -3573,6 +3671,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -3596,19 +3695,22 @@ pub(crate) mod tests {
         ticker_subs.insert(instrument_id, subs);
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_ticker_linear.json");
-        let msg: BybitWsTickerLinearMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::TickerLinear(msg);
+        let BitgetWsFrame::TickerLinear(msg) = ws_frame(&json) else {
+            panic!("Expected ticker frame");
+        };
+        let ws_msg = BitgetWsMessage::TickerLinear(msg);
 
         handle_ws_message(
             &ws_msg,
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -3621,6 +3723,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -3634,10 +3737,10 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    #[case::option(BybitProductType::Option, true)]
-    #[case::linear(BybitProductType::Linear, false)]
+    #[case::option(BitgetProductType::Option, true)]
+    #[case::linear(BitgetProductType::Linear, false)]
     fn test_handle_reconnected_clears_caches(
-        #[case] product_type: BybitProductType,
+        #[case] product_type: BitgetProductType,
         #[case] clear_option_quotes: bool,
     ) {
         let instruments = AHashMap::new();
@@ -3646,9 +3749,10 @@ pub(crate) mod tests {
         let (book_sync, ws_client, tasks) = book_context();
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
-        let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
+        let instrument_id = InstrumentId::from("BTCUSDT-PERP.BITGET");
 
         let option_quote = QuoteTick::new(
             instrument_id,
@@ -3674,7 +3778,7 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         handle_ws_message(
-            &BybitWsMessage::Reconnected,
+            &BitgetWsMessage::Reconnected,
             &tx.into(),
             &instruments,
             Some(product_type),
@@ -3690,6 +3794,7 @@ pub(crate) mod tests {
             true,
             &last_quotes,
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -3707,340 +3812,6 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    fn test_handle_ticker_option_greeks() {
-        // Use the option instrument but key it by the ticker fixture symbol
-        // (fixture instrument is ETH-26JUN26-16000-P, ticker fixture is BTC-6JAN23-17500-C)
-        let instrument = option_instrument();
-        let instrument_id = instrument.id();
-
-        // Key the instrument by the fixture ticker symbol with OPTION suffix
-        let ticker_key = Ustr::from("BTC-6JAN23-17500-C-OPTION");
-        let mut instruments = AHashMap::new();
-        instruments.insert(ticker_key, instrument);
-
-        let (trade_subs, ticker_subs, quote_subs, book_depths, greeks_subs, bar_types) =
-            empty_subs();
-
-        let (book_sync, ws_client, tasks) = book_context();
-        greeks_subs.insert(instrument_id);
-
-        let mut funding_cache = AHashMap::new();
-        let clock = get_atomic_clock_realtime();
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let json = load_test_json("ws_ticker_option.json");
-        let msg: BybitWsTickerOptionMsg = serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::TickerOption(msg);
-
-        handle_ws_message(
-            &ws_msg,
-            &tx.into(),
-            &instruments,
-            Some(BybitProductType::Option),
-            &trade_subs,
-            &ticker_subs,
-            &quote_subs,
-            &book_depths,
-            &book_sync,
-            &ws_client,
-            &greeks_subs,
-            &Arc::new(AtomicMap::new()),
-            &bar_types,
-            true,
-            &DashMap::new(),
-            &mut funding_cache,
-            Duration::ZERO,
-            &tasks,
-            clock,
-        );
-
-        let event = rx.try_recv().unwrap();
-        assert!(matches!(event, DataEvent::OptionGreeks(_)));
-    }
-
-    #[rstest]
-    #[case::bid_price("9.5", "10", "2", "5")]
-    #[case::ask_price("9", "11", "2", "5")]
-    #[case::bid_size("9", "10", "3", "5")]
-    #[case::ask_size("9", "10", "2", "6")]
-    fn test_handle_ticker_option_quote_dedup(
-        #[case] bid_price: &str,
-        #[case] ask_price: &str,
-        #[case] bid_size: &str,
-        #[case] ask_size: &str,
-    ) {
-        // Key the option instrument by the fixture ticker symbol with OPTION suffix
-        let instrument = option_instrument();
-        let instrument_id = instrument.id();
-        let mut instruments = AHashMap::new();
-        instruments.insert(Ustr::from("BTC-6JAN23-17500-C-OPTION"), instrument.clone());
-
-        let (trade_subs, ticker_subs, quote_subs, book_depths, greeks_subs, bar_types) =
-            empty_subs();
-        let (book_sync, ws_client, tasks) = book_context();
-
-        let mut subs = AHashSet::new();
-        subs.insert("quotes");
-        subs.insert("mark_prices");
-        ticker_subs.insert(instrument_id, subs);
-
-        let last_quotes = DashMap::new();
-        let mut funding_cache = AHashMap::new();
-        let ts1 = UnixNanos::new(1_672_917_511_100_000_000);
-        let ts2 = UnixNanos::new(1_672_917_511_200_000_000);
-        let ts3 = UnixNanos::new(1_672_917_511_300_000_000);
-        let ts4 = UnixNanos::new(1_672_917_511_400_000_000);
-        let clock = AtomicTime::new(false, ts1);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let json = load_test_json("ws_ticker_option.json");
-        let mut msg: BybitWsTickerOptionMsg = serde_json::from_str(&json).unwrap();
-
-        msg.data.bid_price = "9".to_string();
-        msg.data.bid_size = "2".to_string();
-        msg.data.ask_size = "5".to_string();
-        msg.data.mark_price = "7.8".to_string();
-
-        // The second ticker repeats the top of book; the third changes one field
-        let mut unchanged = msg.clone();
-        unchanged.ts += 100;
-        let mut changed = msg.clone();
-        changed.ts += 200;
-        changed.data.bid_price = bid_price.to_string();
-        changed.data.ask_price = ask_price.to_string();
-        changed.data.bid_size = bid_size.to_string();
-        changed.data.ask_size = ask_size.to_string();
-        changed.data.mark_price = "8.2".to_string();
-        let mut repeated = changed.clone();
-        repeated.ts += 100;
-
-        for (ts_init, msg) in [
-            (ts1, msg),
-            (ts2, unchanged),
-            (ts3, changed),
-            (ts4, repeated),
-        ] {
-            clock.set_time(ts_init);
-            handle_ws_message(
-                &BybitWsMessage::TickerOption(msg),
-                &tx.clone().into(),
-                &instruments,
-                Some(BybitProductType::Option),
-                &trade_subs,
-                &ticker_subs,
-                &quote_subs,
-                &book_depths,
-                &book_sync,
-                &ws_client,
-                &greeks_subs,
-                &Arc::new(AtomicMap::new()),
-                &bar_types,
-                true,
-                &last_quotes,
-                &mut funding_cache,
-                Duration::ZERO,
-                &tasks,
-                &clock,
-            );
-        }
-
-        let mut quotes = Vec::new();
-        let mut mark_prices = Vec::new();
-
-        while let Ok(event) = rx.try_recv() {
-            match event {
-                DataEvent::Data(Data::Quote(quote)) => quotes.push(quote),
-                DataEvent::Data(Data::MarkPrice(mark)) => mark_prices.push(mark),
-                other => panic!("Unexpected event: {other:?}"),
-            }
-        }
-
-        let price = |value: &str| {
-            Price::from_decimal_dp(value.parse().unwrap(), instrument.price_precision()).unwrap()
-        };
-
-        let size = |value: &str| {
-            Quantity::from_decimal_dp(value.parse().unwrap(), instrument.size_precision()).unwrap()
-        };
-
-        let initial = QuoteTick::new(
-            instrument_id,
-            price("9"),
-            price("10"),
-            size("2"),
-            size("5"),
-            UnixNanos::new(1_672_917_511_074_000_000),
-            ts1,
-        );
-
-        let changed = QuoteTick::new(
-            instrument_id,
-            price(bid_price),
-            price(ask_price),
-            size(bid_size),
-            size(ask_size),
-            UnixNanos::new(1_672_917_511_274_000_000),
-            ts3,
-        );
-
-        let expected_marks = [
-            ("7.8", 1_672_917_511_074_000_000, ts1),
-            ("7.8", 1_672_917_511_174_000_000, ts2),
-            ("8.2", 1_672_917_511_274_000_000, ts3),
-            ("8.2", 1_672_917_511_374_000_000, ts4),
-        ]
-        .map(|(value, ts_event, ts_init)| {
-            MarkPriceUpdate::new(
-                instrument_id,
-                price(value),
-                UnixNanos::new(ts_event),
-                ts_init,
-            )
-        });
-
-        assert_eq!(quotes, vec![initial, changed]);
-        assert_eq!(mark_prices, expected_marks);
-    }
-
-    #[rstest]
-    #[case::resubscribe(false, false)]
-    #[case::resubscribe_after_late_quote(false, true)]
-    #[case::reconnect(true, false)]
-    #[tokio::test]
-    async fn test_option_quote_subscription_emits_unchanged_initial_quote(
-        #[case] reconnect: bool,
-        #[case] late_quote: bool,
-    ) {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        set_data_event_sender(tx);
-
-        let mut client = BybitDataClient::new(
-            *BYBIT_CLIENT_ID,
-            BybitDataClientConfig {
-                product_types: vec![BybitProductType::Option],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let instrument = option_instrument();
-        let instrument_id = instrument.id();
-        client.instruments.insert(instrument_id, instrument.clone());
-        let instruments = build_instruments(std::slice::from_ref(&instrument));
-        let ts1 = UnixNanos::new(1_700_000_000_000_000_000);
-        let ts2 = UnixNanos::new(1_700_000_000_100_000_000);
-        let ts3 = UnixNanos::new(1_700_000_000_200_000_000);
-        let clock = AtomicTime::new(false, ts1);
-        let mut msg: BybitWsTickerOptionMsg =
-            serde_json::from_str(&load_test_json("ws_ticker_option.json")).unwrap();
-        msg.data.symbol = instrument.raw_symbol().inner();
-        msg.data.bid_price = "9".to_string();
-        msg.data.ask_price = "10".to_string();
-        msg.data.bid_size = "2".to_string();
-        msg.data.ask_size = "5".to_string();
-
-        let initial = QuoteTick::new(
-            instrument_id,
-            Price::from("9.0"),
-            Price::from("10.0"),
-            Quantity::from("2"),
-            Quantity::from("5"),
-            UnixNanos::new(1_672_917_511_074_000_000),
-            ts1,
-        );
-
-        let subscribe = || {
-            SubscribeQuotes::new(
-                instrument_id,
-                Some(*BYBIT_CLIENT_ID),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                None,
-                None,
-            )
-        };
-
-        let handle = |client: &BybitDataClient, message: &BybitWsMessage| {
-            let ws = client
-                .get_ws_client_for_product(BybitProductType::Option)
-                .unwrap();
-            handle_ws_message(
-                message,
-                &client.data_sender,
-                &instruments,
-                Some(BybitProductType::Option),
-                &client.trade_subs,
-                &client.ticker_subs,
-                &client.quote_subs,
-                &client.book_depths,
-                &client.book_sync,
-                ws,
-                &client.option_greeks_subs,
-                &client.liquidation_subs,
-                ws.bar_types_cache(),
-                true,
-                &client.last_quotes,
-                &mut AHashMap::new(),
-                Duration::ZERO,
-                &client.command_tasks.spawner().unwrap(),
-                &clock,
-            );
-        };
-
-        client.subscribe_quotes(subscribe()).unwrap();
-        handle(&client, &BybitWsMessage::TickerOption(msg.clone()));
-        if reconnect {
-            handle(&client, &BybitWsMessage::Reconnected);
-        } else {
-            client
-                .unsubscribe_quotes(&UnsubscribeQuotes::new(
-                    instrument_id,
-                    Some(*BYBIT_CLIENT_ID),
-                    None,
-                    UUID4::new(),
-                    UnixNanos::default(),
-                    None,
-                    None,
-                ))
-                .unwrap();
-            clock.set_time(ts2);
-            msg.ts += 100;
-            handle(&client, &BybitWsMessage::TickerOption(msg.clone()));
-            if late_quote {
-                client.last_quotes.insert(instrument_id, initial);
-            }
-
-            client.subscribe_quotes(subscribe()).unwrap();
-        }
-
-        clock.set_time(ts3);
-        msg.ts = 1_672_917_511_274;
-        handle(&client, &BybitWsMessage::TickerOption(msg));
-        let mut quotes = Vec::new();
-
-        while let Ok(event) = rx.try_recv() {
-            match event {
-                DataEvent::Data(Data::Quote(quote)) => quotes.push(quote),
-                other => panic!("Unexpected event: {other:?}"),
-            }
-        }
-
-        assert_eq!(
-            quotes,
-            vec![
-                initial,
-                QuoteTick {
-                    ts_event: UnixNanos::new(1_672_917_511_274_000_000),
-                    ts_init: ts3,
-                    ..initial
-                }
-            ]
-        );
-    }
-
-    #[rstest]
     fn test_handle_execution_message_ignored_by_data() {
         let instruments = AHashMap::new();
         let (trade_subs, ticker_subs, quote_subs, book_depths, greeks_subs, bar_types) =
@@ -4048,14 +3819,15 @@ pub(crate) mod tests {
         let (book_sync, ws_client, tasks) = book_context();
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_account_order.json");
-        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+        let msg: crate::websocket::messages::BitgetWsAccountOrderMsg =
             serde_json::from_str(&json).unwrap();
-        let ws_msg = BybitWsMessage::AccountOrder(msg);
+        let ws_msg = BitgetWsMessage::AccountOrder(msg);
 
         handle_ws_message(
             &ws_msg,
@@ -4074,6 +3846,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -4096,15 +3869,18 @@ pub(crate) mod tests {
         trade_subs.insert(instrument.id());
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_public_trade.json");
-        let msg: BybitWsTradeMsg = serde_json::from_str(&json).unwrap();
+        let BitgetWsFrame::Trade(msg) = ws_frame(&json) else {
+            panic!("Expected trade frame");
+        };
 
-        // With None product_type, raw symbol "BTCUSDT" does not match "BTCUSDT-LINEAR"
+        // With None product_type, raw symbol "BTCUSDT" does not match "BTCUSDT-PERP"
         handle_ws_message(
-            &BybitWsMessage::Trade(msg.clone()),
+            &BitgetWsMessage::Trade(msg.clone()),
             &tx.clone().into(),
             &map,
             None,
@@ -4120,18 +3896,19 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
         );
         rx.try_recv().unwrap_err();
 
-        // With product_type=Linear, "BTCUSDT" -> "BTCUSDT-LINEAR" matches
+        // With product_type=Linear, "BTCUSDT" -> "BTCUSDT-PERP" matches
         handle_ws_message(
-            &BybitWsMessage::Trade(msg),
+            &BitgetWsMessage::Trade(msg),
             &tx.into(),
             &map,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -4144,6 +3921,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -4162,18 +3940,21 @@ pub(crate) mod tests {
         let (book_sync, ws_client, tasks) = book_context();
 
         let mut funding_cache = AHashMap::new();
+        let mut kline_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let json = load_test_json("ws_public_trade.json");
-        let msg: BybitWsTradeMsg = serde_json::from_str(&json).unwrap();
+        let BitgetWsFrame::Trade(msg) = ws_frame(&json) else {
+            panic!("Expected trade frame");
+        };
 
         // Without subscription, trade should be filtered out
         handle_ws_message(
-            &BybitWsMessage::Trade(msg.clone()),
+            &BitgetWsMessage::Trade(msg.clone()),
             &tx.clone().into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -4186,6 +3967,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,
@@ -4195,10 +3977,10 @@ pub(crate) mod tests {
         // With subscription, trade should be emitted
         trade_subs.insert(instrument.id());
         handle_ws_message(
-            &BybitWsMessage::Trade(msg),
+            &BitgetWsMessage::Trade(msg),
             &tx.into(),
             &instruments,
-            Some(BybitProductType::Linear),
+            Some(BitgetProductType::Linear),
             &trade_subs,
             &ticker_subs,
             &quote_subs,
@@ -4211,6 +3993,7 @@ pub(crate) mod tests {
             true,
             &DashMap::new(),
             &mut funding_cache,
+            &mut kline_cache,
             Duration::ZERO,
             &tasks,
             clock,

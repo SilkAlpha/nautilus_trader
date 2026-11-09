@@ -1,7 +1,5 @@
 {
-  "op": "auth",
-  "success": true,
-  "retCode": 0,
-  "retMsg": "",
-  "connId": "cejreaspqfm9se7usbrg-2xh"
+  "event": "login",
+  "code": 0,
+  "connId": "068b4afffe0ebff5-00003912-00207636-3f38547f12f362d9-556f6561"
 }

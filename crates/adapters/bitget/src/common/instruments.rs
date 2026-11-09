@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Instrument definition diffing and emission for the Bybit adapter.
+//! Instrument definition diffing and emission for the Bitget adapter.
 
 use ahash::{AHashMap, AHashSet};
 use nautilus_common::{live::sender::EventSender, messages::DataEvent};
@@ -97,8 +97,8 @@ mod tests {
     ) -> InstrumentAny {
         InstrumentAny::CryptoPerpetual(
             CryptoPerpetual::builder()
-                .instrument_id(InstrumentId::from("BTCUSDT-LINEAR.BYBIT"))
-                .raw_symbol(Symbol::from("BTCUSDT-LINEAR"))
+                .instrument_id(InstrumentId::from("BTCUSDT-PERP.BITGET"))
+                .raw_symbol(Symbol::from("BTCUSDT-PERP"))
                 .base_currency(Currency::BTC())
                 .quote_currency(Currency::USDT())
                 .settlement_currency(Currency::USDT())

@@ -1,11 +1,26 @@
 {
-  "op": "order.create",
-  "retCode": 0,
-  "retMsg": "OK",
-  "connId": "cejreaspqfm9se7usbrg-4cd",
-  "reqId": "order-req-001",
-  "data": {
-    "orderId": "1726025498520715008",
-    "orderLinkId": "client-order-1"
-  }
+  "event": "trade",
+  "id": "cap17941930863671",
+  "category": "usdt-futures",
+  "topic": "place-order",
+  "args": [
+    {
+      "symbol": "TSLAUSDT",
+      "orderId": "1503520267005485056",
+      "clientOid": "tdcaprest93086",
+      "cTime": "1794193086386"
+    }
+  ],
+  "code": "0",
+  "msg": "Success",
+  "ts": "1794193086388",
+  "connId": "068b4afffe0ebff5-00003912-00207636-3f38547f12f362d9-556f6561",
+  "rateLimit": [
+    {
+      "limit": "20",
+      "remaining": "19"
+    }
+  ],
+  "receiveTime": "1794193086385342",
+  "pushTime": "1794193086388670"
 }

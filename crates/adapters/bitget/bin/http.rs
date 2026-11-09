@@ -13,29 +13,31 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Demonstration binary for testing Bybit HTTP client endpoints.
+//! Demonstration binary for testing Bitget HTTP client endpoints.
 //!
 //! Run with:
 //! ```bash
-//! cargo run -p nautilus-bybit --bin bybit-http
+//! cargo run -p nautilus-bitget --bin bitget-http
 //! ```
 //!
-//! For authenticated endpoints, set environment variables:
+//! For authenticated endpoints (demo trading; Bitget has no testnet), set environment variables:
 //! ```bash
-//! export BYBIT_TESTNET_API_KEY=your_key
-//! export BYBIT_TESTNET_API_SECRET=your_secret
-//! cargo run -p nautilus-bybit --bin bybit-http
+//! export BITGET_DEMO_API_KEY=your_key
+//! export BITGET_DEMO_API_SECRET=your_secret
+//! export BITGET_DEMO_API_PASSPHRASE=your_passphrase
+//! cargo run -p nautilus-bitget --bin bitget-http
 //! ```
 
-use nautilus_bybit::{
+use nautilus_bitget::{
     common::{
         credential::Credential,
-        enums::{BybitEnvironment, BybitKlineInterval, BybitProductType},
+        enums::{BitgetEnvironment, BitgetKlineInterval, BitgetProductType},
     },
     http::{
-        client::BybitHttpClient,
+        client::BitgetHttpClient,
         query::{
-            BybitInstrumentsInfoParamsBuilder, BybitKlinesParamsBuilder, BybitTradesParamsBuilder,
+            BitgetInstrumentsInfoParamsBuilder, BitgetKlinesParamsBuilder,
+            BitgetTradesParamsBuilder,
         },
     },
 };
@@ -44,17 +46,17 @@ use nautilus_bybit::{
 async fn main() -> anyhow::Result<()> {
     nautilus_common::logging::ensure_logging_initialized();
 
-    println!("=== Bybit HTTP Client Demo ===\n");
+    println!("=== Bitget HTTP Client Demo ===\n");
 
     // Test public endpoints
     test_public_endpoints().await?;
 
-    if Credential::resolve(None, None, BybitEnvironment::Testnet).is_some() {
+    if Credential::resolve(None, None, None, BitgetEnvironment::Demo).is_some() {
         println!("\n=== Testing Authenticated Endpoints ===");
         test_authenticated_endpoints().await?;
     } else {
         println!(
-            "\n[SKIP] Skipping authenticated endpoints (set BYBIT_TESTNET_API_KEY and BYBIT_TESTNET_API_SECRET to test)"
+            "\n[SKIP] Skipping authenticated endpoints (set BITGET_DEMO_API_KEY, BITGET_DEMO_API_SECRET and BITGET_DEMO_API_PASSPHRASE to test)"
         );
     }
 
@@ -62,18 +64,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn test_public_endpoints() -> anyhow::Result<()> {
-    let client = BybitHttpClient::new(None, 60, 3, 1000, 10_000, 5_000, None)?;
+    let client = BitgetHttpClient::new(None, 60, 3, 1000, 10_000, 5_000, None)?;
 
     // Test 1: Get server time
-    println!("1. Testing GET /v5/market/time");
+    println!("1. Testing GET /api/v3/market/time");
 
     match client.get_server_time().await {
         Ok(response) => {
             println!(
                 "   [OK] Server time: {} (seconds)",
-                response.result.time_second
+                response.result.time_second_str()
             );
-            println!("   [OK] Server time: {} (nanos)", response.result.time_nano);
+            println!(
+                "   [OK] Server time: {} (nanos)",
+                response.result.time_nano_str()
+            );
         }
         Err(e) => {
             println!("   [ERROR] {e}");
@@ -82,9 +87,9 @@ async fn test_public_endpoints() -> anyhow::Result<()> {
     }
 
     // Test 2: Get linear instruments
-    println!("\n2. Testing GET /v5/market/instruments-info (linear)");
-    let params = BybitInstrumentsInfoParamsBuilder::default()
-        .category(BybitProductType::Linear)
+    println!("\n2. Testing GET /api/v3/market/instruments (USDT-FUTURES)");
+    let params = BitgetInstrumentsInfoParamsBuilder::default()
+        .category(BitgetProductType::Linear)
         .symbol("BTCUSDT")
         .build()?;
 
@@ -103,9 +108,9 @@ async fn test_public_endpoints() -> anyhow::Result<()> {
     }
 
     // Test 3: Get spot instruments
-    println!("\n3. Testing GET /v5/market/instruments-info (spot)");
-    let params = BybitInstrumentsInfoParamsBuilder::default()
-        .category(BybitProductType::Spot)
+    println!("\n3. Testing GET /api/v3/market/instruments (SPOT)");
+    let params = BitgetInstrumentsInfoParamsBuilder::default()
+        .category(BitgetProductType::Spot)
         .limit(5u32)
         .build()?;
 
@@ -123,11 +128,11 @@ async fn test_public_endpoints() -> anyhow::Result<()> {
     }
 
     // Test 4: Get klines
-    println!("\n4. Testing GET /v5/market/kline");
-    let params = BybitKlinesParamsBuilder::default()
-        .category(BybitProductType::Linear)
+    println!("\n4. Testing GET /api/v3/market/candles");
+    let params = BitgetKlinesParamsBuilder::default()
+        .category(BitgetProductType::Linear)
         .symbol("BTCUSDT")
-        .interval(BybitKlineInterval::Minute1)
+        .interval(BitgetKlineInterval::Minute1)
         .limit(5u32)
         .build()?;
 
@@ -148,9 +153,9 @@ async fn test_public_endpoints() -> anyhow::Result<()> {
     }
 
     // Test 5: Get recent trades
-    println!("\n5. Testing GET /v5/market/recent-trade");
-    let params = BybitTradesParamsBuilder::default()
-        .category(BybitProductType::Linear)
+    println!("\n5. Testing GET /api/v3/market/fills");
+    let params = BitgetTradesParamsBuilder::default()
+        .category(BitgetProductType::Linear)
         .symbol("BTCUSDT")
         .limit(5u32)
         .build()?;
@@ -176,16 +181,16 @@ async fn test_public_endpoints() -> anyhow::Result<()> {
 }
 
 async fn test_authenticated_endpoints() -> anyhow::Result<()> {
-    let client = BybitHttpClient::new_with_env(
-        None, None, None, false, true, 60, 3, 1000, 10_000, 5_000, None,
+    let client = BitgetHttpClient::new_with_env(
+        None, None, None, None, true, false, 60, 3, 1000, 10_000, 5_000, None,
     )?;
 
     // Test 1: Get open orders
-    println!("\n1. Testing GET /v5/order/realtime (open orders)");
+    println!("\n1. Testing GET /api/v3/trade/unfilled-orders (open orders)");
 
     match client
         .get_open_orders(
-            BybitProductType::Linear,
+            BitgetProductType::Linear,
             Some("BTCUSDT".to_owned()),
             None,
             None,
@@ -213,20 +218,20 @@ async fn test_authenticated_endpoints() -> anyhow::Result<()> {
     }
 
     // Test 2: Place order (commented out to avoid actual order placement)
-    println!("\n2. Testing POST /v5/order/create (order placement)");
+    println!("\n2. Testing POST /api/v3/trade/place-order (order placement)");
     println!("   [SKIP] Skipping actual order placement to avoid unintended trades");
     println!("   [INFO] Uncomment in code to test order placement");
 
     /*
     let order_request = serde_json::json!({
-        "category": "linear",
+        "category": "USDT-FUTURES",
         "symbol": "BTCUSDT",
-        "side": "Buy",
-        "orderType": "Limit",
+        "side": "buy",
+        "orderType": "limit",
         "qty": "0.001",
         "price": "20000",
-        "timeInForce": "GTC",
-        "orderLinkId": format!("test-{}", jiff::Timestamp::now().as_second())
+        "timeInForce": "post_only",
+        "clientOid": format!("test-{}", jiff::Timestamp::now().as_second())
     });
 
     match client.place_order(&order_request).await {

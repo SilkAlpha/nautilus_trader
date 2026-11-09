@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Bybit enumerations Python bindings.
+//! Bitget enumerations Python bindings.
 
 use std::str::FromStr;
 
@@ -22,14 +22,14 @@ use pyo3::{PyTypeInfo, prelude::*, types::PyType};
 use strum::IntoEnumIterator;
 
 use crate::common::enums::{
-    BybitAccountType, BybitEnvironment, BybitMarginAction, BybitMarginMode, BybitPositionIdx,
-    BybitPositionMode, BybitProductType,
+    BitgetAccountType, BitgetEnvironment, BitgetMarginAction, BitgetMarginMode, BitgetPositionIdx,
+    BitgetPositionMode, BitgetProductType,
 };
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitProductType {
-    /// Product categories supported by the v5 API.
+impl BitgetProductType {
+    /// Product categories supported by the v3 API (`category` / `instType`).
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let t = Self::type_object(py);
@@ -43,7 +43,7 @@ impl BybitProductType {
     fn __repr__(&self) -> String {
         format!(
             "<{}.{}: '{}'>",
-            stringify!(BybitProductType),
+            stringify!(BitgetProductType),
             self.name(),
             self.value(),
         )
@@ -81,8 +81,8 @@ impl BybitProductType {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitEnvironment {
-    /// Environments supported by the Bybit API stack.
+impl BitgetEnvironment {
+    /// Environments supported by the Bitget API stack.
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let t = Self::type_object(py);
@@ -96,7 +96,7 @@ impl BybitEnvironment {
     fn __repr__(&self) -> String {
         format!(
             "<{}.{}: {}>",
-            stringify!(BybitEnvironment),
+            stringify!(BitgetEnvironment),
             self.name(),
             *self as u8,
         )
@@ -134,8 +134,8 @@ impl BybitEnvironment {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitAccountType {
-    /// Account type enumeration.
+impl BitgetAccountType {
+    /// Account type enumeration (Bitget UTA has a single unified wallet; kept for API parity).
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let t = Self::type_object(py);
@@ -149,7 +149,7 @@ impl BybitAccountType {
     fn __repr__(&self) -> String {
         format!(
             "<{}.{}: {}>",
-            stringify!(BybitAccountType),
+            stringify!(BitgetAccountType),
             self.name(),
             *self as u8,
         )
@@ -187,8 +187,8 @@ impl BybitAccountType {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitMarginMode {
-    /// Margin mode used by Bybit when switching risk profiles.
+impl BitgetMarginMode {
+    /// Account level used by Bitget when switching risk profiles (`POST /api/v3/account/adjust-account-mode`).
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let t = Self::type_object(py);
@@ -202,7 +202,7 @@ impl BybitMarginMode {
     fn __repr__(&self) -> String {
         format!(
             "<{}.{}: '{}'>",
-            stringify!(BybitMarginMode),
+            stringify!(BitgetMarginMode),
             self.name(),
             self.value(),
         )
@@ -244,8 +244,8 @@ impl BybitMarginMode {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitPositionMode {
-    /// Position mode as returned by the v5 API.
+impl BitgetPositionMode {
+    /// Position (hold) mode as used by `holdMode` in the v3 API.
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let t = Self::type_object(py);
@@ -258,8 +258,8 @@ impl BybitPositionMode {
 
     fn __repr__(&self) -> String {
         format!(
-            "<{}.{}: {}>",
-            stringify!(BybitPositionMode),
+            "<{}.{}: '{}'>",
+            stringify!(BitgetPositionMode),
             self.name(),
             self.value(),
         )
@@ -277,8 +277,11 @@ impl BybitPositionMode {
 
     #[getter]
     #[must_use]
-    pub fn value(&self) -> i32 {
-        *self as i32
+    pub fn value(&self) -> &'static str {
+        match self {
+            Self::MergedSingle => "one_way_mode",
+            Self::BothSides => "hedge_mode",
+        }
     }
 
     #[staticmethod]
@@ -290,26 +293,19 @@ impl BybitPositionMode {
     #[classmethod]
     #[pyo3(name = "from_str")]
     fn py_from_str(_cls: &Bound<'_, PyType>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // Try to extract as integer first (for API payloads that send 0 or 3)
-        if let Ok(int_val) = data.extract::<i32>() {
-            return match int_val {
-                0 => Ok(Self::MergedSingle),
-                3 => Ok(Self::BothSides),
-                _ => Err(to_pyvalue_err(anyhow::anyhow!(
-                    "Invalid BybitPositionMode value: {int_val}"
-                ))),
-            };
-        }
-
-        // Fall back to string parsing for variant names
+        // Accept the Bitget `holdMode` values first, then the variant names
         let data_str: String = data.str()?.extract()?;
-        Self::from_str(&data_str).map_err(to_pyvalue_err)
+        match data_str.as_str() {
+            "one_way_mode" => Ok(Self::MergedSingle),
+            "hedge_mode" => Ok(Self::BothSides),
+            _ => Self::from_str(&data_str).map_err(to_pyvalue_err),
+        }
     }
 }
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitPositionIdx {
+impl BitgetPositionIdx {
     /// Position index values used for hedge mode payloads.
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -324,7 +320,7 @@ impl BybitPositionIdx {
     fn __repr__(&self) -> String {
         format!(
             "<{}.{}: {}>",
-            stringify!(BybitPositionIdx),
+            stringify!(BitgetPositionIdx),
             self.name(),
             self.value(),
         )
@@ -361,7 +357,7 @@ impl BybitPositionIdx {
                 1 => Ok(Self::BuyHedge),
                 2 => Ok(Self::SellHedge),
                 _ => Err(to_pyvalue_err(anyhow::anyhow!(
-                    "Invalid BybitPositionIdx value: {int_val}"
+                    "Invalid BitgetPositionIdx value: {int_val}"
                 ))),
             };
         }
@@ -373,7 +369,7 @@ impl BybitPositionIdx {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitMarginAction {
+impl BitgetMarginAction {
     /// Margin actions for spot margin trading operations.
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -384,7 +380,7 @@ impl BybitMarginAction {
     fn __repr__(&self) -> String {
         format!(
             "<{}.{}: '{}'>",
-            stringify!(BybitMarginAction),
+            stringify!(BitgetMarginAction),
             self.name(),
             self.value(),
         )

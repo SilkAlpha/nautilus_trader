@@ -13,17 +13,17 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Error types for Bybit WebSocket client operations.
+//! Error types for Bitget WebSocket client operations.
 
 use nautilus_network::error::SendError;
 use thiserror::Error;
 
-/// Result alias for Bybit WebSocket operations.
-pub type BybitWsResult<T> = Result<T, BybitWsError>;
+/// Result alias for Bitget WebSocket operations.
+pub type BitgetWsResult<T> = Result<T, BitgetWsError>;
 
-/// Error type for Bybit WebSocket client failures.
+/// Error type for Bitget WebSocket client failures.
 #[derive(Clone, Debug, Error)]
-pub enum BybitWsError {
+pub enum BitgetWsError {
     /// The WebSocket client is not currently connected.
     #[error("WebSocket not connected")]
     NotConnected,
@@ -49,48 +49,48 @@ pub enum BybitWsError {
     ClientError(String),
 }
 
-impl From<SendError> for BybitWsError {
+impl From<SendError> for BitgetWsError {
     fn from(error: SendError) -> Self {
         Self::Send(error.to_string())
     }
 }
 
-impl From<tokio_tungstenite::tungstenite::Error> for BybitWsError {
+impl From<tokio_tungstenite::tungstenite::Error> for BitgetWsError {
     fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
         Self::Transport(error.to_string())
     }
 }
 
-impl From<serde_json::Error> for BybitWsError {
+impl From<serde_json::Error> for BitgetWsError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error.to_string())
     }
 }
 
-impl From<String> for BybitWsError {
+impl From<String> for BitgetWsError {
     fn from(msg: String) -> Self {
         Self::Authentication(msg)
     }
 }
 
-/// Determines if a Bybit WebSocket error should trigger a retry.
-pub(crate) fn should_retry_bybit_error(error: &BybitWsError) -> bool {
+/// Determines if a Bitget WebSocket error should trigger a retry.
+pub(crate) fn should_retry_bitget_error(error: &BitgetWsError) -> bool {
     match error {
-        BybitWsError::Transport(_) => true,
-        BybitWsError::Send(_) => true,
-        BybitWsError::ClientError(msg) => {
+        BitgetWsError::Transport(_) => true,
+        BitgetWsError::Send(_) => true,
+        BitgetWsError::ClientError(msg) => {
             let msg_lower = msg.to_lowercase();
             msg_lower.contains("timeout")
                 || msg_lower.contains("timed out")
                 || msg_lower.contains("connection")
                 || msg_lower.contains("network")
         }
-        BybitWsError::NotConnected => true,
-        BybitWsError::Authentication(_) | BybitWsError::Json(_) => false,
+        BitgetWsError::NotConnected => true,
+        BitgetWsError::Authentication(_) | BitgetWsError::Json(_) => false,
     }
 }
 
-/// Creates a timeout error for Bybit operations.
-pub(crate) fn create_bybit_timeout_error(msg: String) -> BybitWsError {
-    BybitWsError::ClientError(msg)
+/// Creates a timeout error for Bitget operations.
+pub(crate) fn create_bitget_timeout_error(msg: String) -> BitgetWsError {
+    BitgetWsError::ClientError(msg)
 }

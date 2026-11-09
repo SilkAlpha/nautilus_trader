@@ -13,16 +13,16 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Python bindings for Bybit factory types.
+//! Python bindings for Bitget factory types.
 
 use pyo3::prelude::*;
 
-use crate::factories::{BybitDataClientFactory, BybitExecutionClientFactory};
+use crate::factories::{BitgetDataClientFactory, BitgetExecutionClientFactory};
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitDataClientFactory {
-    /// Factory for creating Bybit data clients.
+impl BitgetDataClientFactory {
+    /// Factory for creating Bitget data clients.
     #[new]
     fn py_new() -> Self {
         Self
@@ -30,14 +30,14 @@ impl BybitDataClientFactory {
 
     #[pyo3(name = "name")]
     fn py_name(&self) -> &'static str {
-        "BYBIT"
+        "BITGET"
     }
 }
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitExecutionClientFactory {
-    /// Factory for creating Bybit execution clients.
+impl BitgetExecutionClientFactory {
+    /// Factory for creating Bitget execution clients.
     #[new]
     fn py_new() -> Self {
         Self::new()
@@ -45,6 +45,6 @@ impl BybitExecutionClientFactory {
 
     #[pyo3(name = "name")]
     fn py_name(&self) -> &'static str {
-        "BYBIT"
+        "BITGET"
     }
 }

@@ -1,0 +1,37 @@
+{
+  "action": "update",
+  "arg": {
+    "instType": "UTA",
+    "topic": "position"
+  },
+  "data": [
+    {
+      "symbol": "TSLAUSDT",
+      "marginCoin": "USDT",
+      "marginSize": "0",
+      "marginMode": "crossed",
+      "holdMode": "one_way_mode",
+      "posSide": "long",
+      "size": "0",
+      "available": "0",
+      "frozen": "0",
+      "avgPrice": "0",
+      "leverage": "5",
+      "curRealisedPnl": "0",
+      "unrealisedPnl": "0",
+      "liqPrice": "",
+      "mmr": "",
+      "markPrice": "360.65",
+      "breakEvenPrice": "",
+      "profitRate": "",
+      "totalFundingFee": "",
+      "openFeeTotal": "",
+      "closeFeeTotal": "",
+      "positionStatus": "ended",
+      "createdTime": "1794193099832",
+      "updatedTime": "1794193103486",
+      "cashDividend": ""
+    }
+  ],
+  "ts": 1794193103489
+}

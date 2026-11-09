@@ -13,23 +13,23 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Parsing functions for Bybit HTTP API responses.
+//! Parsing functions for Bitget HTTP API responses.
 
 use serde::de::DeserializeOwned;
 
 use super::models::{
-    BybitInstrumentInverseResponse, BybitInstrumentLinearResponse, BybitInstrumentOptionResponse,
-    BybitInstrumentSpotResponse, BybitKlinesResponse, BybitServerTimeResponse,
-    BybitTickersLinearResponse, BybitTickersOptionResponse, BybitTickersSpotResponse,
-    BybitTradesResponse,
+    BitgetInstrumentInverseResponse, BitgetInstrumentLinearResponse,
+    BitgetInstrumentOptionResponse, BitgetInstrumentSpotResponse, BitgetKlinesResponse,
+    BitgetServerTimeResponse, BitgetTickersLinearResponse, BitgetTickersOptionResponse,
+    BitgetTickersSpotResponse, BitgetTradesResponse,
 };
-use crate::common::models::BybitResponse;
+use crate::common::models::BitgetResponse;
 
-fn parse_response<T: DeserializeOwned>(data: &[u8]) -> anyhow::Result<BybitResponse<T>> {
-    let response = serde_json::from_slice::<BybitResponse<T>>(data)?;
+fn parse_response<T: DeserializeOwned>(data: &[u8]) -> anyhow::Result<BitgetResponse<T>> {
+    let response = serde_json::from_slice::<BitgetResponse<T>>(data)?;
     if response.ret_code != 0 {
         anyhow::bail!(
-            "Bybit API error {}: {}",
+            "Bitget API error {}: {}",
             response.ret_code,
             response.ret_msg
         );
@@ -37,99 +37,101 @@ fn parse_response<T: DeserializeOwned>(data: &[u8]) -> anyhow::Result<BybitRespo
     Ok(response)
 }
 
-/// Parses a Bybit server time response from raw JSON bytes.
+/// Parses a Bitget server time response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
-pub fn parse_server_time_response(data: &[u8]) -> anyhow::Result<BybitServerTimeResponse> {
+pub fn parse_server_time_response(data: &[u8]) -> anyhow::Result<BitgetServerTimeResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit spot instruments response from raw JSON bytes.
+/// Parses a Bitget spot instruments response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
-pub fn parse_instruments_spot_response(data: &[u8]) -> anyhow::Result<BybitInstrumentSpotResponse> {
+pub fn parse_instruments_spot_response(
+    data: &[u8],
+) -> anyhow::Result<BitgetInstrumentSpotResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit linear instruments response from raw JSON bytes.
+/// Parses a Bitget linear instruments response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
 pub fn parse_instruments_linear_response(
     data: &[u8],
-) -> anyhow::Result<BybitInstrumentLinearResponse> {
+) -> anyhow::Result<BitgetInstrumentLinearResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit inverse instruments response from raw JSON bytes.
+/// Parses a Bitget inverse instruments response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
 pub fn parse_instruments_inverse_response(
     data: &[u8],
-) -> anyhow::Result<BybitInstrumentInverseResponse> {
+) -> anyhow::Result<BitgetInstrumentInverseResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit option instruments response from raw JSON bytes.
+/// Parses a Bitget option instruments response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
 pub fn parse_instruments_option_response(
     data: &[u8],
-) -> anyhow::Result<BybitInstrumentOptionResponse> {
+) -> anyhow::Result<BitgetInstrumentOptionResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit spot tickers response from raw JSON bytes.
+/// Parses a Bitget spot tickers response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
-pub fn parse_tickers_spot_response(data: &[u8]) -> anyhow::Result<BybitTickersSpotResponse> {
+pub fn parse_tickers_spot_response(data: &[u8]) -> anyhow::Result<BitgetTickersSpotResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit linear tickers response from raw JSON bytes.
+/// Parses a Bitget linear tickers response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
-pub fn parse_tickers_linear_response(data: &[u8]) -> anyhow::Result<BybitTickersLinearResponse> {
+pub fn parse_tickers_linear_response(data: &[u8]) -> anyhow::Result<BitgetTickersLinearResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit option tickers response from raw JSON bytes.
+/// Parses a Bitget option tickers response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
-pub fn parse_tickers_option_response(data: &[u8]) -> anyhow::Result<BybitTickersOptionResponse> {
+pub fn parse_tickers_option_response(data: &[u8]) -> anyhow::Result<BitgetTickersOptionResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit klines response from raw JSON bytes.
+/// Parses a Bitget klines response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
-pub fn parse_klines_response(data: &[u8]) -> anyhow::Result<BybitKlinesResponse> {
+pub fn parse_klines_response(data: &[u8]) -> anyhow::Result<BitgetKlinesResponse> {
     parse_response(data)
 }
 
-/// Parses a Bybit trades response from raw JSON bytes.
+/// Parses a Bitget trades response from raw JSON bytes.
 ///
 /// # Errors
 ///
 /// Returns an error if deserialization or validation fails.
-pub fn parse_trades_response(data: &[u8]) -> anyhow::Result<BybitTradesResponse> {
+pub fn parse_trades_response(data: &[u8]) -> anyhow::Result<BitgetTradesResponse> {
     parse_response(data)
 }
 
@@ -174,14 +176,14 @@ mod tests {
     }
 
     #[rstest]
-    fn test_parse_instruments_option_response() {
-        let json = load_test_json("http_get_instruments_option.json");
+    fn test_parse_response_rejects_error_envelope() {
+        let json = load_test_json("http_get_fee_rate_not_found.json");
         let result = parse_instruments_option_response(json.as_bytes());
-        assert!(result.is_ok());
 
-        let response = result.unwrap();
-        assert_eq!(response.ret_code, 0);
-        assert!(!response.result.list.is_empty());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Bitget API error 40404: Request URL NOT FOUND"
+        );
     }
 
     #[rstest]

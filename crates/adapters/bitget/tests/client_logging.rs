@@ -15,9 +15,9 @@
 
 use std::time::Duration;
 
-use nautilus_bybit::{
-    common::enums::{BybitEnvironment, BybitProductType},
-    websocket::{client::BybitWebSocketClient, error::BybitWsError},
+use nautilus_bitget::{
+    common::enums::{BitgetEnvironment, BitgetProductType},
+    websocket::{client::BitgetWebSocketClient, error::BitgetWsError},
 };
 use nautilus_network::websocket::TransportBackend;
 use rstest::rstest;
@@ -31,12 +31,12 @@ use client_logging::{REQUEST_TARGET, capture_logs, messages, start_server};
 #[case(TransportBackend::Tungstenite)]
 #[case(TransportBackend::Sockudo)]
 #[tokio::test]
-async fn test_bybit_connection_logging(#[case] backend: TransportBackend) {
+async fn test_bitget_connection_logging(#[case] backend: TransportBackend) {
     let _capture = capture_logs().await;
     let server = start_server(1, None).await;
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Testnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Testnet,
         Some(server.url.clone()),
         30,
         backend,
@@ -71,9 +71,9 @@ async fn test_bybit_connection_logging(#[case] backend: TransportBackend) {
 async fn test_connection_error_retains_origin_and_status() {
     let _capture = capture_logs().await;
     let server = start_server(1, Some(401)).await;
-    let mut client = BybitWebSocketClient::new_public_with(
-        BybitProductType::Linear,
-        BybitEnvironment::Testnet,
+    let mut client = BitgetWebSocketClient::new_public_with(
+        BitgetProductType::Linear,
+        BitgetEnvironment::Testnet,
         Some(server.url.clone()),
         30,
         TransportBackend::Tungstenite,
@@ -84,7 +84,7 @@ async fn test_connection_error_retains_origin_and_status() {
         .unwrap()
         .unwrap_err();
 
-    let BybitWsError::Transport(message) = error else {
+    let BitgetWsError::Transport(message) = error else {
         panic!("expected transport rejection")
     };
 

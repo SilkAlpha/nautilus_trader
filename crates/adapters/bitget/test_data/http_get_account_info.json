@@ -1,14 +1,66 @@
 {
-  "retCode": 0,
-  "retMsg": "OK",
-  "result": {
-    "marginMode": "REGULAR_MARGIN",
-    "updatedTime": "1697078946000",
-    "unifiedMarginStatus": 4,
-    "dcpStatus": "OFF",
-    "timeWindow": 10,
-    "smpGroup": 0,
-    "isMasterTrader": false,
-    "spotHedgingStatus": "OFF"
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794193082020,
+  "data": {
+    "uid": "21967229145",
+    "accountMode": "hybrid",
+    "assetMode": "multi_assets",
+    "holdMode": "one_way_mode",
+    "stpMode": "none",
+    "accountLevel": "basic",
+    "deltaSwitch": "no",
+    "repayMode": "auto",
+    "symbolConfigList": [
+      {
+        "category": "USDT-FUTURES",
+        "symbol": "TSLAUSDT",
+        "marginMode": "crossed",
+        "leverage": "5",
+        "longLeverage": null,
+        "shortLeverage": null
+      },
+      {
+        "category": "USDT-FUTURES",
+        "symbol": "AMZNUSDT",
+        "marginMode": "crossed",
+        "leverage": "5",
+        "longLeverage": null,
+        "shortLeverage": null
+      },
+      {
+        "category": "USDT-FUTURES",
+        "symbol": "COINUSDT",
+        "marginMode": "crossed",
+        "leverage": "5",
+        "longLeverage": null,
+        "shortLeverage": null
+      },
+      {
+        "category": "USDT-FUTURES",
+        "symbol": "AAPLUSDT",
+        "marginMode": "crossed",
+        "leverage": "5",
+        "longLeverage": null,
+        "shortLeverage": null
+      },
+      {
+        "category": "USDT-FUTURES",
+        "symbol": "NVDAUSDT",
+        "marginMode": "crossed",
+        "leverage": "5",
+        "longLeverage": null,
+        "shortLeverage": null
+      },
+      {
+        "category": "USDT-FUTURES",
+        "symbol": "MSTRUSDT",
+        "marginMode": "crossed",
+        "leverage": "5",
+        "longLeverage": null,
+        "shortLeverage": null
+      }
+    ],
+    "coinConfigList": []
   }
 }

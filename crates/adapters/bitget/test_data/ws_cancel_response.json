@@ -1,0 +1,23 @@
+{
+  "event": "trade",
+  "id": "ctdcaprace193155",
+  "topic": "cancel-order",
+  "args": [
+    {
+      "orderId": "1503520558966792192",
+      "clientOid": "tdcaprace193155"
+    }
+  ],
+  "code": "0",
+  "msg": "Success",
+  "ts": "1794193155997",
+  "connId": "0a07e9fffe0c7f4f-000055f0-001d54d0-c2a02a3ec454f0cb-9549eb0d",
+  "rateLimit": [
+    {
+      "limit": "20",
+      "remaining": "19"
+    }
+  ],
+  "receiveTime": "1794193155994615",
+  "pushTime": "1794193155997106"
+}

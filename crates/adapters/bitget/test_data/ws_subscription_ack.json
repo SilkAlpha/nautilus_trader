@@ -1,7 +1,9 @@
 {
-  "success": true,
-  "ret_msg": "",
-  "conn_id": "cejreaspqfm9se7usbrg-2xh",
-  "req_id": "sub-orderbook-1",
-  "op": "subscribe"
+  "event": "subscribe",
+  "arg": {
+    "instType": "usdt-futures",
+    "topic": "books5",
+    "symbol": "BTCUSDT"
+  },
+  "connId": "0aa7eefffe582cd1-00004966-00c18c83-2ceed3a4cbf67452-ad107b60"
 }

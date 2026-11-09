@@ -1,11 +1,11 @@
 [package]
-name = "nautilus-bybit"
+name = "nautilus-bitget"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Bybit exchange integration adapter for the Nautilus trading engine"
+description = "Bitget exchange integration adapter for the Nautilus trading engine"
 categories.workspace = true
 keywords.workspace = true
 documentation.workspace = true
@@ -16,7 +16,7 @@ homepage.workspace = true
 workspace = true
 
 [lib]
-name = "nautilus_bybit"
+name = "nautilus_bitget"
 crate-type = ["rlib"]
 
 [features]
@@ -75,6 +75,7 @@ arc-swap = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
+base64 = { workspace = true }
 bon = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
@@ -117,7 +118,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 toml = { workspace = true }
 
-# Run with `cargo bench -p nautilus-bybit --bench websocket`
+# Run with `cargo bench -p nautilus-bitget --bench websocket`
 [[bench]]
 name = "websocket"
 harness = false
@@ -126,66 +127,66 @@ harness = false
 name = "market_data"
 harness = false
 
-# Run with `cargo run -p nautilus-bybit --bin bybit-http`.
+# Run with `cargo run -p nautilus-bitget --bin bitget-http`.
 [[bin]]
-name = "bybit-http"
+name = "bitget-http"
 path = "bin/http.rs"
 doc = false
 test = false
 
-# Run with `cargo run -p nautilus-bybit --bin bybit-ws-data`.
+# Run with `cargo run -p nautilus-bitget --bin bitget-ws-data`.
 [[bin]]
-name = "bybit-ws-data"
+name = "bitget-ws-data"
 path = "bin/ws_data.rs"
 doc = false
 test = false
 
-# Run with `cargo run -p nautilus-bybit --bin bybit-flatten`.
+# Run with `cargo run -p nautilus-bitget --bin bitget-flatten`.
 [[bin]]
-name = "bybit-flatten"
+name = "bitget-flatten"
 path = "bin/flatten.rs"
 doc = false
 test = false
 
-# Run with `cargo run --example bybit-data-tester --package nautilus-bybit --features examples`.
+# Run with `cargo run --example bitget-data-tester --package nautilus-bitget --features examples`.
 [[example]]
-name = "bybit-data-tester"
+name = "bitget-data-tester"
 path = "examples/node_data_tester.rs"
 required-features = ["examples"]
 doc = false
 
-# Run with `cargo run --example bybit-exec-tester --package nautilus-bybit --features examples`.
+# Run with `cargo run --example bitget-exec-tester --package nautilus-bitget --features examples`.
 [[example]]
-name = "bybit-exec-tester"
+name = "bitget-exec-tester"
 path = "examples/node_exec_tester.rs"
 required-features = ["examples"]
 doc = false
 
-# Run with `cargo run --example bybit-greeks-tester --package nautilus-bybit --features examples`.
+# Run with `cargo run --example bitget-greeks-tester --package nautilus-bitget --features examples`.
 [[example]]
-name = "bybit-greeks-tester"
+name = "bitget-greeks-tester"
 path = "examples/node_greeks.rs"
 required-features = ["examples"]
 doc = false
 
-# Run with `cargo run --example bybit-option-chain --package nautilus-bybit --features examples`.
+# Run with `cargo run --example bitget-option-chain --package nautilus-bitget --features examples`.
 [[example]]
-name = "bybit-option-chain"
+name = "bitget-option-chain"
 path = "examples/node_option_chain.rs"
 required-features = ["examples"]
 doc = false
 
-# Run with `cargo run --example bybit-delta-neutral --package nautilus-bybit --features examples`.
+# Run with `cargo run --example bitget-delta-neutral --package nautilus-bitget --features examples`.
 [[example]]
-name = "bybit-delta-neutral"
+name = "bitget-delta-neutral"
 path = "examples/node_delta_neutral.rs"
 required-features = ["examples"]
 doc = false
 
-# Public market-data validation; explicitly connects to Bybit mainnet.
-# Run with `cargo test --package nautilus-bybit --features examples --test bybit-book-stress -- --timeout 10 --rounds 21`
+# Public market-data validation; explicitly connects to Bitget mainnet.
+# Run with `cargo test --package nautilus-bitget --features examples --test bitget-book-stress -- --timeout 10 --rounds 21`
 [[test]]
-name = "bybit-book-stress"
+name = "bitget-book-stress"
 path = "tests/stress/book_stress.rs"
 harness = false
 test = false

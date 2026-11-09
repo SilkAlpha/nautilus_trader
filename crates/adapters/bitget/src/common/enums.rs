@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Enumerations that model Bybit string/int enums across HTTP and WebSocket payloads.
+//! Enumerations that model Bitget string/int enums across HTTP and WebSocket payloads.
 
 use std::fmt::Display;
 
@@ -23,23 +23,23 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::{AsRefStr, EnumIter, EnumString};
 
-/// Unified margin account status values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize_repr, Deserialize_repr)]
-#[repr(i32)]
-pub enum BybitUnifiedMarginStatus {
-    /// Classic account.
-    ClassicAccount = 1,
-    /// Unified trading account 1.0.
-    UnifiedTradingAccount10 = 3,
-    /// Unified trading account 1.0 pro.
-    UnifiedTradingAccount10Pro = 4,
-    /// Unified trading account 2.0.
-    UnifiedTradingAccount20 = 5,
-    /// Unified trading account 2.0 pro.
-    UnifiedTradingAccount20Pro = 6,
+/// Unified account mode values (`accountMode` of `GET /api/v3/account/settings`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BitgetUnifiedMarginStatus {
+    /// Unified trading account.
+    Unified,
+    /// Hybrid (classic + unified) account.
+    Hybrid,
+    /// Account upgrade to unified in progress.
+    Upgrading,
+    /// Account mode switch in progress.
+    Switching,
+    #[serde(other)]
+    Other,
 }
 
-/// Margin mode used by Bybit when switching risk profiles.
+/// Account level used by Bitget when switching risk profiles (`POST /api/v3/account/adjust-account-mode`).
 #[derive(
     Clone,
     Copy,
@@ -54,7 +54,6 @@ pub enum BybitUnifiedMarginStatus {
     Serialize,
     Deserialize,
 )]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[cfg_attr(
     feature = "python",
@@ -62,21 +61,24 @@ pub enum BybitUnifiedMarginStatus {
         eq,
         eq_int,
         rename_all = "SCREAMING_SNAKE_CASE",
-        module = "nautilus_trader.adapters.bybit",
+        module = "nautilus_trader.adapters.bitget",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitMarginMode {
+pub enum BitgetMarginMode {
+    #[serde(rename = "isolated")]
     IsolatedMargin,
+    #[serde(rename = "basic")]
     RegularMargin,
+    #[serde(rename = "advanced")]
     PortfolioMargin,
 }
 
-/// Position mode as returned by the v5 API.
+/// Position (hold) mode as used by `holdMode` in the v3 API.
 #[derive(
     Clone,
     Copy,
@@ -88,10 +90,9 @@ pub enum BybitMarginMode {
     AsRefStr,
     EnumIter,
     EnumString,
-    Serialize_repr,
-    Deserialize_repr,
+    Serialize,
+    Deserialize,
 )]
-#[repr(i32)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[cfg_attr(
     feature = "python",
@@ -99,19 +100,21 @@ pub enum BybitMarginMode {
         eq,
         eq_int,
         rename_all = "SCREAMING_SNAKE_CASE",
-        module = "nautilus_trader.adapters.bybit",
+        module = "nautilus_trader.adapters.bitget",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitPositionMode {
-    /// Merged single position mode.
-    MergedSingle = 0,
+pub enum BitgetPositionMode {
+    /// One-way (merged single) position mode.
+    #[serde(rename = "one_way_mode")]
+    MergedSingle,
     /// Dual-side hedged position mode.
-    BothSides = 3,
+    #[serde(rename = "hedge_mode")]
+    BothSides,
 }
 
 /// Position index values used for hedge mode payloads.
@@ -119,6 +122,7 @@ pub enum BybitPositionMode {
     Clone,
     Copy,
     Debug,
+    Default,
     strum::Display,
     Eq,
     PartialEq,
@@ -137,16 +141,17 @@ pub enum BybitPositionMode {
         eq,
         eq_int,
         rename_all = "SCREAMING_SNAKE_CASE",
-        module = "nautilus_trader.adapters.bybit",
+        module = "nautilus_trader.adapters.bitget",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitPositionIdx {
+pub enum BitgetPositionIdx {
     /// One-way mode position identifier.
+    #[default]
     OneWay = 0,
     /// Buy side of a hedge-mode position.
     BuyHedge = 1,
@@ -154,7 +159,19 @@ pub enum BybitPositionIdx {
     SellHedge = 2,
 }
 
-/// Account type enumeration.
+impl BitgetPositionIdx {
+    /// Returns the Bitget `posSide` for this index (`None` in one-way mode, where it is not sent).
+    #[must_use]
+    pub const fn as_pos_side(self) -> Option<BitgetPositionSide> {
+        match self {
+            Self::OneWay => None,
+            Self::BuyHedge => Some(BitgetPositionSide::Buy),
+            Self::SellHedge => Some(BitgetPositionSide::Sell),
+        }
+    }
+}
+
+/// Account type enumeration (Bitget UTA has a single unified wallet; kept for API parity).
 #[derive(
     Copy,
     Clone,
@@ -176,30 +193,30 @@ pub enum BybitPositionIdx {
         eq,
         eq_int,
         rename_all = "SCREAMING_SNAKE_CASE",
-        module = "nautilus_trader.adapters.bybit",
+        module = "nautilus_trader.adapters.bitget",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitAccountType {
+pub enum BitgetAccountType {
     Unified,
     Fund,
 }
 
-/// API key authentication type returned by `/v5/user/list-sub-apikeys`.
+/// API key authentication type of a Bitget API key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
-pub enum BybitApiKeyType {
+pub enum BitgetApiKeyType {
     /// HMAC-SHA256 signed keys (the default).
     Hmac = 1,
     /// RSA-signed keys.
     Rsa = 2,
 }
 
-/// Environments supported by the Bybit API stack.
+/// Environments supported by the Bitget API stack.
 #[derive(
     Copy,
     Clone,
@@ -221,24 +238,24 @@ pub enum BybitApiKeyType {
         eq,
         eq_int,
         rename_all = "SCREAMING_SNAKE_CASE",
-        module = "nautilus_trader.adapters.bybit",
+        module = "nautilus_trader.adapters.bitget",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitEnvironment {
+pub enum BitgetEnvironment {
     /// Live trading environment.
     Mainnet,
     /// Demo (paper trading) environment.
     Demo,
-    /// Testnet environment for spot/derivatives.
+    /// Bitget has no testnet; resolves to the demo (paper trading) environment.
     Testnet,
 }
 
-/// Product categories supported by the v5 API.
+/// Product categories supported by the v3 API (`category` / `instType`).
 #[derive(
     Copy,
     Clone,
@@ -261,25 +278,30 @@ pub enum BybitEnvironment {
         eq,
         eq_int,
         rename_all = "SCREAMING_SNAKE_CASE",
-        module = "nautilus_trader.adapters.bybit",
+        module = "nautilus_trader.adapters.bitget",
         from_py_object
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitProductType {
+pub enum BitgetProductType {
     #[default]
+    #[serde(rename = "SPOT", alias = "spot")]
     Spot,
+    #[serde(rename = "USDT-FUTURES", alias = "usdt-futures", alias = "linear")]
     Linear,
+    #[serde(rename = "COIN-FUTURES", alias = "coin-futures", alias = "inverse")]
     Inverse,
+    /// Bitget lists no options; kept for API parity and rejected by every request.
+    #[serde(rename = "OPTION", alias = "option")]
     Option,
 }
 
-/// Spot margin trading enablement states.
+/// Spot margin trading enablement states (no Bitget instrument field; kept for API parity).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitMarginTrading {
+pub enum BitgetMarginTrading {
     #[serde(rename = "none")]
     None,
     #[serde(rename = "utaOnly")]
@@ -292,9 +314,9 @@ pub enum BybitMarginTrading {
     Other,
 }
 
-/// Innovation market flag for spot instruments.
+/// Innovation market flag for spot instruments (no Bitget instrument field; kept for API parity).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitInnovationFlag {
+pub enum BitgetInnovationFlag {
     #[serde(rename = "0")]
     Standard,
     #[serde(rename = "1")]
@@ -303,21 +325,39 @@ pub enum BybitInnovationFlag {
     Other,
 }
 
-/// Instrument lifecycle status values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum BybitInstrumentStatus {
+/// Instrument lifecycle status values (`status` of `/api/v3/market/instruments`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum BitgetInstrumentStatus {
+    /// Listed, not yet open.
+    #[serde(rename = "listed")]
     PreLaunch,
+    /// No Bitget value; kept for parity.
+    #[serde(rename = "PendingOpen")]
     PendingOpen,
+    #[serde(rename = "online")]
     Trading,
+    /// Opening positions restricted.
+    #[serde(rename = "limit_open")]
+    LimitOpen,
+    /// Closing positions restricted.
+    #[serde(rename = "limit_close")]
+    LimitClose,
+    /// API trading restricted.
+    #[serde(rename = "restrictedAPI")]
+    RestrictedApi,
+    /// No Bitget value (delivery is reported by `deliveryStatus`); kept for parity.
+    #[serde(rename = "Delivering")]
     Delivering,
+    /// Delisted or under maintenance.
+    #[serde(rename = "offline")]
     Closed,
     #[serde(other)]
+    #[default]
     Other,
 }
 
-impl BybitProductType {
-    /// Returns the canonical lowercase identifier used for REST/WS routes.
+impl BitgetProductType {
+    /// Returns the canonical lowercase identifier used for labels and logs.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -328,12 +368,13 @@ impl BybitProductType {
         }
     }
 
-    /// Returns the uppercase suffix used in instrument identifiers (e.g. `-LINEAR`).
+    /// Returns the uppercase suffix used in instrument identifiers (e.g. `-PERP`).
     #[must_use]
     pub const fn suffix(self) -> &'static str {
         match self {
             Self::Spot => "-SPOT",
-            Self::Linear => "-LINEAR",
+            // `-PERP` keeps the `<SYMBOL>-PERP.BITGET` ids the bitget_nt2 engine binds to
+            Self::Linear => "-PERP",
             Self::Inverse => "-INVERSE",
             Self::Option => "-OPTION",
         }
@@ -344,12 +385,48 @@ impl BybitProductType {
     pub fn from_suffix(symbol: &str) -> Option<Self> {
         if symbol.ends_with("-SPOT") {
             Some(Self::Spot)
-        } else if symbol.ends_with("-LINEAR") {
+        } else if symbol.ends_with("-PERP") {
             Some(Self::Linear)
         } else if symbol.ends_with("-INVERSE") {
             Some(Self::Inverse)
         } else if symbol.ends_with("-OPTION") {
             Some(Self::Option)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the REST `category` value (e.g. `USDT-FUTURES`).
+    #[must_use]
+    pub const fn as_category(self) -> &'static str {
+        match self {
+            Self::Spot => "SPOT",
+            Self::Linear => "USDT-FUTURES",
+            Self::Inverse => "COIN-FUTURES",
+            Self::Option => "OPTION",
+        }
+    }
+
+    /// Returns the lowercase WebSocket `instType` value (e.g. `usdt-futures`).
+    #[must_use]
+    pub const fn as_ws_inst_type(self) -> &'static str {
+        match self {
+            Self::Spot => "spot",
+            Self::Linear => "usdt-futures",
+            Self::Inverse => "coin-futures",
+            Self::Option => "option",
+        }
+    }
+
+    /// Parses a REST `category` or WebSocket `instType` value (case-insensitive).
+    #[must_use]
+    pub fn from_category(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("SPOT") {
+            Some(Self::Spot)
+        } else if value.eq_ignore_ascii_case("USDT-FUTURES") {
+            Some(Self::Linear)
+        } else if value.eq_ignore_ascii_case("COIN-FUTURES") {
+            Some(Self::Inverse)
         } else {
             None
         }
@@ -381,57 +458,71 @@ impl BybitProductType {
 }
 
 /// Contract type enumeration for linear and inverse derivatives.
+///
+/// Bitget has no `contractType` field; it is derived from `category` and `type`
+/// (`perpetual`/`delivery`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub enum BybitContractType {
+pub enum BitgetContractType {
     LinearPerpetual,
     LinearFutures,
     InversePerpetual,
     InverseFutures,
 }
 
-/// Option flavor values.
+/// Option flavor values (Bitget lists no options; kept for API parity).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub enum BybitOptionType {
+pub enum BitgetOptionType {
     Call,
     Put,
 }
 
-/// Symbol type values for spot/linear/inverse instrument info responses.
+/// Instrument type values (`instrumentType` of `/api/v3/market/instruments`).
 ///
 /// New values may be added by the venue; unknown strings fall back to `Other` so deserialization
-/// remains forward-compatible.
+/// remains forward-compatible. `Innovation`, `Adventure`, `Xstocks` and `Mstocks` have no Bitget
+/// value and are kept for API parity.
 ///
 /// # References
-/// - <https://bybit-exchange.github.io/docs/v5/enum#symboltype>
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+/// - <https://www.bitget.com/docs/uta/enum>
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum BybitSymbolType {
-    /// Innovation-zone derivatives.
+pub enum BitgetSymbolType {
+    /// No Bitget value.
     Innovation,
-    /// Adventure-zone spot pairs.
+    /// No Bitget value.
     Adventure,
-    /// Tokenized equities (spot xstocks).
+    /// No Bitget value (Bitget spot rTokens are flagged by `isReality`).
     Xstocks,
     /// Commodity instruments.
     Commodity,
     /// Tokenized stock derivatives.
     Stock,
     /// Foreign exchange instruments.
+    #[serde(rename = "fx")]
     Forex,
     /// Exchange-traded fund derivatives.
-    #[serde(rename = "ETF")]
+    #[serde(rename = "etf")]
     Etf,
-    /// Tokenized equities (spot mstocks).
+    /// No Bitget value.
     Mstocks,
+    /// Crypto instruments.
+    Crypto,
+    /// Precious metal instruments.
+    Metal,
+    /// Energy instruments.
+    Energy,
+    /// Index instruments.
+    Index,
     /// Forward-compatible fallback for any value the venue adds later.
     #[serde(other)]
+    #[default]
     Other,
 }
 
-impl BybitSymbolType {
-    /// Returns the exact recognized value used by Bybit, or `None` for an unknown value.
+impl BitgetSymbolType {
+    /// Returns the exact recognized value used by Bitget, or `None` for an unknown value.
     #[must_use]
     pub(crate) const fn as_str(self) -> Option<&'static str> {
         match self {
@@ -440,74 +531,82 @@ impl BybitSymbolType {
             Self::Xstocks => Some("xstocks"),
             Self::Commodity => Some("commodity"),
             Self::Stock => Some("stock"),
-            Self::Forex => Some("forex"),
-            Self::Etf => Some("ETF"),
+            Self::Forex => Some("fx"),
+            Self::Etf => Some("etf"),
             Self::Mstocks => Some("mstocks"),
+            Self::Crypto => Some("crypto"),
+            Self::Metal => Some("metal"),
+            Self::Energy => Some("energy"),
+            Self::Index => Some("index"),
             Self::Other => None,
         }
     }
 }
 
-/// Position side as represented in REST/WebSocket payloads.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitPositionSide {
+/// Position side as represented in REST/WebSocket payloads (`posSide` / `holdSide`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum BitgetPositionSide {
     #[serde(rename = "")]
+    #[default]
     Flat,
-    #[serde(rename = "Buy")]
+    #[serde(rename = "long")]
     Buy,
-    #[serde(rename = "Sell")]
+    #[serde(rename = "short")]
     Sell,
 }
 
-/// WebSocket order request operations.
+/// WebSocket trade request topics (`op:"trade"`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitWsOrderRequestOp {
-    #[serde(rename = "order.create")]
+pub enum BitgetWsOrderRequestOp {
+    #[serde(rename = "place-order")]
     Create,
-    #[serde(rename = "order.amend")]
+    #[serde(rename = "modify-order")]
     Amend,
-    #[serde(rename = "order.cancel")]
+    #[serde(rename = "cancel-order")]
     Cancel,
-    #[serde(rename = "order.create-batch")]
+    #[serde(rename = "batch-place")]
     CreateBatch,
-    #[serde(rename = "order.amend-batch")]
+    #[serde(rename = "batch-modify")]
     AmendBatch,
-    #[serde(rename = "order.cancel-batch")]
+    #[serde(rename = "batch-cancel")]
     CancelBatch,
 }
 
 /// Available kline intervals.
+///
+/// Bitget v3 documents `1m,3m,5m,15m,30m,1H,4H,6H,12H,1D`; `2H`, `1W` and `1M` are kept for
+/// API parity and are rejected by the venue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitKlineInterval {
-    #[serde(rename = "1")]
+pub enum BitgetKlineInterval {
+    #[serde(rename = "1m")]
     Minute1,
-    #[serde(rename = "3")]
+    #[serde(rename = "3m")]
     Minute3,
-    #[serde(rename = "5")]
+    #[serde(rename = "5m")]
     Minute5,
-    #[serde(rename = "15")]
+    #[serde(rename = "15m")]
     Minute15,
-    #[serde(rename = "30")]
+    #[serde(rename = "30m")]
     Minute30,
-    #[serde(rename = "60")]
+    #[serde(rename = "1H")]
     Hour1,
-    #[serde(rename = "120")]
+    #[serde(rename = "2H")]
     Hour2,
-    #[serde(rename = "240")]
+    #[serde(rename = "4H")]
     Hour4,
-    #[serde(rename = "360")]
+    #[serde(rename = "6H")]
     Hour6,
-    #[serde(rename = "720")]
+    #[serde(rename = "12H")]
     Hour12,
-    #[serde(rename = "D")]
+    #[serde(rename = "1D")]
     Day1,
-    #[serde(rename = "W")]
+    #[serde(rename = "1W")]
     Week1,
-    #[serde(rename = "M")]
+    #[serde(rename = "1M")]
     Month1,
 }
 
-impl BybitKlineInterval {
+impl BitgetKlineInterval {
     /// Returns the end time in milliseconds for a bar that starts at `start_ms`.
     ///
     /// For most intervals this is simply `start_ms + duration`. For monthly bars,
@@ -557,112 +656,120 @@ impl BybitKlineInterval {
     }
 }
 
-impl Display for BybitKlineInterval {
+impl Display for BitgetKlineInterval {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Self::Minute1 => "1",
-            Self::Minute3 => "3",
-            Self::Minute5 => "5",
-            Self::Minute15 => "15",
-            Self::Minute30 => "30",
-            Self::Hour1 => "60",
-            Self::Hour2 => "120",
-            Self::Hour4 => "240",
-            Self::Hour6 => "360",
-            Self::Hour12 => "720",
-            Self::Day1 => "D",
-            Self::Week1 => "W",
-            Self::Month1 => "M",
+            Self::Minute1 => "1m",
+            Self::Minute3 => "3m",
+            Self::Minute5 => "5m",
+            Self::Minute15 => "15m",
+            Self::Minute30 => "30m",
+            Self::Hour1 => "1H",
+            Self::Hour2 => "2H",
+            Self::Hour4 => "4H",
+            Self::Hour6 => "6H",
+            Self::Hour12 => "12H",
+            Self::Day1 => "1D",
+            Self::Week1 => "1W",
+            Self::Month1 => "1M",
         };
         write!(f, "{s}")
     }
 }
 
-/// Order status values returned by Bybit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+/// Order status values returned by Bitget.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitOrderStatus {
-    #[serde(rename = "Created")]
+pub enum BitgetOrderStatus {
+    /// Order created (REST `live`).
+    #[serde(rename = "live")]
+    #[default]
     Created,
-    #[serde(rename = "New")]
+    #[serde(rename = "new")]
     New,
-    #[serde(rename = "Rejected")]
+    /// Strategy (conditional) order failed to trigger or place.
+    #[serde(rename = "failed")]
     Rejected,
-    #[serde(rename = "PartiallyFilled")]
+    #[serde(rename = "partially_filled")]
     PartiallyFilled,
+    /// No Bitget value: a partially filled cancel arrives as `cancelled` with `cumExecQty > 0`.
     #[serde(rename = "PartiallyFilledCanceled")]
     PartiallyFilledCanceled,
-    #[serde(rename = "Filled")]
+    #[serde(rename = "filled")]
     Filled,
-    #[serde(rename = "Cancelled")]
+    #[serde(rename = "cancelled", alias = "canceled")]
     Canceled,
-    #[serde(rename = "Untriggered")]
+    /// Strategy (conditional) order waiting for its trigger.
+    #[serde(rename = "pending", alias = "submitting")]
     Untriggered,
-    #[serde(rename = "Triggered")]
+    /// Strategy (conditional) order triggered.
+    #[serde(rename = "success")]
     Triggered,
+    /// No Bitget value; kept for parity.
     #[serde(rename = "Deactivated")]
     Deactivated,
 }
 
 /// Order side enumeration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitOrderSide {
+pub enum BitgetOrderSide {
     #[serde(rename = "")]
+    #[default]
     Unknown,
-    #[serde(rename = "Buy")]
+    #[serde(rename = "buy")]
     Buy,
-    #[serde(rename = "Sell")]
+    #[serde(rename = "sell")]
     Sell,
 }
 
-impl From<BybitOrderSide> for AggressorSide {
-    fn from(value: BybitOrderSide) -> Self {
+impl From<BitgetOrderSide> for AggressorSide {
+    fn from(value: BitgetOrderSide) -> Self {
         match value {
-            BybitOrderSide::Buy => Self::Buy,
-            BybitOrderSide::Sell => Self::Sell,
-            BybitOrderSide::Unknown => Self::NoAggressor,
+            BitgetOrderSide::Buy => Self::Buy,
+            BitgetOrderSide::Sell => Self::Sell,
+            BitgetOrderSide::Unknown => Self::NoAggressor,
         }
     }
 }
 
-impl From<BybitOrderSide> for Option<OrderSide> {
-    fn from(value: BybitOrderSide) -> Self {
+impl From<BitgetOrderSide> for Option<OrderSide> {
+    fn from(value: BitgetOrderSide) -> Self {
         match value {
-            BybitOrderSide::Buy => Some(OrderSide::Buy),
-            BybitOrderSide::Sell => Some(OrderSide::Sell),
-            BybitOrderSide::Unknown => None,
+            BitgetOrderSide::Buy => Some(OrderSide::Buy),
+            BitgetOrderSide::Sell => Some(OrderSide::Sell),
+            BitgetOrderSide::Unknown => None,
         }
     }
 }
 
-impl TryFrom<BybitOrderSide> for OrderSide {
+impl TryFrom<BitgetOrderSide> for OrderSide {
     type Error = anyhow::Error;
 
-    fn try_from(value: BybitOrderSide) -> Result<Self, Self::Error> {
+    fn try_from(value: BitgetOrderSide) -> Result<Self, Self::Error> {
         match value {
-            BybitOrderSide::Buy => Ok(Self::Buy),
-            BybitOrderSide::Sell => Ok(Self::Sell),
-            BybitOrderSide::Unknown => anyhow::bail!("Unspecified Bybit order side"),
+            BitgetOrderSide::Buy => Ok(Self::Buy),
+            BitgetOrderSide::Sell => Ok(Self::Sell),
+            BitgetOrderSide::Unknown => anyhow::bail!("Unspecified Bitget order side"),
         }
     }
 }
 
-impl From<OrderSide> for BybitOrderSide {
+impl From<OrderSide> for BitgetOrderSide {
     fn from(value: OrderSide) -> Self {
         match value {
             OrderSide::Buy => Self::Buy,
@@ -671,18 +778,18 @@ impl From<OrderSide> for BybitOrderSide {
     }
 }
 
-impl From<BybitTriggerType> for TriggerType {
-    fn from(value: BybitTriggerType) -> Self {
+impl From<BitgetTriggerType> for TriggerType {
+    fn from(value: BitgetTriggerType) -> Self {
         match value {
-            BybitTriggerType::None => Self::Default,
-            BybitTriggerType::LastPrice => Self::LastPrice,
-            BybitTriggerType::IndexPrice => Self::IndexPrice,
-            BybitTriggerType::MarkPrice => Self::MarkPrice,
+            BitgetTriggerType::None => Self::Default,
+            BitgetTriggerType::LastPrice => Self::LastPrice,
+            BitgetTriggerType::IndexPrice => Self::IndexPrice,
+            BitgetTriggerType::MarkPrice => Self::MarkPrice,
         }
     }
 }
 
-impl From<TriggerType> for BybitTriggerType {
+impl From<TriggerType> for BitgetTriggerType {
     fn from(value: TriggerType) -> Self {
         match value {
             TriggerType::Default | TriggerType::LastPrice => Self::LastPrice,
@@ -693,28 +800,60 @@ impl From<TriggerType> for BybitTriggerType {
     }
 }
 
-/// Resolves an optional Nautilus trigger type to a Bybit trigger type,
+/// Resolves an optional Nautilus trigger type to a Bitget trigger type,
 /// defaulting to `LastPrice` when absent.
-pub fn resolve_trigger_type(trigger_type: Option<TriggerType>) -> BybitTriggerType {
-    trigger_type.map_or(BybitTriggerType::LastPrice, BybitTriggerType::from)
+pub fn resolve_trigger_type(trigger_type: Option<TriggerType>) -> BitgetTriggerType {
+    trigger_type.map_or(BitgetTriggerType::LastPrice, BitgetTriggerType::from)
 }
 
-/// Order cancel reason values as returned by Bybit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+/// Order cancel reason values as returned by Bitget (`cancelReason`).
+///
+/// Variants without an explicit rename have no Bitget value and are kept for API parity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitCancelType {
+pub enum BitgetCancelType {
+    #[serde(rename = "normal_cancel")]
     CancelByUser,
+    /// Post-only order would have taken liquidity.
+    #[serde(rename = "post_only_fill_cancel")]
+    CancelByPostOnly,
+    #[serde(rename = "ioc_not_full_cancel")]
+    CancelByIocNotFull,
+    #[serde(rename = "fok_not_full_cancel")]
+    CancelByFokNotFull,
+    #[serde(rename = "trade_too_many_times_cancel")]
+    CancelByTradeTooManyTimes,
+    #[serde(rename = "trade_count_too_small")]
+    CancelByTradeCountTooSmall,
+    #[serde(rename = "trade_max_deal_size_cancel")]
+    CancelByMaxDealSize,
+    #[serde(rename = "back_contract_cancel")]
+    CancelByBackContract,
+    #[serde(rename = "trader_order_cancel")]
+    CancelByTrader,
+    #[serde(rename = "slippage_cancel")]
+    CancelBySlippage,
+    #[serde(rename = "penetrate_cancel")]
+    CancelByPenetrate,
+    #[serde(rename = "call_auction_cancel")]
+    CancelByCallAuction,
+    #[serde(rename = "limit_price_exceed_cancel")]
+    CancelByLimitPriceExceed,
+    #[serde(rename = "cancel_receiveWindow")]
+    CancelByReceiveWindow,
     CancelByReduceOnly,
     CancelByPrepareLiq,
+    #[serde(rename = "burst_cancel")]
     CancelAllBeforeLiq,
+    #[serde(rename = "adl_cancel")]
     CancelByPrepareAdl,
     CancelAllBeforeAdl,
     CancelByPrepareLackOfMargin,
@@ -723,6 +862,7 @@ pub enum BybitCancelType {
     CancelByPrepareOrderCommission,
     CancelByPrepareOrderRms,
     CancelByPrepareOrderOther,
+    #[serde(rename = "delegated_risk_order_cancel")]
     CancelByRiskLimit,
     CancelOnDisconnect,
     CancelByStopOrdersExceeded,
@@ -731,9 +871,12 @@ pub enum BybitCancelType {
     CancelByPzTakeover,
     CancelByAdmin,
     CancelBySettle,
+    #[serde(rename = "tpsl_plan_cancel")]
     CancelByTpSlTsClear,
+    #[serde(rename = "modify_limit_order")]
     CancelByAmendNotModified,
     CancelByPzCancel,
+    #[serde(rename = "self_trade_cancel", alias = "stp_cancel")]
     CancelBySmp,
     #[serde(rename = "CancelByDCP")]
     CancelByDcp,
@@ -745,6 +888,7 @@ pub enum BybitCancelType {
     CancelByCannotAffordOrderCost,
     CancelByPmTrialMmOverEquity,
     CancelByAccountBlocking,
+    #[serde(rename = "delivery_order_cancel")]
     CancelByDelivery,
     CancelByMmpTriggered,
     CancelByCrossSelfMuch,
@@ -752,13 +896,14 @@ pub enum BybitCancelType {
     CancelByCrossSelfMatch,
     CancelBySelfMatchPrevention,
     #[serde(other)]
+    #[default]
     Other,
 }
 
-/// Order creation origin values.
+/// Order creation origin values (no Bitget field; `delegateType` is the closest; kept for API parity).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub enum BybitCreateType {
+pub enum BitgetCreateType {
     CreateByUser,
     CreateByFutureSpread,
     CreateByAdminClosing,
@@ -805,45 +950,50 @@ pub enum BybitCreateType {
     Other,
 }
 
-/// BBO side type values for Bybit order placement.
+/// BBO side type values for Bitget order placement (`bboLevel` prefix: `queue`/`counterparty`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum BybitBboSideType {
+#[serde(rename_all = "lowercase")]
+pub enum BitgetBboSideType {
     Queue,
     Counterparty,
 }
 
 /// Venue order type enumeration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitOrderType {
-    #[serde(rename = "Market")]
+pub enum BitgetOrderType {
+    #[serde(rename = "market")]
     Market,
-    #[serde(rename = "Limit")]
+    #[serde(rename = "limit")]
     Limit,
     #[serde(rename = "UNKNOWN")]
+    #[default]
     Unknown,
 }
 
-/// Stop order type classification.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+/// Stop (strategy) order type classification (`type` of the strategy-order endpoints).
+///
+/// `TakeProfit`, `StopLoss` and the partial variants are all carried by Bitget `tpsl`
+/// orders; variants without a lowercase value have no Bitget value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitStopOrderType {
+pub enum BitgetStopOrderType {
     #[serde(rename = "")]
+    #[default]
     None,
     #[serde(rename = "UNKNOWN")]
     Unknown,
@@ -851,17 +1001,17 @@ pub enum BybitStopOrderType {
     TakeProfit,
     #[serde(rename = "StopLoss")]
     StopLoss,
-    #[serde(rename = "TrailingStop")]
+    #[serde(rename = "trailing_stop")]
     TrailingStop,
-    #[serde(rename = "Stop")]
+    #[serde(rename = "trigger")]
     Stop,
     #[serde(rename = "PartialTakeProfit")]
     PartialTakeProfit,
     #[serde(rename = "PartialStopLoss")]
     PartialStopLoss,
-    #[serde(rename = "tpslOrder")]
+    #[serde(rename = "tpsl")]
     TpslOrder,
-    #[serde(rename = "OcoOrder")]
+    #[serde(rename = "oco")]
     OcoOrder,
     #[serde(rename = "MmRateClose")]
     MmRateClose,
@@ -870,98 +1020,107 @@ pub enum BybitStopOrderType {
 }
 
 /// Trigger type configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitTriggerType {
+pub enum BitgetTriggerType {
     #[serde(rename = "")]
+    #[default]
     None,
-    #[serde(rename = "LastPrice")]
+    #[serde(rename = "market")]
     LastPrice,
-    #[serde(rename = "IndexPrice")]
+    /// Bitget triggers only on `market` or `mark`; rejected by the venue.
+    #[serde(rename = "index")]
     IndexPrice,
-    #[serde(rename = "MarkPrice")]
+    #[serde(rename = "mark")]
     MarkPrice,
 }
 
-/// Trigger direction integers used by the API.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize_repr, Deserialize_repr)]
+/// Trigger direction (Bitget infers it from the trigger price; never sent, kept for API parity).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(i32)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitTriggerDirection {
+pub enum BitgetTriggerDirection {
+    #[default]
     None = 0,
     RisesTo = 1,
     FallsTo = 2,
 }
 
 /// Take-profit/stop-loss mode for derivatives orders.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitTpSlMode {
+pub enum BitgetTpSlMode {
     Full,
     Partial,
     #[serde(other)]
+    #[default]
     Unknown,
 }
 
 /// Time-in-force enumeration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitTimeInForce {
-    #[serde(rename = "GTC")]
+pub enum BitgetTimeInForce {
+    #[serde(rename = "gtc")]
+    #[default]
     Gtc,
-    #[serde(rename = "IOC")]
+    #[serde(rename = "ioc")]
     Ioc,
-    #[serde(rename = "FOK")]
+    #[serde(rename = "fok")]
     Fok,
-    #[serde(rename = "PostOnly")]
+    #[serde(rename = "post_only")]
     PostOnly,
-    #[serde(rename = "RPI")]
+    #[serde(rename = "rpi")]
     Rpi,
 }
 
 /// Execution type values used in execution reports.
 ///
-/// Reference: <https://bybit-exchange.github.io/docs/v5/enum#exectype>.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitExecType {
-    #[serde(rename = "Trade")]
+/// Bitget reports `execType` on orders (`normal`, `offset`, `reduce`, `liquidation`,
+/// `delivery`) and encodes venue-generated fills in `tradeSide` (see [`Self::from_trade_side`]).
+/// Variants without a lowercase value have no Bitget value and are kept for API parity.
+///
+/// Reference: <https://www.bitget.com/docs/uta/enum>.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum BitgetExecType {
+    #[serde(rename = "normal", alias = "offset", alias = "reduce")]
     Trade,
-    #[serde(rename = "AdlTrade")]
+    #[serde(rename = "adl")]
     AdlTrade,
     #[serde(rename = "Funding")]
     Funding,
-    #[serde(rename = "BustTrade")]
+    #[serde(rename = "liquidation")]
     BustTrade,
-    #[serde(rename = "Delivery")]
+    #[serde(rename = "delivery")]
     Delivery,
     #[serde(rename = "Settle")]
     Settle,
@@ -984,10 +1143,30 @@ pub enum BybitExecType {
     Dividend,
     #[serde(other)]
     #[serde(rename = "UNKNOWN")]
+    #[default]
     Unknown,
 }
 
-impl BybitExecType {
+impl BitgetExecType {
+    /// Derives the execution type from a Bitget `tradeSide` value.
+    ///
+    /// Liquidation (`burst_*`), auto-deleveraging (`dte_sys_adl_*`), delivery (`delivery_*`) and
+    /// corporate-action rebases (`dte_rebase_*`) are venue generated; everything else is a trade.
+    #[must_use]
+    pub fn from_trade_side(trade_side: &str) -> Self {
+        if trade_side.starts_with("burst_") {
+            Self::BustTrade
+        } else if trade_side.starts_with("dte_sys_adl_") {
+            Self::AdlTrade
+        } else if trade_side.starts_with("delivery_") {
+            Self::Delivery
+        } else if trade_side.starts_with("dte_rebase_") {
+            Self::CorporateAction
+        } else {
+            Self::Trade
+        }
+    }
+
     /// Returns `true` if this execution was generated by the venue rather than the user.
     ///
     /// This covers auto-deleveraging (`AdlTrade`), liquidation takeovers (`BustTrade`),
@@ -1009,16 +1188,29 @@ impl BybitExecType {
     }
 }
 
-/// Transaction types for wallet funding records.
+/// Transaction types for wallet funding records (`type` of `/api/v3/account/financial-records`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitTransactionType {
+pub enum BitgetTransactionType {
     #[serde(rename = "TRANSFER_IN")]
     TransferIn,
     #[serde(rename = "TRANSFER_OUT")]
     TransferOut,
-    #[serde(rename = "TRADE")]
+    #[serde(
+        rename = "TRADE",
+        alias = "OPEN_LONG",
+        alias = "OPEN_SHORT",
+        alias = "CLOSE_LONG",
+        alias = "CLOSE_SHORT",
+        alias = "BUY_DEAL",
+        alias = "SELL_DEAL"
+    )]
     Trade,
-    #[serde(rename = "SETTLEMENT")]
+    /// Funding settlement.
+    #[serde(
+        rename = "SETTLEMENT",
+        alias = "CONTRACT_MAIN_SETTLE_FEE_USER_IN",
+        alias = "CONTRACT_MAIN_SETTLE_FEE_USER_OUT"
+    )]
     Settlement,
     #[serde(rename = "DELIVERY")]
     Delivery,
@@ -1038,10 +1230,10 @@ pub enum BybitTransactionType {
     Other,
 }
 
-/// Endpoint classifications used by the Bybit API.
+/// Endpoint classifications used by the Bitget API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum BybitEndpointType {
+pub enum BitgetEndpointType {
     None,
     Asset,
     Market,
@@ -1053,18 +1245,19 @@ pub enum BybitEndpointType {
 
 /// Filter for open orders query.
 ///
-/// Used with `GET /v5/order/realtime` to filter order status.
+/// Selects `GET /api/v3/trade/unfilled-orders` (open) or `GET /api/v3/trade/history-orders`
+/// (recent closed); never sent to the venue.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(i32)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitOpenOnly {
+pub enum BitgetOpenOnly {
     /// Query open status orders only (New, PartiallyFilled).
     #[default]
     OpenOnly = 0,
@@ -1074,17 +1267,18 @@ pub enum BybitOpenOnly {
 
 /// Order filter for querying specific order types.
 ///
-/// Used with `GET /v5/order/realtime` to filter by order category.
+/// `Order` selects the plain order endpoints, every other value the strategy-order endpoints
+/// (`unfilled-strategy-orders` / `history-strategy-orders`); never sent to the venue.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.adapters.bybit", eq, eq_int, from_py_object)
+    pyo3::pyclass(module = "nautilus_trader.adapters.bitget", eq, eq_int, from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitOrderFilter {
+pub enum BitgetOrderFilter {
     /// Active orders (default).
     #[default]
     Order,
@@ -1124,15 +1318,15 @@ pub enum BybitOrderFilter {
         hash,
         frozen,
         rename_all = "SCREAMING_SNAKE_CASE",
-        module = "nautilus_trader.adapters.bybit",
+        module = "nautilus_trader.adapters.bitget",
         from_py_object,
     )
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bybit")
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.bitget")
 )]
-pub enum BybitMarginAction {
+pub enum BitgetMarginAction {
     /// Borrow funds for margin trading.
     Borrow,
     /// Repay borrowed funds.
@@ -1141,9 +1335,9 @@ pub enum BybitMarginAction {
     GetBorrowAmount,
 }
 
-/// Result status returned by Bybit repayment endpoints.
+/// Result status of repayment requests (Bitget returns no status; kept for API parity).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, strum::Display, Serialize, Deserialize)]
-pub enum BybitRepayStatus {
+pub enum BitgetRepayStatus {
     /// The repayment is processing.
     #[serde(rename = "P")]
     #[strum(serialize = "P")]
@@ -1158,11 +1352,17 @@ pub enum BybitRepayStatus {
     Failed,
 }
 
-/// Position status enumeration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+/// Position status enumeration (`positionStatus`; variants without a lowercase value have no
+/// Bitget value).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub enum BybitPositionStatus {
+pub enum BitgetPositionStatus {
+    #[serde(rename = "normal", alias = "opening")]
+    #[default]
     Normal,
+    /// Position closed (WebSocket `position` topic).
+    #[serde(rename = "ended")]
+    Ended,
     Liq,
     Adl,
     Settle,
@@ -1171,9 +1371,9 @@ pub enum BybitPositionStatus {
     Other,
 }
 
-/// Market unit for spot market orders.
+/// Market unit for spot market orders (Bitget market buys are always quote-sized; never sent).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitMarketUnit {
+pub enum BitgetMarketUnit {
     #[serde(rename = "baseCoin")]
     BaseCoin,
     #[serde(rename = "quoteCoin")]
@@ -1182,10 +1382,12 @@ pub enum BybitMarketUnit {
 
 /// Self-match prevention type reported on an order or execution.
 ///
-/// `Other` is a catch-all for values Bybit adds after this enum was written. Requests use
-/// [`BybitOrderSmpType`], which has no catch-all, so an unknown value cannot reach the venue.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum BybitSmpType {
+/// `Other` is a catch-all for values Bitget adds after this enum was written. Requests use
+/// [`BitgetOrderSmpType`], which has no catch-all, so an unknown value cannot reach the venue.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BitgetSmpType {
+    #[default]
     None,
     CancelMaker,
     CancelTaker,
@@ -1196,10 +1398,12 @@ pub enum BybitSmpType {
 
 /// Self-match prevention type accepted on an order request.
 ///
-/// Mirrors [`BybitSmpType`] without its inbound catch-all, so every value this type can hold is one
-/// Bybit accepts on an order.
+/// Mirrors [`BitgetSmpType`] without its inbound catch-all, so every value this type can hold is one
+/// Bitget accepts on an order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, AsRefStr, Serialize, Deserialize)]
-pub enum BybitOrderSmpType {
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum BitgetOrderSmpType {
     None,
     CancelMaker,
     CancelTaker,
@@ -1213,21 +1417,21 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case::minute1(BybitKlineInterval::Minute1, 60_000)]
-    #[case::minute3(BybitKlineInterval::Minute3, 180_000)]
-    #[case::minute5(BybitKlineInterval::Minute5, 300_000)]
-    #[case::minute15(BybitKlineInterval::Minute15, 900_000)]
-    #[case::minute30(BybitKlineInterval::Minute30, 1_800_000)]
-    #[case::hour1(BybitKlineInterval::Hour1, 3_600_000)]
-    #[case::hour2(BybitKlineInterval::Hour2, 7_200_000)]
-    #[case::hour4(BybitKlineInterval::Hour4, 14_400_000)]
-    #[case::hour6(BybitKlineInterval::Hour6, 21_600_000)]
-    #[case::hour12(BybitKlineInterval::Hour12, 43_200_000)]
-    #[case::day1(BybitKlineInterval::Day1, 86_400_000)]
-    #[case::week1(BybitKlineInterval::Week1, 604_800_000)]
-    #[case::month1(BybitKlineInterval::Month1, 2_678_400_000)]
+    #[case::minute1(BitgetKlineInterval::Minute1, 60_000)]
+    #[case::minute3(BitgetKlineInterval::Minute3, 180_000)]
+    #[case::minute5(BitgetKlineInterval::Minute5, 300_000)]
+    #[case::minute15(BitgetKlineInterval::Minute15, 900_000)]
+    #[case::minute30(BitgetKlineInterval::Minute30, 1_800_000)]
+    #[case::hour1(BitgetKlineInterval::Hour1, 3_600_000)]
+    #[case::hour2(BitgetKlineInterval::Hour2, 7_200_000)]
+    #[case::hour4(BitgetKlineInterval::Hour4, 14_400_000)]
+    #[case::hour6(BitgetKlineInterval::Hour6, 21_600_000)]
+    #[case::hour12(BitgetKlineInterval::Hour12, 43_200_000)]
+    #[case::day1(BitgetKlineInterval::Day1, 86_400_000)]
+    #[case::week1(BitgetKlineInterval::Week1, 604_800_000)]
+    #[case::month1(BitgetKlineInterval::Month1, 2_678_400_000)]
     fn test_kline_interval_duration_ms(
-        #[case] interval: BybitKlineInterval,
+        #[case] interval: BitgetKlineInterval,
         #[case] expected_ms: i64,
     ) {
         assert_eq!(interval.duration_ms(), expected_ms);
@@ -1235,7 +1439,7 @@ mod tests {
 
     #[rstest]
     fn test_bar_end_time_ms_non_monthly_adds_duration() {
-        let interval = BybitKlineInterval::Minute1;
+        let interval = BitgetKlineInterval::Minute1;
         let start_ms = 1704067200000i64;
         assert_eq!(interval.bar_end_time_ms(start_ms), start_ms + 60_000);
     }
@@ -1249,24 +1453,31 @@ mod tests {
         #[case] start_ms: i64,
         #[case] expected_end_ms: i64,
     ) {
-        let interval = BybitKlineInterval::Month1;
+        let interval = BitgetKlineInterval::Month1;
         assert_eq!(interval.bar_end_time_ms(start_ms), expected_end_ms);
     }
 
     #[rstest]
-    #[case(BybitSymbolType::Innovation, "innovation")]
-    #[case(BybitSymbolType::Adventure, "adventure")]
-    #[case(BybitSymbolType::Xstocks, "xstocks")]
-    #[case(BybitSymbolType::Commodity, "commodity")]
-    #[case(BybitSymbolType::Stock, "stock")]
-    #[case(BybitSymbolType::Forex, "forex")]
-    #[case(BybitSymbolType::Etf, "ETF")]
-    #[case(BybitSymbolType::Mstocks, "mstocks")]
-    fn test_symbol_type_round_trip(#[case] symbol_type: BybitSymbolType, #[case] wire_value: &str) {
+    #[case(BitgetSymbolType::Innovation, "innovation")]
+    #[case(BitgetSymbolType::Adventure, "adventure")]
+    #[case(BitgetSymbolType::Xstocks, "xstocks")]
+    #[case(BitgetSymbolType::Commodity, "commodity")]
+    #[case(BitgetSymbolType::Stock, "stock")]
+    #[case(BitgetSymbolType::Forex, "fx")]
+    #[case(BitgetSymbolType::Etf, "etf")]
+    #[case(BitgetSymbolType::Mstocks, "mstocks")]
+    #[case(BitgetSymbolType::Crypto, "crypto")]
+    #[case(BitgetSymbolType::Metal, "metal")]
+    #[case(BitgetSymbolType::Energy, "energy")]
+    #[case(BitgetSymbolType::Index, "index")]
+    fn test_symbol_type_round_trip(
+        #[case] symbol_type: BitgetSymbolType,
+        #[case] wire_value: &str,
+    ) {
         let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitSymbolType>(value.clone()).unwrap(),
+            serde_json::from_value::<BitgetSymbolType>(value.clone()).unwrap(),
             symbol_type
         );
         assert_eq!(serde_json::to_value(symbol_type).unwrap(), value);
@@ -1275,51 +1486,51 @@ mod tests {
 
     #[rstest]
     fn test_unknown_symbol_type_has_no_wire_value() {
-        assert_eq!(BybitSymbolType::Other.as_str(), None);
+        assert_eq!(BitgetSymbolType::Other.as_str(), None);
     }
 
     #[rstest]
-    #[case(BybitExecType::Trade, false)]
-    #[case(BybitExecType::AdlTrade, true)]
-    #[case(BybitExecType::BustTrade, true)]
-    #[case(BybitExecType::Delivery, true)]
-    #[case(BybitExecType::Settle, true)]
-    #[case(BybitExecType::Funding, false)]
-    #[case(BybitExecType::BlockTrade, false)]
-    #[case(BybitExecType::MovePosition, false)]
-    #[case(BybitExecType::FutureSpread, false)]
-    #[case(BybitExecType::CorporateAction, true)]
-    #[case(BybitExecType::ForwardSplitSettle, true)]
-    #[case(BybitExecType::ReverseSplitSettle, true)]
-    #[case(BybitExecType::Dividend, true)]
-    #[case(BybitExecType::Unknown, false)]
+    #[case(BitgetExecType::Trade, false)]
+    #[case(BitgetExecType::AdlTrade, true)]
+    #[case(BitgetExecType::BustTrade, true)]
+    #[case(BitgetExecType::Delivery, true)]
+    #[case(BitgetExecType::Settle, true)]
+    #[case(BitgetExecType::Funding, false)]
+    #[case(BitgetExecType::BlockTrade, false)]
+    #[case(BitgetExecType::MovePosition, false)]
+    #[case(BitgetExecType::FutureSpread, false)]
+    #[case(BitgetExecType::CorporateAction, true)]
+    #[case(BitgetExecType::ForwardSplitSettle, true)]
+    #[case(BitgetExecType::ReverseSplitSettle, true)]
+    #[case(BitgetExecType::Dividend, true)]
+    #[case(BitgetExecType::Unknown, false)]
     fn test_exec_type_is_exchange_generated(
-        #[case] exec_type: BybitExecType,
+        #[case] exec_type: BitgetExecType,
         #[case] expected: bool,
     ) {
         assert_eq!(exec_type.is_exchange_generated(), expected);
     }
 
     #[rstest]
-    #[case(BybitExecType::Trade, "Trade")]
-    #[case(BybitExecType::AdlTrade, "AdlTrade")]
-    #[case(BybitExecType::Funding, "Funding")]
-    #[case(BybitExecType::BustTrade, "BustTrade")]
-    #[case(BybitExecType::Delivery, "Delivery")]
-    #[case(BybitExecType::Settle, "Settle")]
-    #[case(BybitExecType::BlockTrade, "BlockTrade")]
-    #[case(BybitExecType::MovePosition, "MovePosition")]
-    #[case(BybitExecType::FutureSpread, "FutureSpread")]
-    #[case(BybitExecType::CorporateAction, "CorporateAction")]
-    #[case(BybitExecType::ForwardSplitSettle, "ForwardSplitSettle")]
-    #[case(BybitExecType::ReverseSplitSettle, "ReverseSplitSettle")]
-    #[case(BybitExecType::Dividend, "Dividend")]
-    #[case(BybitExecType::Unknown, "UNKNOWN")]
-    fn test_exec_type_round_trip(#[case] exec_type: BybitExecType, #[case] wire_value: &str) {
+    #[case(BitgetExecType::Trade, "normal")]
+    #[case(BitgetExecType::AdlTrade, "adl")]
+    #[case(BitgetExecType::Funding, "Funding")]
+    #[case(BitgetExecType::BustTrade, "liquidation")]
+    #[case(BitgetExecType::Delivery, "delivery")]
+    #[case(BitgetExecType::Settle, "Settle")]
+    #[case(BitgetExecType::BlockTrade, "BlockTrade")]
+    #[case(BitgetExecType::MovePosition, "MovePosition")]
+    #[case(BitgetExecType::FutureSpread, "FutureSpread")]
+    #[case(BitgetExecType::CorporateAction, "CorporateAction")]
+    #[case(BitgetExecType::ForwardSplitSettle, "ForwardSplitSettle")]
+    #[case(BitgetExecType::ReverseSplitSettle, "ReverseSplitSettle")]
+    #[case(BitgetExecType::Dividend, "Dividend")]
+    #[case(BitgetExecType::Unknown, "UNKNOWN")]
+    fn test_exec_type_round_trip(#[case] exec_type: BitgetExecType, #[case] wire_value: &str) {
         let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitExecType>(value.clone()).unwrap(),
+            serde_json::from_value::<BitgetExecType>(value.clone()).unwrap(),
             exec_type
         );
         assert_eq!(serde_json::to_value(exec_type).unwrap(), value);
@@ -1330,99 +1541,114 @@ mod tests {
         let value = serde_json::Value::String("StockMerger".to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitExecType>(value).unwrap(),
-            BybitExecType::Unknown
+            serde_json::from_value::<BitgetExecType>(value).unwrap(),
+            BitgetExecType::Unknown
         );
     }
 
     #[rstest]
-    #[case(BybitAccountType::Unified, "UNIFIED")]
-    #[case(BybitAccountType::Fund, "FUND")]
+    #[case("open", BitgetExecType::Trade)]
+    #[case("sell_single", BitgetExecType::Trade)]
+    #[case("burst_buy_single", BitgetExecType::BustTrade)]
+    #[case("dte_sys_adl_sell_in_single_side_mode", BitgetExecType::AdlTrade)]
+    #[case("delivery_close_long", BitgetExecType::Delivery)]
+    #[case("dte_rebase_buy_in_single_side_mode", BitgetExecType::CorporateAction)]
+    fn test_exec_type_from_trade_side(#[case] trade_side: &str, #[case] expected: BitgetExecType) {
+        assert_eq!(BitgetExecType::from_trade_side(trade_side), expected);
+    }
+
+    #[rstest]
+    #[case(BitgetAccountType::Unified, "UNIFIED")]
+    #[case(BitgetAccountType::Fund, "FUND")]
     fn test_account_type_round_trip(
-        #[case] account_type: BybitAccountType,
+        #[case] account_type: BitgetAccountType,
         #[case] wire_value: &str,
     ) {
         let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitAccountType>(value.clone()).unwrap(),
+            serde_json::from_value::<BitgetAccountType>(value.clone()).unwrap(),
             account_type
         );
         assert_eq!(serde_json::to_value(account_type).unwrap(), value);
     }
 
     #[rstest]
-    #[case(BybitTimeInForce::Gtc, "GTC")]
-    #[case(BybitTimeInForce::Ioc, "IOC")]
-    #[case(BybitTimeInForce::Fok, "FOK")]
-    #[case(BybitTimeInForce::PostOnly, "PostOnly")]
-    #[case(BybitTimeInForce::Rpi, "RPI")]
-    fn test_time_in_force_round_trip(#[case] tif: BybitTimeInForce, #[case] wire_value: &str) {
+    #[case(BitgetTimeInForce::Gtc, "gtc")]
+    #[case(BitgetTimeInForce::Ioc, "ioc")]
+    #[case(BitgetTimeInForce::Fok, "fok")]
+    #[case(BitgetTimeInForce::PostOnly, "post_only")]
+    #[case(BitgetTimeInForce::Rpi, "rpi")]
+    fn test_time_in_force_round_trip(#[case] tif: BitgetTimeInForce, #[case] wire_value: &str) {
         let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitTimeInForce>(value.clone()).unwrap(),
+            serde_json::from_value::<BitgetTimeInForce>(value.clone()).unwrap(),
             tif
         );
         assert_eq!(serde_json::to_value(tif).unwrap(), value);
     }
 
     #[rstest]
-    #[case("CreateByAdl_PassThrough", BybitCreateType::CreateByAdlPassThrough)]
-    #[case("CreateByLiq", BybitCreateType::CreateByLiq)]
+    #[case("CreateByAdl_PassThrough", BitgetCreateType::CreateByAdlPassThrough)]
+    #[case("CreateByLiq", BitgetCreateType::CreateByLiq)]
     #[case(
         "CreateByTakeOver_PassThrough",
-        BybitCreateType::CreateByTakeOverPassThrough
+        BitgetCreateType::CreateByTakeOverPassThrough
     )]
-    #[case("CreateByTWAP", BybitCreateType::CreateByTwap)]
-    #[case("CreateByFutureSpread", BybitCreateType::CreateByFutureSpread)]
+    #[case("CreateByTWAP", BitgetCreateType::CreateByTwap)]
+    #[case("CreateByFutureSpread", BitgetCreateType::CreateByFutureSpread)]
     fn test_create_type_venue_wire_values(
         #[case] wire_value: &str,
-        #[case] expected: BybitCreateType,
+        #[case] expected: BitgetCreateType,
     ) {
         let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitCreateType>(value.clone()).unwrap(),
+            serde_json::from_value::<BitgetCreateType>(value.clone()).unwrap(),
             expected
         );
         assert_eq!(serde_json::to_value(expected).unwrap(), value);
     }
 
     #[rstest]
-    #[case("CancelBySettle", BybitCancelType::CancelBySettle)]
-    #[case("CancelBySmp", BybitCancelType::CancelBySmp)]
-    #[case("CancelByDCP", BybitCancelType::CancelByDcp)]
-    #[case("CancelAllBeforeLiq", BybitCancelType::CancelAllBeforeLiq)]
-    #[case(
-        "CancelByOCOTpCanceledBySlTriggered",
-        BybitCancelType::CancelByOcoTpCanceledBySlTriggered
-    )]
+    #[case("normal_cancel", BitgetCancelType::CancelByUser)]
+    #[case("post_only_fill_cancel", BitgetCancelType::CancelByPostOnly)]
+    #[case("ioc_not_full_cancel", BitgetCancelType::CancelByIocNotFull)]
+    #[case("self_trade_cancel", BitgetCancelType::CancelBySmp)]
+    #[case("burst_cancel", BitgetCancelType::CancelAllBeforeLiq)]
+    #[case("cancel_receiveWindow", BitgetCancelType::CancelByReceiveWindow)]
     fn test_cancel_type_venue_wire_values(
         #[case] wire_value: &str,
-        #[case] expected: BybitCancelType,
+        #[case] expected: BitgetCancelType,
     ) {
         let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitCancelType>(value.clone()).unwrap(),
+            serde_json::from_value::<BitgetCancelType>(value.clone()).unwrap(),
             expected
         );
         assert_eq!(serde_json::to_value(expected).unwrap(), value);
     }
 
     #[rstest]
-    fn test_pending_open_instrument_status_round_trip() {
-        let value = serde_json::Value::String("PendingOpen".to_string());
+    #[case(BitgetInstrumentStatus::PreLaunch, "listed")]
+    #[case(BitgetInstrumentStatus::Trading, "online")]
+    #[case(BitgetInstrumentStatus::LimitOpen, "limit_open")]
+    #[case(BitgetInstrumentStatus::LimitClose, "limit_close")]
+    #[case(BitgetInstrumentStatus::RestrictedApi, "restrictedAPI")]
+    #[case(BitgetInstrumentStatus::Closed, "offline")]
+    fn test_instrument_status_round_trip(
+        #[case] status: BitgetInstrumentStatus,
+        #[case] wire_value: &str,
+    ) {
+        let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitInstrumentStatus>(value.clone()).unwrap(),
-            BybitInstrumentStatus::PendingOpen
+            serde_json::from_value::<BitgetInstrumentStatus>(value.clone()).unwrap(),
+            status
         );
-        assert_eq!(
-            serde_json::to_value(BybitInstrumentStatus::PendingOpen).unwrap(),
-            value
-        );
+        assert_eq!(serde_json::to_value(status).unwrap(), value);
     }
 
     #[rstest]
@@ -1430,28 +1656,83 @@ mod tests {
         let value = serde_json::Value::String("normalSpotOnly".to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitMarginTrading>(value.clone()).unwrap(),
-            BybitMarginTrading::NormalSpotOnly
+            serde_json::from_value::<BitgetMarginTrading>(value.clone()).unwrap(),
+            BitgetMarginTrading::NormalSpotOnly
         );
         assert_eq!(
-            serde_json::to_value(BybitMarginTrading::NormalSpotOnly).unwrap(),
+            serde_json::to_value(BitgetMarginTrading::NormalSpotOnly).unwrap(),
             value
         );
     }
 
     #[rstest]
-    #[case(BybitPositionStatus::Liq, "Liq")]
-    #[case(BybitPositionStatus::Adl, "Adl")]
-    fn test_position_status_liq_adl_round_trip(
-        #[case] status: BybitPositionStatus,
+    #[case(BitgetPositionStatus::Normal, "normal")]
+    #[case(BitgetPositionStatus::Ended, "ended")]
+    #[case(BitgetPositionStatus::Liq, "Liq")]
+    #[case(BitgetPositionStatus::Adl, "Adl")]
+    fn test_position_status_round_trip(
+        #[case] status: BitgetPositionStatus,
         #[case] wire_value: &str,
     ) {
         let value = serde_json::Value::String(wire_value.to_string());
 
         assert_eq!(
-            serde_json::from_value::<BybitPositionStatus>(value.clone()).unwrap(),
+            serde_json::from_value::<BitgetPositionStatus>(value.clone()).unwrap(),
             status
         );
         assert_eq!(serde_json::to_value(status).unwrap(), value);
+    }
+
+    #[rstest]
+    #[case(BitgetProductType::Spot, "SPOT", "spot")]
+    #[case(BitgetProductType::Linear, "USDT-FUTURES", "usdt-futures")]
+    #[case(BitgetProductType::Inverse, "COIN-FUTURES", "coin-futures")]
+    fn test_product_type_category_forms(
+        #[case] product_type: BitgetProductType,
+        #[case] category: &str,
+        #[case] inst_type: &str,
+    ) {
+        assert_eq!(product_type.as_category(), category);
+        assert_eq!(product_type.as_ws_inst_type(), inst_type);
+        assert_eq!(
+            BitgetProductType::from_category(category),
+            Some(product_type)
+        );
+        assert_eq!(
+            BitgetProductType::from_category(inst_type),
+            Some(product_type)
+        );
+        assert_eq!(
+            serde_json::from_value::<BitgetProductType>(serde_json::json!(inst_type)).unwrap(),
+            product_type
+        );
+        assert_eq!(serde_json::to_value(product_type).unwrap(), category);
+    }
+
+    #[rstest]
+    fn test_linear_suffix_is_perp() {
+        assert_eq!(BitgetProductType::Linear.suffix(), "-PERP");
+        assert_eq!(
+            BitgetProductType::from_suffix("TSLAUSDT-PERP"),
+            Some(BitgetProductType::Linear)
+        );
+        assert_eq!(BitgetProductType::from_suffix("TSLAUSDT"), None);
+    }
+
+    #[rstest]
+    #[case("live", BitgetOrderStatus::Created)]
+    #[case("new", BitgetOrderStatus::New)]
+    #[case("partially_filled", BitgetOrderStatus::PartiallyFilled)]
+    #[case("filled", BitgetOrderStatus::Filled)]
+    #[case("cancelled", BitgetOrderStatus::Canceled)]
+    #[case("pending", BitgetOrderStatus::Untriggered)]
+    fn test_order_status_wire_values(
+        #[case] wire_value: &str,
+        #[case] expected: BitgetOrderStatus,
+    ) {
+        assert_eq!(
+            serde_json::from_value::<BitgetOrderStatus>(serde_json::json!(wire_value)).unwrap(),
+            expected
+        );
     }
 }

@@ -1,21 +1,24 @@
 {
-  "topic": "allLiquidation.BTCUSDT",
-  "type": "snapshot",
-  "ts": 1739502303204,
+  "action": "update",
+  "arg": {
+    "instType": "usdt-futures",
+    "topic": "liquidation"
+  },
   "data": [
     {
-      "T": 1739502302929,
-      "s": "BTCUSDT",
-      "S": "Buy",
-      "v": "0.015",
-      "p": "96250.5"
+      "symbol": "KAITOUSDT",
+      "side": "sell",
+      "price": "0.2075",
+      "amount": "30.7515",
+      "ts": "1794192963576"
     },
     {
-      "T": 1739502303011,
-      "s": "BTCUSDT",
-      "S": "Sell",
-      "v": "1.250",
-      "p": "97410.0"
+      "symbol": "XRPUSDT",
+      "side": "buy",
+      "price": "1.110714428658",
+      "amount": "98.853584150562",
+      "ts": "1794192961705"
     }
-  ]
+  ],
+  "ts": 1794192963598
 }

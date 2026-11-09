@@ -1,42 +1,49 @@
 {
-  "retCode": 0,
-  "retMsg": "OK",
-  "result": {
-    "nextPageCursor": null,
-    "list": [
-      {
-        "symbol": "BTCUSD",
-        "contractType": "InversePerpetual",
-        "status": "Trading",
-        "baseCoin": "BTC",
-        "quoteCoin": "USD",
-        "launchTime": "1699980000000",
-        "deliveryTime": "1702582000000",
-        "deliveryFeeRate": "0.0005",
-        "priceScale": "1",
-        "leverageFilter": {
-          "minLeverage": "1",
-          "maxLeverage": "100",
-          "leverageStep": "1"
-        },
-        "priceFilter": {
-          "minPrice": "1",
-          "maxPrice": "1000000",
-          "tickSize": "0.5"
-        },
-        "lotSizeFilter": {
-          "maxOrderQty": "1000000",
-          "minOrderQty": "1",
-          "qtyStep": "1",
-          "postOnlyMaxOrderQty": "1000000",
-          "maxMktOrderQty": "500000"
-        },
-        "unifiedMarginTrade": true,
-        "fundingInterval": 8,
-        "settleCoin": "BTC"
-      }
-    ]
-  },
-  "retExtInfo": {},
-  "time": 1700000000000
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794192844668,
+  "data": [
+    {
+      "symbol": "BTCUSD_CM",
+      "category": "COIN-FUTURES",
+      "baseCoin": "BTC",
+      "quoteCoin": "USD",
+      "symbolType": "crypto",
+      "fullName": "Bitcoin",
+      "instrumentType": "crypto",
+      "marketRegion": null,
+      "isin": null,
+      "isRwa": "NO",
+      "buyLimitPriceRatio": "0.05",
+      "sellLimitPriceRatio": "0.05",
+      "feeRateUpRatio": "0.005",
+      "makerFeeRate": "0.0002",
+      "takerFeeRate": "0.0006",
+      "openCostUpRatio": "0.01",
+      "minOrderQty": "1",
+      "maxOrderQty": "12000000",
+      "pricePrecision": "1",
+      "quantityPrecision": "0",
+      "quotePrecision": "",
+      "priceMultiplier": "0.1",
+      "quantityMultiplier": "1",
+      "type": "perpetual",
+      "minOrderAmount": "5",
+      "maxSymbolOrderNum": "",
+      "maxProductOrderNum": "400",
+      "maxPositionNum": "200",
+      "status": "online",
+      "offTime": "-1",
+      "limitOpenTime": "-1",
+      "deliveryTime": "",
+      "deliveryStartTime": "",
+      "deliveryPeriod": "",
+      "launchTime": "1768997398543",
+      "fundInterval": "8",
+      "minLeverage": "1",
+      "maxLeverage": "125",
+      "maintainTime": "",
+      "maxMarketOrderQty": "2200000"
+    }
+  ]
 }

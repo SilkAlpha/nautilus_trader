@@ -13,18 +13,18 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Python bindings for Bybit margin data types.
+//! Python bindings for Bitget margin data types.
 
 use pyo3::prelude::*;
 
 use crate::common::types::{
-    BybitMarginBorrowResult, BybitMarginRepayResult, BybitMarginStatusResult,
+    BitgetMarginBorrowResult, BitgetMarginRepayResult, BitgetMarginStatusResult,
 };
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitMarginBorrowResult {
-    /// Result from a Bybit borrow operation for strategy consumption.
+impl BitgetMarginBorrowResult {
+    /// Result from a Bitget borrow operation for strategy consumption.
     #[new]
     #[must_use]
     pub fn py_new(
@@ -83,7 +83,7 @@ impl BybitMarginBorrowResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "BybitMarginBorrowResult(coin='{}', amount='{}', success={}, message='{}')",
+            "BitgetMarginBorrowResult(coin='{}', amount='{}', success={}, message='{}')",
             self.coin, self.amount, self.success, self.message
         )
     }
@@ -91,8 +91,8 @@ impl BybitMarginBorrowResult {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitMarginRepayResult {
-    /// Result from a Bybit repay operation for strategy consumption.
+impl BitgetMarginRepayResult {
+    /// Result from a Bitget repay operation for strategy consumption.
     #[new]
     #[pyo3(signature = (coin, amount, success, result_status, message, ts_event, ts_init))]
     #[must_use]
@@ -160,7 +160,7 @@ impl BybitMarginRepayResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "BybitMarginRepayResult(coin='{}', success={}, result_status='{}')",
+            "BitgetMarginRepayResult(coin='{}', success={}, result_status='{}')",
             self.coin, self.success, self.result_status
         )
     }
@@ -168,8 +168,8 @@ impl BybitMarginRepayResult {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitMarginStatusResult {
-    /// Result with current borrowed amount on Bybit.
+impl BitgetMarginStatusResult {
+    /// Result with current borrowed amount on Bitget.
     #[new]
     #[must_use]
     pub fn py_new(coin: String, borrow_amount: String, ts_event: u64, ts_init: u64) -> Self {
@@ -207,7 +207,7 @@ impl BybitMarginStatusResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "BybitMarginStatusResult(coin='{}', borrow_amount='{}')",
+            "BitgetMarginStatusResult(coin='{}', borrow_amount='{}')",
             self.coin, self.borrow_amount
         )
     }

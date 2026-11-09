@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Python bindings for the Bybit HTTP client.
+//! Python bindings for the Bitget HTTP client.
 
 use jiff::Timestamp;
 use nautilus_core::python::{to_pyruntime_err, to_pyvalue_err};
@@ -34,29 +34,29 @@ use ustr::Ustr;
 use crate::{
     common::{
         enums::{
-            BybitMarginMode, BybitOpenOnly, BybitOrderFilter, BybitPositionIdx, BybitPositionMode,
-            BybitProductType,
+            BitgetMarginMode, BitgetOpenOnly, BitgetOrderFilter, BitgetPositionIdx,
+            BitgetPositionMode, BitgetProductType,
         },
         parse::{parse_bbo_level, parse_bbo_side_type, parse_smp_type},
     },
     http::{
-        client::{BybitHttpClient, BybitRawHttpClient},
-        error::BybitHttpError,
-        models::BybitOrderCursorList,
-        query::BybitNativeTpSlParams as RustNativeTpSlParams,
+        client::{BitgetHttpClient, BitgetRawHttpClient},
+        error::BitgetHttpError,
+        models::BitgetOrderCursorList,
+        query::BitgetNativeTpSlParams as RustNativeTpSlParams,
     },
-    python::params::BybitNativeTpSlParams,
+    python::params::BitgetNativeTpSlParams,
 };
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitRawHttpClient {
-    /// Raw HTTP client for low-level Bybit API operations.
+impl BitgetRawHttpClient {
+    /// Raw HTTP client for low-level Bitget API operations.
     ///
-    /// This client handles request/response operations with the Bybit API,
+    /// This client handles request/response operations with the Bitget API,
     /// returning venue-specific response types. It does not parse to Nautilus domain types.
     #[new]
-    #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=60, max_retries=3, retry_delay_ms=1000, retry_delay_max_ms=10_000, recv_window_ms=5_000, proxy_url=None))]
+    #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=60, max_retries=3, retry_delay_ms=1000, retry_delay_max_ms=10_000, recv_window_ms=5_000, proxy_url=None, api_passphrase=None))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
         api_key: Option<String>,
@@ -70,10 +70,12 @@ impl BybitRawHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
+        api_passphrase: Option<String>,
     ) -> PyResult<Self> {
         Self::new_with_env(
             api_key,
             api_secret,
+            api_passphrase,
             base_url,
             demo,
             testnet,
@@ -116,7 +118,7 @@ impl BybitRawHttpClient {
         self.cancel_all_requests();
     }
 
-    /// Fetches the current server time from Bybit.
+    /// Fetches the current server time from Bitget.
     ///
     /// # Errors
     ///
@@ -124,7 +126,7 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/market/time>
+    /// - <https://www.bitget.com/docs/catalog/market/market-data>
     #[pyo3(name = "get_server_time")]
     fn py_get_server_time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -147,21 +149,21 @@ impl BybitRawHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/order/open-order>
+    /// - <https://www.bitget.com/docs/catalog/trading/order-management>
     #[pyo3(name = "get_open_orders")]
     #[pyo3(signature = (category, symbol=None, base_coin=None, settle_coin=None, order_id=None, order_link_id=None, open_only=None, order_filter=None, limit=None, cursor=None))]
     #[expect(clippy::too_many_arguments)]
     fn py_get_open_orders<'py>(
         &self,
         py: Python<'py>,
-        category: BybitProductType,
+        category: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<String>,
         settle_coin: Option<String>,
         order_id: Option<String>,
         order_link_id: Option<String>,
-        open_only: Option<BybitOpenOnly>,
-        order_filter: Option<BybitOrderFilter>,
+        open_only: Option<BitgetOpenOnly>,
+        order_filter: Option<BitgetOrderFilter>,
         limit: Option<u32>,
         cursor: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -185,7 +187,7 @@ impl BybitRawHttpClient {
                 .map_err(to_pyvalue_err)?;
 
             Python::attach(|py| {
-                let open_orders = BybitOrderCursorList::from(response.result);
+                let open_orders = BitgetOrderCursorList::from(response.result);
                 let py_open_orders = Py::new(py, open_orders)?;
                 Ok(py_open_orders.into_any())
             })
@@ -195,14 +197,14 @@ impl BybitRawHttpClient {
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl BybitHttpClient {
-    /// Provides a HTTP client for connecting to the [Bybit](https://bybit.com) REST API.
+impl BitgetHttpClient {
+    /// Provides a HTTP client for connecting to the [Bitget](https://bitget.com) REST API.
     /// High-level HTTP client that wraps the raw client and provides Nautilus domain types.
     ///
     /// This client maintains an instrument cache and uses it to parse venue responses
     /// into Nautilus domain objects.
     #[new]
-    #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=60, max_retries=3, retry_delay_ms=1000, retry_delay_max_ms=10_000, recv_window_ms=5_000, proxy_url=None))]
+    #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=60, max_retries=3, retry_delay_ms=1000, retry_delay_max_ms=10_000, recv_window_ms=5_000, proxy_url=None, api_passphrase=None))]
     #[expect(clippy::too_many_arguments)]
     fn py_new(
         api_key: Option<String>,
@@ -216,10 +218,12 @@ impl BybitHttpClient {
         retry_delay_max_ms: u64,
         recv_window_ms: u64,
         proxy_url: Option<String>,
+        api_passphrase: Option<String>,
     ) -> PyResult<Self> {
         Self::new_with_env(
             api_key,
             api_secret,
+            api_passphrase,
             base_url,
             demo,
             testnet,
@@ -283,12 +287,12 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/account/set-margin-mode>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     #[pyo3(name = "set_margin_mode")]
     fn py_set_margin_mode<'py>(
         &self,
         py: Python<'py>,
-        margin_mode: BybitMarginMode,
+        margin_mode: BitgetMarginMode,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
 
@@ -309,10 +313,6 @@ impl BybitHttpClient {
     /// Returns an error if:
     /// - The request fails.
     /// - The response cannot be parsed.
-    ///
-    /// # References
-    ///
-    /// - <https://bybit-exchange.github.io/docs/v5/user/apikey-info>
     #[pyo3(name = "get_account_details")]
     fn py_get_account_details<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -338,13 +338,13 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/leverage>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     #[pyo3(name = "set_leverage")]
     #[pyo3(signature = (product_type, symbol, buy_leverage, sell_leverage))]
     fn py_set_leverage<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: String,
         buy_leverage: String,
         sell_leverage: String,
@@ -372,14 +372,14 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// - <https://bybit-exchange.github.io/docs/v5/position/position-mode>
+    /// - <https://www.bitget.com/docs/catalog/account/account-settings>
     #[pyo3(name = "switch_mode")]
     #[pyo3(signature = (product_type, mode, symbol=None, coin=None))]
     fn py_switch_mode<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
-        mode: BybitPositionMode,
+        product_type: BitgetProductType,
+        mode: BitgetPositionMode,
         symbol: Option<String>,
         coin: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -538,7 +538,7 @@ impl BybitHttpClient {
     /// Request instruments for a given product type.
     ///
     /// When `base_coin` is provided, the request is narrowed to that base coin.
-    /// This is required for `Option`: Bybit's API returns only `BTC` options when
+    /// This is required for `Option`: Bitget's API returns only `BTC` options when
     /// `baseCoin` is omitted.
     ///
     /// # Errors
@@ -549,7 +549,7 @@ impl BybitHttpClient {
     fn py_request_instruments<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -586,7 +586,7 @@ impl BybitHttpClient {
     fn py_request_instrument_statuses<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
 
@@ -611,8 +611,8 @@ impl BybitHttpClient {
 
     /// Request ticker information for market data.
     ///
-    /// Fetches ticker data from Bybit's `/v5/market/tickers` endpoint and returns
-    /// a unified `BybitTickerData` structure compatible with all product types.
+    /// Fetches ticker data from Bitget's `/api/v3/market/tickers` endpoint and returns
+    /// a unified `BitgetTickerData` structure compatible with all product types.
     ///
     /// # Errors
     ///
@@ -620,12 +620,12 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/tickers>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     #[pyo3(name = "request_tickers")]
     fn py_request_tickers<'py>(
         &self,
         py: Python<'py>,
-        params: crate::python::params::BybitTickersParams,
+        params: crate::python::params::BitgetTickersParams,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
 
@@ -683,7 +683,7 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: ClientOrderId,
         order_side: OrderSide,
@@ -696,11 +696,11 @@ impl BybitHttpClient {
         reduce_only: bool,
         is_quote_quantity: bool,
         is_leverage: bool,
-        position_idx: Option<BybitPositionIdx>,
+        position_idx: Option<BitgetPositionIdx>,
         bbo_side_type: Option<String>,
         bbo_level: Option<String>,
         smp_type: Option<String>,
-        native_tp_sl: Option<BybitNativeTpSlParams>,
+        native_tp_sl: Option<BitgetNativeTpSlParams>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
         let bbo_side_type = bbo_side_type
@@ -782,7 +782,7 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
@@ -824,7 +824,7 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
@@ -860,7 +860,7 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -896,7 +896,7 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
@@ -923,12 +923,12 @@ impl BybitHttpClient {
 
     /// Request recent trade tick history for a given symbol.
     ///
-    /// Returns the most recent public trades from Bybit's `/v5/market/recent-trade` endpoint.
+    /// Returns the most recent public trades from Bitget's `/api/v3/market/fills` endpoint.
     /// This endpoint only provides recent trades (up to 1000 most recent), typically covering
     /// only the last few minutes for active markets.
     ///
     /// **Note**: For historical trade data with time ranges, use the klines endpoint instead.
-    /// The Bybit public API does not support fetching historical trades by time range.
+    /// The Bitget public API does not support fetching historical trades by time range.
     ///
     /// # Errors
     ///
@@ -939,13 +939,13 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/recent-trade>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     #[pyo3(name = "request_trades")]
     #[pyo3(signature = (product_type, instrument_id, limit=None))]
     fn py_request_trades<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         limit: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -979,13 +979,13 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/history-fund-rate>
+    /// <https://www.bitget.com/docs/catalog/market/derivatives>
     #[pyo3(name = "request_funding_rates")]
     #[pyo3(signature = (product_type, instrument_id, start=None, end=None, limit=None))]
     fn py_request_funding_rates<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         start: Option<Timestamp>,
         end: Option<Timestamp>,
@@ -1012,10 +1012,8 @@ impl BybitHttpClient {
 
     /// Request an orderbook snapshot for a given symbol.
     ///
-    /// Bybit limits the amount of levels (depth) for each product type to:
-    /// - Spot: `1..=200` (default: `1`)
-    /// - Linear & Inverse: `1..=500` (default: `25`)
-    /// - Options: `1..=25` (default: `1`)
+    /// Bitget limits the amount of levels (depth) to `1..=1000` (default: `5`) for every
+    /// product type.
     ///
     /// # Errors
     ///
@@ -1026,13 +1024,13 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/orderbook>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     #[pyo3(name = "request_orderbook_snapshot")]
     #[pyo3(signature = (product_type, instrument_id, limit=None))]
     fn py_request_orderbook_snapshot<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: InstrumentId,
         limit: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -1059,14 +1057,14 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/market/kline>
+    /// <https://www.bitget.com/docs/catalog/market/market-data>
     #[pyo3(name = "request_bars")]
     #[pyo3(signature = (product_type, bar_type, start=None, end=None, limit=None, timestamp_on_close=true))]
     #[expect(clippy::too_many_arguments)]
     fn py_request_bars<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         bar_type: BarType,
         start: Option<Timestamp>,
         end: Option<Timestamp>,
@@ -1107,13 +1105,13 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/account/fee-rate>
+    /// <https://www.bitget.com/docs/catalog/account/assets-balance>
     #[pyo3(name = "request_fee_rates")]
     #[pyo3(signature = (product_type, symbol=None, base_coin=None))]
     fn py_request_fee_rates<'py>(
         &self,
         py: Python<'py>,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         symbol: Option<String>,
         base_coin: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -1146,12 +1144,12 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/account/wallet-balance>
+    /// <https://www.bitget.com/docs/catalog/account/assets-balance>
     #[pyo3(name = "request_account_state")]
     fn py_request_account_state<'py>(
         &self,
         py: Python<'py>,
-        account_type: crate::common::enums::BybitAccountType,
+        account_type: crate::common::enums::BitgetAccountType,
         account_id: AccountId,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -1188,7 +1186,7 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: Option<InstrumentId>,
         open_only: bool,
         start: Option<Timestamp>,
@@ -1232,7 +1230,7 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/order/execution>
+    /// <https://www.bitget.com/docs/catalog/trading/order-management>
     #[pyo3(name = "request_fill_reports")]
     #[pyo3(signature = (account_id, product_type, instrument_id=None, start=None, end=None, limit=None))]
     #[expect(clippy::too_many_arguments)]
@@ -1240,7 +1238,7 @@ impl BybitHttpClient {
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: Option<InstrumentId>,
         start: Option<i64>,
         end: Option<i64>,
@@ -1284,14 +1282,14 @@ impl BybitHttpClient {
     ///
     /// # References
     ///
-    /// <https://bybit-exchange.github.io/docs/v5/position>
+    /// <https://www.bitget.com/docs/catalog/trading/position-management>
     #[pyo3(name = "request_position_status_reports")]
     #[pyo3(signature = (account_id, product_type, instrument_id=None))]
     fn py_request_position_status_reports<'py>(
         &self,
         py: Python<'py>,
         account_id: AccountId,
-        product_type: BybitProductType,
+        product_type: BitgetProductType,
         instrument_id: Option<InstrumentId>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
@@ -1314,28 +1312,28 @@ impl BybitHttpClient {
     }
 }
 
-impl From<BybitHttpError> for PyErr {
-    fn from(error: BybitHttpError) -> Self {
+impl From<BitgetHttpError> for PyErr {
+    fn from(error: BitgetHttpError) -> Self {
         match error {
             // Runtime/operational errors
-            BybitHttpError::Canceled(msg) => to_pyruntime_err(format!("Request canceled: {msg}")),
-            BybitHttpError::NetworkError(msg) => to_pyruntime_err(format!("Network error: {msg}")),
-            BybitHttpError::UnexpectedStatus { status, body } => {
+            BitgetHttpError::Canceled(msg) => to_pyruntime_err(format!("Request canceled: {msg}")),
+            BitgetHttpError::NetworkError(msg) => to_pyruntime_err(format!("Network error: {msg}")),
+            BitgetHttpError::UnexpectedStatus { status, body } => {
                 to_pyruntime_err(format!("Unexpected HTTP status code {status}: {body}"))
             }
             // Validation/configuration errors
-            BybitHttpError::MissingCredentials => {
+            BitgetHttpError::MissingCredentials => {
                 to_pyvalue_err("Missing credentials for authenticated request")
             }
-            BybitHttpError::ValidationError(msg) => {
+            BitgetHttpError::ValidationError(msg) => {
                 to_pyvalue_err(format!("Parameter validation error: {msg}"))
             }
-            BybitHttpError::JsonError(msg) => to_pyvalue_err(format!("JSON error: {msg}")),
-            BybitHttpError::BuildError(e) => to_pyvalue_err(format!("Build error: {e}")),
-            BybitHttpError::BybitError {
+            BitgetHttpError::JsonError(msg) => to_pyvalue_err(format!("JSON error: {msg}")),
+            BitgetHttpError::BuildError(e) => to_pyvalue_err(format!("Build error: {e}")),
+            BitgetHttpError::BitgetError {
                 error_code,
                 message,
-            } => to_pyvalue_err(format!("Bybit error {error_code}: {message}")),
+            } => to_pyvalue_err(format!("Bitget error {error_code}: {message}")),
         }
     }
 }

@@ -13,10 +13,10 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Subscription and recovery tasks for Bybit books.
+//! Subscription and recovery tasks for Bitget books.
 //!
 //! The tasks here write gated order book subscriptions, monitor snapshot deadlines, and supply
-//! Bybit replacement operations and error classification to the shared [`BookRecovery`] runner.
+//! Bitget replacement operations and error classification to the shared [`BookRecovery`] runner.
 //! The runner owns snapshot waits, backoff, the retry budget, and the retry ceiling that follows
 //! it. A successful send alone does not complete recovery: the tracker must accept a snapshot.
 //!
@@ -41,14 +41,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::sync::BookSyncTracker;
 use crate::{
-    common::enums::BybitProductType,
+    common::enums::BitgetProductType,
     websocket::{
-        client::BybitWebSocketClient,
-        error::{BybitWsError, should_retry_bybit_error},
+        client::BitgetWebSocketClient,
+        error::{BitgetWsError, should_retry_bitget_error},
     },
 };
 
-pub(crate) type BookRecovery = Recovery<BybitWsError>;
+pub(crate) type BookRecovery = Recovery<BitgetWsError>;
 
 /// Subscribes an order book delta book and recovers it when its initial snapshot is missing.
 ///
@@ -64,7 +64,7 @@ pub(crate) fn spawn_subscription_task(
     depth: u32,
     book_depths: Arc<AtomicMap<InstrumentId, u32>>,
     book_sync: BookSyncTracker,
-    ws_client: BybitWebSocketClient,
+    ws_client: BitgetWebSocketClient,
     snapshot_timeout: Duration,
     tasks: &TaskSpawner,
 ) {
@@ -95,7 +95,7 @@ pub(crate) fn spawn_subscription_task(
                 );
             }
             // The topic stays registered, so recovery writes the subscription again
-            Err(BybitWsError::Transport(e)) => {
+            Err(BitgetWsError::Transport(e)) => {
                 log::warn!(
                     "Initial book subscription write failed for {instrument_id}: {e}; \
                      requesting a fresh snapshot"
@@ -141,7 +141,7 @@ pub(crate) fn spawn_subscription_task(
         tracker.remove(instrument_id);
         depths.remove(&instrument_id);
         log::debug!(
-            "Skipping book subscription for {instrument_id} after Bybit shutdown began: {e}"
+            "Skipping book subscription for {instrument_id} after Bitget shutdown began: {e}"
         );
     }
 }
@@ -154,7 +154,7 @@ async fn release_subscription(
     cancel: &CancellationToken,
     book_depths: &AtomicMap<InstrumentId, u32>,
     book_sync: &BookSyncTracker,
-    ws_client: &BybitWebSocketClient,
+    ws_client: &BitgetWebSocketClient,
 ) {
     if !book_sync.remove_subscription(instrument_id, cancel) {
         return;
@@ -177,10 +177,10 @@ async fn release_subscription(
 /// A zero `snapshot_timeout` arms nothing, so reconnected books wait for the replayed
 /// subscriptions to deliver snapshots.
 pub(crate) fn reset_on_reconnect(
-    product_type: BybitProductType,
+    product_type: BitgetProductType,
     book_depths: &Arc<AtomicMap<InstrumentId, u32>>,
     book_sync: &BookSyncTracker,
-    ws_client: &BybitWebSocketClient,
+    ws_client: &BitgetWebSocketClient,
     snapshot_timeout: Duration,
     tasks: &TaskSpawner,
 ) {
@@ -206,8 +206,8 @@ pub(crate) fn reset_on_reconnect(
 fn spawn_recovery_monitor(
     book_depths: Arc<AtomicMap<InstrumentId, u32>>,
     book_sync: BookSyncTracker,
-    ws_client: BybitWebSocketClient,
-    product_type: BybitProductType,
+    ws_client: BitgetWebSocketClient,
+    product_type: BitgetProductType,
     snapshot_timeout: Duration,
     tasks: &TaskSpawner,
 ) {
@@ -237,7 +237,7 @@ fn spawn_recovery_monitor(
     };
 
     if let Err(e) = tasks.spawn(monitor) {
-        log::debug!("Skipping book recovery monitor after Bybit shutdown began: {e}");
+        log::debug!("Skipping book recovery monitor after Bitget shutdown began: {e}");
     }
 }
 
@@ -246,7 +246,7 @@ pub(crate) fn start_recovery(
     instrument_id: InstrumentId,
     book_depths: &AtomicMap<InstrumentId, u32>,
     book_sync: &BookSyncTracker,
-    ws_client: &BybitWebSocketClient,
+    ws_client: &BitgetWebSocketClient,
     snapshot_timeout: Duration,
     tasks: &TaskSpawner,
 ) {
@@ -272,7 +272,7 @@ fn spawn_recovery_task(
     instrument_id: InstrumentId,
     depth: u32,
     recovery: Arc<BookRecovery>,
-    ws_client: BybitWebSocketClient,
+    ws_client: BitgetWebSocketClient,
     snapshot_timeout: Duration,
     tasks: &TaskSpawner,
 ) {
@@ -291,9 +291,9 @@ fn spawn_recovery_task(
                 |attempt_cancel, gate| ws_client.resubscribe_book(
                     instrument_id, depth, attempt_cancel, gate,
                 ),
-                should_retry_bybit_error,
-                BybitWsError::ClientError,
-                || BybitWsError::ClientError(format!(
+                should_retry_bitget_error,
+                BitgetWsError::ClientError,
+                || BitgetWsError::ClientError(format!(
                     "Book snapshot timed out after {}ms",
                     snapshot_timeout.as_millis(),
                 )),
@@ -303,6 +303,6 @@ fn spawn_recovery_task(
 
     // A refused task drops the guard, which cancels the claimed episode
     if let Err(e) = tasks.spawn(task) {
-        log::debug!("Skipping book recovery for {instrument_id} after Bybit shutdown began: {e}");
+        log::debug!("Skipping book recovery for {instrument_id} after Bitget shutdown began: {e}");
     }
 }

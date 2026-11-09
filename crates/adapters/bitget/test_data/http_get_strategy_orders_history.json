@@ -1,0 +1,40 @@
+{
+  "code": "00000",
+  "msg": "success",
+  "requestTime": 1794193279538,
+  "data": {
+    "list": [
+      {
+        "orderId": "1503521064568303616",
+        "clientOid": "1503521064568303616",
+        "symbol": "TSLAUSDT",
+        "category": "USDT-FUTURES",
+        "qty": "0.02",
+        "posSide": "long",
+        "side": "buy",
+        "tpTriggerBy": null,
+        "slTriggerBy": null,
+        "takeProfit": "",
+        "stopLoss": "",
+        "tpOrderType": null,
+        "slOrderType": null,
+        "tpLimitPrice": "",
+        "slLimitPrice": "",
+        "createdTime": "1794193276540",
+        "updatedTime": "1794193277307",
+        "marginMode": "crossed",
+        "type": "trigger",
+        "status": "cancelled",
+        "triggerBy": "mark",
+        "triggerPrice": "396.89",
+        "triggerOrderType": "market",
+        "triggerOrderPrice": "",
+        "ocoParams": null,
+        "trailingStopParams": null,
+        "icebergParams": null,
+        "twapParams": null
+      }
+    ],
+    "cursor": 1503521067782803459
+  }
+}
