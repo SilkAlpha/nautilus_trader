@@ -4,7 +4,7 @@ pub use encoder::CancelOrderResponseEncoder;
 use super::*;
 pub use super::{SBE_SCHEMA_ID, SBE_SCHEMA_VERSION, SBE_SEMANTIC_VERSION};
 
-pub const SBE_BLOCK_LENGTH: u16 = 137;
+pub const SBE_BLOCK_LENGTH: u16 = 145;
 pub const SBE_TEMPLATE_ID: u16 = 305;
 
 pub mod encoder {
@@ -421,6 +421,21 @@ pub mod encoder {
             self.get_buf_mut().put_i64_at(offset, value);
         }
 
+        /// primitive field 'quoteNotionalLimit'
+        /// - min value: -9223372036854775807
+        /// - max value: 9223372036854775807
+        /// - null value: -9223372036854775808_i64
+        /// - characterEncoding: null
+        /// - semanticType: null
+        /// - encodedOffset: 137
+        /// - encodedLength: 8
+        /// - version: 6
+        #[inline]
+        pub fn quote_notional_limit(&mut self, value: i64) {
+            let offset = self.offset + 137;
+            self.get_buf_mut().put_i64_at(offset, value);
+        }
+
         /// VAR_DATA ENCODER - character encoding: 'UTF-8'
         #[inline]
         pub fn symbol(&mut self, value: &str) {
@@ -756,6 +771,21 @@ pub mod decoder {
             }
 
             let value = self.get_buf().get_i64_at(self.offset + 129);
+            if value == -9223372036854775808_i64 {
+                None
+            } else {
+                Some(value)
+            }
+        }
+
+        /// primitive field - 'OPTIONAL' { null_value: '-9223372036854775808_i64' }
+        #[inline]
+        pub fn quote_notional_limit(&self) -> Option<i64> {
+            if self.acting_version() < 6 {
+                return None;
+            }
+
+            let value = self.get_buf().get_i64_at(self.offset + 137);
             if value == -9223372036854775808_i64 {
                 None
             } else {

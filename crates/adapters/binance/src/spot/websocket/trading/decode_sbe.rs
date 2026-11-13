@@ -16,7 +16,7 @@
 //! SBE decoders for Binance Spot user data stream events.
 //!
 //! Decodes templates 601 (BalanceUpdateEvent), 603 (ExecutionReportEvent), and
-//! 607 (OutboundAccountPositionEvent) from schema 3:5 binary payloads into the
+//! 607 (OutboundAccountPositionEvent) from schema 3:6 binary payloads into the
 //! venue-level structs defined in [`super::user_data`].
 //! The existing JSON parse functions in [`super::parse`] then convert these to Nautilus types.
 
@@ -548,6 +548,10 @@ fn map_expiry_reason(reason: expiry_reason::ExpiryReason) -> Option<String> {
             Some("EXECUTION_RULE_PRICE_RANGE_EXCEEDED".to_string())
         }
         expiry_reason::ExpiryReason::NonRepresentable => Some("NON_REPRESENTABLE".to_string()),
+        expiry_reason::ExpiryReason::Exhausted => Some("EXHAUSTED".to_string()),
+        expiry_reason::ExpiryReason::InsufficientQuoteNotionalLimit => {
+            Some("INSUFFICIENT_QUOTE_NOTIONAL_LIMIT".to_string())
+        }
         expiry_reason::ExpiryReason::NullVal => None,
     }
 }
@@ -874,6 +878,11 @@ mod tests {
         expiry_reason::ExpiryReason::NonRepresentable,
         Some("NON_REPRESENTABLE")
     )]
+    #[case::exhausted(expiry_reason::ExpiryReason::Exhausted, Some("EXHAUSTED"))]
+    #[case::insufficient_quote_notional_limit(
+        expiry_reason::ExpiryReason::InsufficientQuoteNotionalLimit,
+        Some("INSUFFICIENT_QUOTE_NOTIONAL_LIMIT")
+    )]
     #[case::null_val(expiry_reason::ExpiryReason::NullVal, None)]
     fn test_map_expiry_reason(
         #[case] reason: expiry_reason::ExpiryReason,
@@ -1150,7 +1159,8 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "SBE execution report block length too short: expected at least {EXECUTION_REPORT_BLOCK_LENGTH_V3}, was {block_length}"
+                "SBE execution report block length too short: expected at least {}, was {block_length}",
+                execution_report_event_codec::SBE_BLOCK_LENGTH
             )
         );
     }

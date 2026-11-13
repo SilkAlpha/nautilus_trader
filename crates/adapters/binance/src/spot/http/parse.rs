@@ -98,10 +98,11 @@ impl MessageHeader {
     /// change and is still rejected.
     ///
     /// The decoders assume block layouts are stable within a schema ID.
-    /// `decode_exchange_info` verifies the symbol block length and fails loudly on a
-    /// mismatch; the market-data decoders read groups at a fixed offset, so a future
-    /// version that adds fixed-block fields to those messages would need them updated
-    /// to advance past the added bytes via `block_length`.
+    /// `decode_exchange_info` requires the symbol block to cover the fields it reads
+    /// and skips the flags appended in 3:6 via the wire block length; the market-data
+    /// decoders read groups at a fixed offset, so a future version that adds fixed-block
+    /// fields to those messages would need them updated to advance past the added bytes
+    /// via `block_length`.
     fn validate(&self) -> Result<(), SbeDecodeError> {
         if self.schema_id != SBE_SCHEMA_ID {
             return Err(SbeDecodeError::SchemaMismatch {
@@ -1128,7 +1129,7 @@ fn decode_fills_cursor(
     Ok(fills)
 }
 
-/// Symbols group block length (from SBE codec).
+/// Symbols group fields read, through `pegInstructionsAllowed`; 3:6 flags after them are skipped.
 const SYMBOL_BLOCK_LENGTH: usize = 19;
 
 /// Decode exchange info response.
@@ -1167,7 +1168,7 @@ pub fn decode_exchange_info(buf: &[u8]) -> Result<BinanceExchangeInfoSbe, SbeDec
     // Decode symbols group
     let (symbols_block_len, symbols_count) = cursor.read_group_header()?;
 
-    if symbols_block_len != SYMBOL_BLOCK_LENGTH as u16 {
+    if usize::from(symbols_block_len) < SYMBOL_BLOCK_LENGTH {
         return Err(SbeDecodeError::InvalidBlockLength {
             expected: SYMBOL_BLOCK_LENGTH as u16,
             actual: symbols_block_len,
@@ -1177,9 +1178,9 @@ pub fn decode_exchange_info(buf: &[u8]) -> Result<BinanceExchangeInfoSbe, SbeDec
     let mut symbols = Vec::with_capacity(symbols_count as usize);
 
     for _ in 0..symbols_count {
-        cursor.require(SYMBOL_BLOCK_LENGTH)?;
+        cursor.require(symbols_block_len as usize)?;
 
-        // Fixed fields (19 bytes)
+        // Fixed fields (19 bytes read, remainder of the block skipped)
         let status = cursor.read_u8()?;
         let base_asset_precision = cursor.read_u8()?;
         let quote_asset_precision = cursor.read_u8()?;
@@ -1198,6 +1199,7 @@ pub fn decode_exchange_info(buf: &[u8]) -> Result<BinanceExchangeInfoSbe, SbeDec
         let _default_self_trade_prevention_mode = cursor.read_u8()?;
         let _allowed_self_trade_prevention_modes = cursor.read_u8()?;
         let _peg_instructions_allowed = cursor.read_u8()?;
+        cursor.advance(usize::from(symbols_block_len) - SYMBOL_BLOCK_LENGTH)?;
 
         let (_filters_block_len, filters_count) = cursor.read_group_header()?;
         let mut filters = BinanceSymbolFiltersSbe::default();
@@ -2261,6 +2263,49 @@ mod tests {
         assert!(trades.is_empty());
     }
 
+    /// Symbols group block length in schema 3:6.
+    const SYMBOL_BLOCK_LENGTH_V6: u16 = 22;
+
+    #[rstest]
+    fn test_decode_exchange_info_zecusdt_3_6_capture() {
+        // GET /api/v3/exchangeInfo?symbol=ZECUSDT with `X-MBX-SBE: 3:6`, captured 2026-11-13
+        let wire = include_bytes!("../../../test_data/spot/http_sbe/exchange_info_zecusdt_3_6.sbe");
+        assert_eq!(&wire[4..8], &[3, 0, 6, 0]); // schema 3, version 6
+
+        let info = decode_exchange_info(wire).unwrap();
+
+        assert_eq!(info.symbols.len(), 1);
+        let symbol = &info.symbols[0];
+        assert_eq!(symbol.symbol, "ZECUSDT");
+        assert_eq!(symbol.status, 0); // Trading
+        let filters = &symbol.filters;
+        assert_eq!(filters.price_filter.as_ref().unwrap().tick_size, 1_000_000); // 0.01
+        assert_eq!(filters.lot_size_filter.as_ref().unwrap().step_size, 100_000); // 0.001
+        assert_eq!(filters.notional_filters[0].min, Decimal::from(5));
+    }
+
+    #[rstest]
+    fn test_decode_exchange_info_rejects_short_symbol_block() {
+        let mut buf = create_header(
+            0,
+            EXCHANGE_INFO_TEMPLATE_ID,
+            SBE_SCHEMA_ID,
+            SBE_SCHEMA_VERSION,
+        )
+        .to_vec();
+        buf.extend_from_slice(&create_group_header(11, 0));
+        buf.extend_from_slice(&create_group_header(0, 0));
+        buf.extend_from_slice(&create_group_header(SYMBOL_BLOCK_LENGTH as u16 - 1, 1));
+
+        assert_eq!(
+            decode_exchange_info(&buf).unwrap_err(),
+            SbeDecodeError::InvalidBlockLength {
+                expected: 19,
+                actual: 18,
+            }
+        );
+    }
+
     #[rstest]
     fn test_decode_exchange_info_single_symbol() {
         let header = create_header(
@@ -2279,10 +2324,10 @@ mod tests {
         // Empty exchange_filters group
         buf.extend_from_slice(&create_group_header(0, 0));
 
-        // Symbols group: 1 symbol with block_length=19
-        buf.extend_from_slice(&create_group_header(SYMBOL_BLOCK_LENGTH as u16, 1));
+        // Symbols group: 1 symbol with the schema 3:6 block length
+        buf.extend_from_slice(&create_group_header(SYMBOL_BLOCK_LENGTH_V6, 1));
 
-        // Fixed block (19 bytes)
+        // Fixed block (22 bytes)
         buf.push(0); // status (Trading)
         buf.push(8); // base_asset_precision
         buf.push(8); // quote_asset_precision
@@ -2301,6 +2346,7 @@ mod tests {
         buf.push(0); // default_self_trade_prevention_mode
         buf.push(0); // allowed_self_trade_prevention_modes
         buf.push(0); // peg_instructions_allowed
+        buf.extend_from_slice(&[1, 0, 0]); // opo_allowed, market/limit quote notional limit (3:6)
 
         // Filters nested group: 0 filters (SBE binary filters are skipped)
         buf.extend_from_slice(&create_group_header(0, 0));
@@ -2404,7 +2450,7 @@ mod tests {
         buf.extend_from_slice(&create_group_header(0, 0));
 
         // Empty symbols group
-        buf.extend_from_slice(&create_group_header(SYMBOL_BLOCK_LENGTH as u16, 0));
+        buf.extend_from_slice(&create_group_header(SYMBOL_BLOCK_LENGTH_V6, 0));
 
         let info = decode_exchange_info(&buf).unwrap();
         assert!(info.symbols.is_empty());
@@ -2440,7 +2486,7 @@ mod tests {
         buf.extend_from_slice(&create_group_header(0, 0));
 
         // Symbols group: 2 symbols
-        buf.extend_from_slice(&create_group_header(SYMBOL_BLOCK_LENGTH as u16, 2));
+        buf.extend_from_slice(&create_group_header(SYMBOL_BLOCK_LENGTH_V6, 2));
 
         // Symbol 1: BTCUSDT
         buf.push(0); // status
@@ -2461,6 +2507,7 @@ mod tests {
         buf.push(0); // default_self_trade_prevention_mode
         buf.push(0); // allowed_self_trade_prevention_modes
         buf.push(0); // peg_instructions_allowed
+        buf.extend_from_slice(&[1, 0, 0]); // opo_allowed, market/limit quote notional limit (3:6)
         buf.extend_from_slice(&create_group_header(0, 0)); // No filters
         buf.extend_from_slice(&create_group_header(0, 0)); // No permission sets
         write_var_string(&mut buf, "BTCUSDT");
@@ -2486,6 +2533,7 @@ mod tests {
         buf.push(0); // default_self_trade_prevention_mode
         buf.push(0); // allowed_self_trade_prevention_modes
         buf.push(0); // peg_instructions_allowed
+        buf.extend_from_slice(&[1, 0, 0]); // opo_allowed, market/limit quote notional limit (3:6)
         buf.extend_from_slice(&create_group_header(0, 0)); // No filters
         buf.extend_from_slice(&create_group_header(0, 0)); // No permission sets
         write_var_string(&mut buf, "ETHUSDT");
